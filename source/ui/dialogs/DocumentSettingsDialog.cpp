@@ -1,4 +1,5 @@
 #include "DocumentSettingsDialog.h"
+#include "../widgets/LengthSpinBox.h"
 #include "../../MainWindow.h"
 #include "../../core/Document.h"
 #include "../../core/Page.h"
@@ -219,10 +220,9 @@ void DocumentSettingsDialog::createPageTab()
     gridSpacingLabel->setMinimumWidth(120);
     gridSpacingLayout->addWidget(gridSpacingLabel);
 
-    gridSpacingSpin = new QSpinBox(pageTab);
+    gridSpacingSpin = new LengthSpinBox(pageTab);
     gridSpacingSpin->setRange(8, 128);
     gridSpacingSpin->setSingleStep(8);
-    gridSpacingSpin->setSuffix(" px");
     gridSpacingSpin->setValue(32);
     gridSpacingLayout->addWidget(gridSpacingSpin);
     gridSpacingLayout->addStretch();
@@ -234,10 +234,9 @@ void DocumentSettingsDialog::createPageTab()
     lineSpacingLabel->setMinimumWidth(120);
     lineSpacingLayout->addWidget(lineSpacingLabel);
 
-    lineSpacingSpin = new QSpinBox(pageTab);
+    lineSpacingSpin = new LengthSpinBox(pageTab);
     lineSpacingSpin->setRange(8, 128);
     lineSpacingSpin->setSingleStep(8);
-    lineSpacingSpin->setSuffix(" px");
     lineSpacingSpin->setValue(32);
     lineSpacingLayout->addWidget(lineSpacingSpin);
     lineSpacingLayout->addStretch();
@@ -284,9 +283,7 @@ void DocumentSettingsDialog::onPageSizePresetChanged(int index)
     if (index < 0 || !pageSizeCombo || !pageSizeDimLabel) return;
 
     QSizeF size = pageSizeCombo->itemData(index).toSizeF();
-    pageSizeDimLabel->setText(tr("%1 × %2 px (at 96 DPI)")
-        .arg(static_cast<int>(size.width()))
-        .arg(static_cast<int>(size.height())));
+    pageSizeDimLabel->setText(LengthUnit::sizeText(size.width(), size.height()));
 }
 
 // ============================================================================
@@ -549,9 +546,7 @@ void DocumentSettingsDialog::loadSettings()
             // select it, so applying the dialog does NOT silently overwrite the
             // document's page size with the first preset.
             pageSizeCombo->insertItem(0,
-                tr("Custom (%1 × %2 px)")
-                    .arg(static_cast<int>(current.width()))
-                    .arg(static_cast<int>(current.height())),
+                tr("Custom (%1)").arg(LengthUnit::sizeText(current.width(), current.height())),
                 current);
             pageSizeCombo->setCurrentIndex(0);
         }

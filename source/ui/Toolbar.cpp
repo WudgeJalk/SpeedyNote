@@ -9,6 +9,9 @@
 #include "subtoolbars/OcrSubToolbar.h"
 
 #include <QHBoxLayout>
+#include <QSettings>
+#include <algorithm>
+#include <climits>
 #include <QGuiApplication>
 #include <QMouseEvent>
 #include <QPalette>
@@ -185,9 +188,125 @@ void Toolbar::setupUi()
     connect(m_pagerNextButton, &QPushButton::clicked,
             this, [this]() { setToolbarPage(1); });
 
-    applyPageVisibility();
+    m_allPage1Widgets = m_page1Widgets;
+    m_allPage2Widgets = m_page2Widgets;
+    applyButtonLayout(buttonOrder(), hiddenButtons());  // Ends with applyPageVisibility()
 
     installSwipeFilter(this);
+}
+
+// ===== Buttons the user can hide =====
+
+QVector<QPair<QString, QWidget*>> Toolbar::customizableButtons() const
+{
+    return {
+        { QStringLiteral("pen"),           m_penExpandable },
+        { QStringLiteral("marker"),        m_markerExpandable },
+        { QStringLiteral("eraser"),        m_eraserExpandable },
+        { QStringLiteral("straight_line"), m_straightLineButton },
+        { QStringLiteral("lasso"),         m_lassoButton },
+        { QStringLiteral("image"),         m_objectImageButton },
+        { QStringLiteral("link"),          m_objectLinkButton },
+        { QStringLiteral("text"),          m_objectTextButton },
+        { QStringLiteral("highlighter"),   m_textExpandable },
+        { QStringLiteral("ocr"),           m_ocrExpandable },
+        { QStringLiteral("pan"),           m_panButton },
+        { QStringLiteral("undo"),          m_undoButton },
+        { QStringLiteral("redo"),          m_redoButton },
+        { QStringLiteral("touch"),         m_touchGestureButton },
+    };
+}
+
+QVector<Toolbar::ButtonChoice> Toolbar::buttonChoices() const
+{
+    // In the saved order; a button the saved order does not know goes last.
+    auto all = customizableButtons();
+    const QStringList order = buttonOrder();
+    std::stable_sort(all.begin(), all.end(), [&order](const auto& a, const auto& b) {
+        const int ia = order.indexOf(a.first), ib = order.indexOf(b.first);
+        return (ia < 0 ? INT_MAX : ia) < (ib < 0 ? INT_MAX : ib);
+    });
+
+    QVector<ButtonChoice> choices;
+    for (const auto& entry : all) {
+        // The tooltip is the button's translated name; keep its first line.
+        auto* expandable = qobject_cast<ExpandableToolButton*>(entry.second);
+        const QAbstractButton* button = expandable
+            ? static_cast<QAbstractButton*>(expandable->toolButton())
+            : qobject_cast<QAbstractButton*>(entry.second);
+        const QString tip = button ? button->toolTip() : entry.second->toolTip();
+        choices.append({ entry.first, tip.section(QLatin1Char('\n'), 0, 0),
+                         button ? button->icon() : QIcon() });
+    }
+    return choices;
+}
+
+QStringList Toolbar::hiddenButtons()
+{
+    return QSettings("SpeedyNote", "App").value("toolbar/hiddenButtons").toStringList();
+}
+
+QStringList Toolbar::buttonOrder()
+{
+    return QSettings("SpeedyNote", "App").value("toolbar/buttonOrder").toStringList();
+}
+
+void Toolbar::setButtonLayout(const QStringList& order, const QStringList& hidden)
+{
+    QSettings settings("SpeedyNote", "App");
+    settings.setValue("toolbar/buttonOrder", order);
+    settings.setValue("toolbar/hiddenButtons", hidden);
+    applyButtonLayout(order, hidden);
+}
+
+void Toolbar::applyButtonLayout(const QStringList& order, const QStringList& hidden)
+{
+    auto* mainLayout = qobject_cast<QHBoxLayout*>(layout());
+    if (!mainLayout) return;
+    const auto all = customizableButtons();
+
+    // The two page lists drive visibility and the width measured for paging.
+    // Built-in order: the lists as setupUi made them (with the two gaps).
+    // User order: the buttons in that order, no gaps, split at the same count.
+    QVector<QWidget*> page1 = m_allPage1Widgets;
+    QVector<QWidget*> page2 = m_allPage2Widgets;
+    if (!order.isEmpty()) {
+        QVector<QWidget*> ordered;
+        for (const QString& id : order) {
+            for (const auto& entry : all) {
+                if (entry.first == id && !ordered.contains(entry.second)) ordered << entry.second;
+            }
+        }
+        for (const auto& entry : all) {
+            if (!ordered.contains(entry.second)) ordered << entry.second;
+        }
+        page1 = ordered.mid(0, m_allPage1Widgets.size());
+        page2 = ordered.mid(m_allPage1Widgets.size());
+    }
+
+    // Put the row back in that order. It sits after the back pager and the
+    // left stretch, so it starts at layout index 2.
+    for (QWidget* widget : m_allPage1Widgets + m_allPage2Widgets) {
+        mainLayout->removeWidget(widget);
+        widget->hide();
+    }
+    int at = 2;
+    for (QWidget* widget : page1 + page2) mainLayout->insertWidget(at++, widget);
+
+    for (const auto& entry : all) {
+        if (!hidden.contains(entry.first)) continue;
+        page1.removeAll(entry.second);
+        page2.removeAll(entry.second);
+    }
+    m_page1Widgets = page1;
+    m_page2Widgets = page2;
+    applyPageVisibility();
+    // Not during construction: the width is still 0 then, which would read as
+    // "too narrow" and switch the paging on. The first resize measures it.
+    if (isVisible()) {
+        updatePagination();
+        updateGeometry();
+    }
 }
 
 QWidget* Toolbar::createGapWidget(int width)

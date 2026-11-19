@@ -18,6 +18,8 @@
 #include "ui/subtoolbars/HighlighterSubToolbar.h"
 #include "ui/subtoolbars/EraserSubToolbar.h"
 #include "ui/actionbars/ActionBarContainer.h"
+#include "ui/QuickBar.h"
+#include <QCursor>
 #include "ui/actionbars/LassoActionBar.h"
 #include "ui/actionbars/ObjectSelectActionBar.h"
 #include "ui/actionbars/PagePanelActionBar.h"
@@ -216,6 +218,13 @@ MainWindow::MainWindow(QWidget *parent)
     // from updateWindowTitle() at the end of the ctor and on every active-
     // viewport / current-tab change thereafter.
     setWindowTitle(QStringLiteral("SpeedyNote"));
+
+#if defined(Q_OS_WIN) && QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
+    // One header, not a grey Windows title bar above ours: the window keeps
+    // its native buttons (and snap layouts), but the title bar has no
+    // background of its own, so paintEvent() can run our bar colour under it.
+    setWindowFlags(windowFlags() | Qt::ExpandedClientAreaHint | Qt::NoTitleBarBackgroundHint);
+#endif
 
     // Before anything can realise this window: on HarmonyOS it has to be a
     // sub-window of the Launcher rather than an ability instance of its own, or
@@ -1325,6 +1334,7 @@ void MainWindow::setupUi() {
     mainLayout->addWidget(contentWidget, 1);
 
     setCentralWidget(container);
+    applyToolbarPosition();
 
     QString tempDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/temp_session";
     QDir dir(tempDir);
@@ -1809,6 +1819,13 @@ void MainWindow::wireQActionDispatchers()
     // SPEEDYNOTE_DEBUG, in MacMenuBar::populateViewMenu (per QA Q4.3.a).
     wire("view.debug_overlay", [](MainWindow* w){ w->toggleDebugOverlay(); });
     wire("view.perf_hud",      [](MainWindow* w){ w->togglePerfHud(); });
+    wire("view.quick_bar",     [](MainWindow* w){
+        // "Q" is a letter: it must still type a Q in a text box.
+        QWidget* f = QApplication::focusWidget();
+        if (qobject_cast<QLineEdit*>(f) || qobject_cast<QTextEdit*>(f)
+            || qobject_cast<QPlainTextEdit*>(f)) return;
+        w->showQuickBar();
+    });
 
     // ----- OCR (MAC.6) -----
     // Each handler delegates to OcrSubToolbar's keyboard-shortcut entry points
@@ -5686,7 +5703,53 @@ void MainWindow::loadUserSettings() {
 bool MainWindow::isPalmRejectionEnabled() const {
     return m_palmRejectionEnabled;
 }
+#endif
 
+void MainWindow::showQuickBar()
+{
+    if (!m_canvasContainer || !m_toolbar) return;
+
+    if (!m_quickBar) {
+        m_quickBar = new QuickBar(m_canvasContainer);
+        connect(m_quickBar, &QuickBar::commandPicked, this, [](const QString& id) {
+            if (QAction* action = ShortcutManager::instance()->action(id)) action->trigger();
+        });
+        connect(m_quickBar, &QuickBar::colorPicked, this, [this](int index) {
+            // These are the pen's colours, so picking one also takes the pen.
+            DocumentViewport* vp = currentViewport();
+            if (vp && vp->currentTool() != ToolType::Pen) vp->setCurrentTool(ToolType::Pen);
+            if (auto* st = m_toolbar->penSubToolbar()) st->pickColorPreset(index);
+        });
+        connect(m_quickBar, &QuickBar::straightLinePicked, this, [this]() {
+            DocumentViewport* vp = currentViewport();
+            if (!vp) return;
+            // Straight lines only exist for the pen and the marker.
+            if (vp->currentTool() != ToolType::Pen && vp->currentTool() != ToolType::Marker) {
+                vp->setCurrentTool(ToolType::Pen);
+            }
+            vp->setStraightLineMode(!vp->straightLineMode());
+        });
+    }
+
+    if (m_quickBar->isVisible()) {  // The same command again closes it
+        m_quickBar->hide();
+        return;
+    }
+
+    QList<QColor> colors;
+    int selected = -1;
+    if (auto* st = m_toolbar->penSubToolbar()) {
+        for (int i = 0; i < 3; ++i) colors << st->presetColor(i);
+        selected = st->selectedColorPreset();
+    }
+
+    // A hovering pen moves the system cursor, so this is the pen tip too.
+    QPoint tip = m_canvasContainer->mapFromGlobal(QCursor::pos());
+    if (!m_canvasContainer->rect().contains(tip)) tip = m_canvasContainer->rect().center();
+    m_quickBar->popupAt(tip, colors, selected, isDarkMode());
+}
+
+#ifdef Q_OS_LINUX
 void MainWindow::setPalmRejectionEnabled(bool enabled) {
     m_palmRejectionEnabled = enabled;
     
@@ -6403,6 +6466,53 @@ void MainWindow::setScrollBarHorizontalOnBottom(bool onBottom)
 bool MainWindow::scrollBarsPinned() const
 {
     return m_splitViewManager && m_splitViewManager->scrollBarsPinned();
+}
+
+void MainWindow::paintEvent(QPaintEvent *event)
+{
+    QMainWindow::paintEvent(event);
+#if defined(Q_OS_WIN) && QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
+    // The strip under the (background-less) Windows title bar takes the same
+    // colour as the navigation bar right below it, so the two read as one.
+    const int top = windowHandle() ? windowHandle()->safeAreaMargins().top() : 0;
+    if (top > 0) {
+        QPainter painter(this);
+        painter.fillRect(0, 0, width(), top, getAccentColor());
+    }
+#endif
+}
+
+void MainWindow::setToolbarPosition(const QString &position)
+{
+    QSettings("SpeedyNote", "App").setValue("toolbar/position", position);
+    applyToolbarPosition();
+}
+
+void MainWindow::applyToolbarPosition()
+{
+    auto *mainLayout = centralWidget() ? qobject_cast<QVBoxLayout*>(centralWidget()->layout()) : nullptr;
+    if (!mainLayout || !m_toolbar || !m_splitViewManager) return;
+
+    // "top" (default), "bottom" or "hidden". A hidden toolbar leaves the tools
+    // on their keys, the pen buttons and the quick bar.
+    const QString position = QSettings("SpeedyNote", "App").value("toolbar/position", "top").toString();
+    mainLayout->removeWidget(m_toolbar);
+    if (position == QLatin1String("bottom")) {
+        mainLayout->addWidget(m_toolbar);  // After the content
+    } else {
+        mainLayout->insertWidget(mainLayout->indexOf(m_splitViewManager->tabBarContainer()) + 1, m_toolbar);
+    }
+    m_toolbar->setVisible(position != QLatin1String("hidden"));
+}
+
+bool MainWindow::scrollBarsHidden() const
+{
+    return m_splitViewManager && m_splitViewManager->scrollBarsHidden();
+}
+
+void MainWindow::setScrollBarsHidden(bool hidden)
+{
+    if (m_splitViewManager) m_splitViewManager->setScrollBarsHidden(hidden);
 }
 
 void MainWindow::setScrollBarsPinned(bool pinned)

@@ -285,6 +285,12 @@ void PenSubToolbar::clearTabState(int tabIndex)
     m_tabStates.remove(tabIndex);
 }
 
+QColor PenSubToolbar::presetColor(int index) const
+{
+    if (index < 0 || index >= NUM_PRESETS) return QColor();
+    return m_colorButtons[index]->color();
+}
+
 void PenSubToolbar::cycleColor()
 {
     int start = qMax(0, m_selectedColorIndex);

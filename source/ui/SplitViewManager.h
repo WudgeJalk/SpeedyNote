@@ -145,6 +145,9 @@ public:
      */
     void setScrollBarsPinned(bool pinned);
     bool scrollBarsPinned() const { return m_scrollBarsPinned; }
+    /// Never show the scroll bars (nor the page wheel that floats with them).
+    void setScrollBarsHidden(bool hidden);
+    bool scrollBarsHidden() const { return m_scrollBarsHidden; }
 
     /**
      * @brief Choose which edge each overlay bar docks against (Plan SB4).
@@ -362,6 +365,7 @@ private:
     // Enhanced scroll bars (SB1), indexed by Pane (Left=0, Right=1)
     PaneBars m_paneBars[2];
     bool m_scrollBarsPinned = true;
+    bool m_scrollBarsHidden = false;  ///< User turned the scroll bars off: never show them
 
     // Docked edges (SB4): page-axis bar = Left/Right, cross-axis bar = Top/Bottom.
     ViewportScrollBar::DockEdge m_vEdge = ViewportScrollBar::DockEdge::Left;

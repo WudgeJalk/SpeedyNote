@@ -206,6 +206,7 @@ void ShortcutManager::registerDefaults()
     registerAction("view.fullscreen", "F11", tr("Toggle Fullscreen"), tr("View"));
     registerAction("view.debug_overlay", "F12", tr("Toggle Debug Overlay"), tr("View"));
     registerAction("view.perf_hud", "F10", tr("Toggle Performance HUD"), tr("View"));
+    registerAction("view.quick_bar", "Q", tr("Quick Bar (tools and colors at the pointer)"), tr("View"));
     registerAction("view.auto_layout", "Ctrl+Shift+2", tr("Toggle Auto Layout"), tr("View"));
     registerAction("view.left_sidebar", "Ctrl+Shift+L", tr("Toggle Left Sidebar"), tr("View"));
     registerAction("view.right_sidebar", "Ctrl+Shift+M", tr("Toggle Right Sidebar"), tr("View"));

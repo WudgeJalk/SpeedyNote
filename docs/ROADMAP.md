@@ -1,0 +1,189 @@
+# Roadmap
+
+The list of ideas for this version of SpeedyNote, and the order to do them.
+Written on 2026-11-19. Update the "Status" column when a step is done.
+
+## The vision
+
+A note app for students, where each student shapes the app to their own way of working.
+
+- **Your notes are yours.** No subscription. No account. Notebooks are normal folders on your disk.
+- **Freaking fast.** No web-app feeling. It must feel instant on an old tablet.
+- **The hand stays on the page.** To change colour, tool or line type, you do not reach for the top of the screen.
+- **Each student is different.** Layout, pen buttons and notebook structure are choices, not fixed.
+- **Settings you can understand.** Each setting has a clear name and one line that says what it does. No hunt through menu 1, menu 2, menu 3.
+- **Easy in, easy out.** To import a PDF or to change old notes is never a struggle.
+
+What is wrong with the others (the user's words, 2026-11-19):
+- OneNote: good notebooks and sections, but it was the only choice, and the pen workflow is slow.
+- GoodNotes on Windows: feels good, but subscription, you own nothing, laggy, feels like a web app.
+- All of them: settings are too few, or impossible to understand.
+
+## The four rules
+
+1. **It must stay fast** on old computers and old tablets. We keep C++ and Qt Widgets.
+2. **Old notebooks must still open.** Each new thing saved in a file is optional, with a default.
+3. **The user decides.** Each new feature comes with its settings. Nothing is fixed if it can be a choice.
+4. **No feature needs a special pen.** Each pen shortcut also has a way with a finger, a mouse or a key. Not every tablet has a side button.
+
+## What the app can already do
+
+Checked in the code on 2026-11-19.
+
+| Idea | Already there? | Where |
+|---|---|---|
+| Eraser that deletes the whole line | Yes (`Normal` mode). The user tested it: it works. | `source/core/DocumentViewport.h:415` |
+| Eraser for a part, eraser with a lasso | Yes (`Partial`, `Lasso`, `LassoPartial`). | same |
+| Straight lines | Yes, with a toolbar button. | `source/core/DocumentViewport.h:770` |
+| Rotate and resize a selection | Yes, for lasso selections. | `LassoSelection`, `source/core/DocumentViewport.h:3166` |
+| Lined pages and squared pages | Yes (`Lines`, `Grid`). | `source/core/Page.h:54` |
+| Back-end eraser of the pen | Yes. | `source/core/DocumentViewport.cpp:5978` |
+| List of app commands that a button can call | Yes, about 90, made for the keyboard. | `source/core/ShortcutManager.cpp:112` |
+| Endless paper | Yes. "Edgeless canvas" mode. The paper is cut in tiles and only the tiles on screen are used, so it is built not to lag. To test with a big canvas. | `TileCoord`, `renderEdgelessMode()` in `source/core/DocumentViewport.h` |
+| Paste images | Yes. | `source/objects/ImageObject.h` |
+| Links | Yes. Link objects with 3 slots. To check: web links. | `source/objects/LinkObject.h` |
+| Typed text boxes | Yes. | `source/objects/TextBoxObject.h` |
+| Objects you move, resize and lock | Yes. Each object has a `locked` flag. | `source/objects/InsertedObject.h:41` |
+| More than one PDF in a notebook | Partly. A document keeps a list of PDF sources. To check: can the user insert one between two pages? | `PdfSource`, `source/core/Document.h:117` |
+| Notebooks are folders that you own | Yes. A notebook is a `.snb` folder on disk. | `source/core/NotebookLibrary.h` |
+| Free to share | Yes. The license is GPL v3: you can share your version, and you must share its source code too. | `LICENSE` |
+
+## What is missing
+
+| Idea | Missing part |
+|---|---|
+| Pen side button and top button | The app reads the side button and then ignores it (`source/core/DocumentViewport.cpp:6010`). |
+| Tools near the hand | The toolbar is fixed at the top (`source/MainWindow.cpp:1202`). The action bar is fixed on the left (`source/ui/actionbars/ActionBarContainer.h:20`). |
+| Laser pointer | Nothing in the code. |
+| Ruler | Nothing in the code. |
+| Auto shapes | No shape recognition in the code. |
+| Fountain pen, ball pen, brush pen | A stroke stores only points, colour and thickness (`source/strokes/VectorStroke.h:33`). |
+| Dotted and dashed lines | Same cause. A stroke has no line style. |
+| Notebook > section > sub-section, like OneNote | Only "starred" notebooks and one level of folders (`source/core/NotebookLibrary.h:28`). |
+| Notebook covers, more page designs | Only `Grid` and `Lines`. No covers. |
+| Clear settings | One dialog with tabs (`source/ControlPanelDialog.cpp`). Not searched, few descriptions. |
+| Modern look | Styles are set in 55 code files (416 calls), plus 8 files in `resources/styles/`. |
+
+## The steps
+
+Size: S = about one sitting. M = a few sittings. L = many sittings.
+
+### Part A - The hand stays on the page
+
+| # | Step | Size | Status |
+|---|---|---|---|
+| 0 | Build tools, build, run the tests. | S | Done 2026-11-19. Build: `.\compile.ps1 -norun`. Tests need `.\compile.ps1 -debug -norun`, then `build\speedynote.exe --test-viewport-unit` (also `page`, `document`, `notebooklibrary`, `linkobject`, `textboxobject`, `actionbars`, `buttons`, `pdfexporter`). All 9 passed. |
+| A1 | **Pen buttons.** Side button and back end. Each gesture (press, press twice, hold while writing, hold in the air) can call: any app command, a tool while held, or "switch tool then back". Settings table in the Stylus tab. | S | Code written 2026-11-19, tests pass (`--test-penbindings`). Tried by the user on the Surface: the lasso hold and the press-once toggle work. Fixed after that test: the toggle acted late, and the top bar was white on white with a light Windows accent colour. |
+| A2 | **Quick bar at the pen tip.** Hold the side button (or long-press with a finger, or a key): a small bar opens where the pen is. It holds what you change often: favourite colours, pen / highlighter / eraser, straight line, line type. You choose what is in it. Release or tap to pick. | M | First version written 2026-11-19 (`source/ui/QuickBar.cpp`). Opens with a side button hold in the air, or the Q key. Holds 5 tools, straight line, and the 3 pen colours. **Not yet tried with a real pen.** Still to do: you choose its content, more colours, line width, open with a long finger press. |
+| A3 | **Bar where you want.** Main toolbar: top, bottom, left, right, or hidden. Action bar: left or right. Hide the buttons you do not use. | M | Partly done 2026-11-19: you can hide toolbar buttons (Settings > Tools > Toolbar buttons) and turn the scroll bars off for good (Settings > Theme). Also done 2026-11-19: an icon editor for the toolbar (drag to reorder, double-tap to hide; Settings > Tools) and toolbar position top / bottom / hidden. Still to do: toolbar on the left or right edge, move the action bar. |
+| A4 | **Top click and vibration** of the Slim Pen 2. Windows only. | M | Needs A1 |
+| A5 | **Profiles.** Save a full setup (bars + pen buttons + quick bar) under a name. Example: "Lecture", "Exercise", "Reading". | S-M | Needs A1-A3 |
+
+#### A1 device test (to do on the Surface with the Slim Pen 2)
+
+Settings are in Settings (Ctrl+K) > Stylus > Pen Buttons. Code: `source/core/PenBindings.h`.
+
+1. Draw with the tip. Erase with the back end. Both must work as before.
+2. Hold the side button and draw a loop around some ink: it must be a lasso (the default). Move the selection. Tap outside: the pen tool must come back.
+3. Set "press once" to "Switch to Eraser, and back the next time". Press the side button with the tip near the screen but not on it. The toolbar must show the eraser. Press again: back to the pen.
+4. Set "press twice" to Undo. Draw a line, press twice in the air: the line must go.
+5. Set "hold in the air" to any command. Hold the button 0.5 s with the tip near the screen.
+6. Set "hold while you write" to Eraser. Hold and rub over ink.
+
+If 2 and 6 work but 3, 4, 5 do nothing: Windows does not tell the app about the side button in the air on this device. Then the "in the air" gestures need another way (A4).
+
+Known limits:
+- The back end has one setting only (what it does on the screen). Press / press twice / hold for the top of the pen is the Bluetooth click, step A4.
+- "Hold in the air" also fires if you hold the button for 0.4 s and then write.
+- A command from the pen acts on the active pane. In split view, that can be a different pane from the one under the pen.
+- Linux, macOS, Android, iPad and the Qt5 Windows build: the code is there, with no default on the side button. Not tested.
+
+### Part B - Tools for class (engineering first)
+
+| # | Step | Size | Status |
+|---|---|---|---|
+| B1 | **Laser pointer.** A trail that fades, and is never saved. For when you explain to a friend. | S | |
+| B2 | **Ruler.** A ruler on the page that you move and turn. The pen follows its edge. | M | |
+| B3 | **Stroke style in the file.** Two optional fields in a stroke: pen type and line style. Opens B4 and B5. | S | |
+| B4 | **Dotted and dashed lines.** | S | Needs B3 |
+| B5 | **Pen types.** Ball pen, fountain pen, brush pen, with sizes. | M | Needs B3 |
+| B6 | **Shapes, two ways.** (1) Hold the pen still at the end of a stroke: that one stroke becomes clean. (2) **Shape mode** (a switch): each stroke is cleaned when the pen leaves the screen. The stroke is cut where the pen stops or turns, each part becomes a straight line, and the shape closes if the end is near the start. It then becomes a line, triangle, rectangle, polygon, circle or ellipse. | M-L | |
+| B7 | **Shape handles.** Rotate and resize a shape with 4 corner handles. Reuse the lasso handles. | S-M | Needs B6 |
+
+**Pen rule for all of Part B: four independent choices.** Colour, width, pen type (pencil, ball pen, fountain pen, brush pen) and line type (solid, dotted, dashed). A change to one never changes the other three.
+
+### Part C - Your library
+
+| # | Step | Size | Status |
+|---|---|---|---|
+| C1 | **Notebook > section > sub-section.** Like OneNote, but the student chooses the levels. Example: Year > Class > Theory / Exercises / Draft / Summary. On disk it stays normal folders. | M-L | |
+| C2 | **Structure templates.** Make a new class with its sections in one action. | S | Needs C1 |
+| C3 | **PDF between pages.** Drop a PDF on a section, or between two pages of a notebook. Example: an A4 PDF between two A4 note pages. | M | To check: what works today |
+| C3b | **PDF on a page.** Drop a PDF on top of a page, like an image. You move it, resize it and write on it. | M | |
+| C4 | **Change old notes easily.** Move, copy and reorder pages between notebooks. | M | To check: what works today |
+| C5 | **Other files next to the notes.** Link or keep files in a section and open them from the app. | M | |
+| C6 | **Page designs and notebook covers.** Dots, Cornell, planner. Covers so a notebook looks like a book. | M | |
+
+### Part E - Hoverbox
+
+A Hoverbox is a post-it on the page. You move it, resize it and lock it. It holds one or more blocks.
+It is built on the object system that exists (`source/objects/InsertedObject.h`), so move, resize, lock and undo come with it.
+
+| # | Step | Size | Status |
+|---|---|---|---|
+| E1 | **The box.** A post-it with a colour. Move, resize, lock. Holds a list of blocks. First block type: plain text (reuse the text box). | M | |
+| E2 | **Code block.** Paste code: it becomes an editable block with the look of the user's FancyCode LaTeX package: rounded box, JetBrains Mono font, line numbers, coloured syntax, 8 background colours (sand, coffee, lilac, moss, ink, midnight, terracotta, paper). Reference: `C:\Users\sebas\Desktop\Fourre tout\Latex\FancyCode\FC\fancycode.sty`. The font license (OFL) allows us to ship it. | M | Needs E1 |
+| E3 | **Web link block and image block.** | S | Needs E1 |
+| E4 | **Calendar event block.** Drop an `.ics` file: the box shows the title, date, time and place. | S | Needs E1 |
+| E5 | **Pen block.** Handwriting that belongs to the box and moves with it. | M-L | Needs E1. Hard part: today a stroke belongs to a page layer, not to an object. |
+| E6 | **Math block (LaTeX).** Type an equation, see it drawn. | L | Needs E1. Hard part: Qt cannot draw LaTeX. We must pick a small math library or use a LaTeX program on the computer. To research first. |
+| E7 | **More block types.** Search what people ask for most in note apps, then choose. | - | |
+
+Later idea for E2: "copy as LaTeX" that gives a ready `\begin{FancyCode}` block.
+
+### Part D - Clear and good-looking
+
+| # | Step | Size | Status |
+|---|---|---|---|
+| D1 | **Settings you can understand.** One settings page with a search box, good icons and good readability. Each setting: a clear name and one line of help. The user asked for this again on 2026-11-19: today an option is hard to find. Also to fix here: the Background tab shows the app defaults, not the paper of the open notebook. | M-L | Next big step after the Part A tests |
+| D0 | **Window bar like a native app (OneNote is the model).** The user's words, 2026-11-19: OneNote has the perfect top (logo, quick tools, minimise / maximise / close in one integrated bar); GoodNotes looks like a cheap Chromium web app; SpeedyNote looked the cheapest. | M | Step 1 done 2026-11-19: the Windows title bar has no grey band of its own, our bar colour runs under it, and the native buttons stay (`Qt::ExpandedClientAreaHint`, Qt 6.9+, in `MainWindow`). Step 2 to do: move our buttons (back, sidebar, save, title) INTO the title row, so there is one row, not two. Hard part: Windows treats that row as "drag the window", so clicks on our buttons need a hit-test rule. |
+| D2 | **Modern look.** First all colours and sizes in one place. Then one screen at a time. | L | |
+
+## How the screen is built today
+
+Checked in the code on 2026-11-19.
+
+- Three bars are stacked at the top, in a fixed order: navigation bar, tab bar, toolbar (`source/MainWindow.cpp:1123`, `:1196`, `:1202`).
+- The toolbar is one horizontal row with a fixed height. Its buttons are added in a fixed order (`source/ui/Toolbar.cpp:29`).
+- The bar on the side is the "action bar". It shows copy, cut, delete and similar actions when a lasso or an object is selected. It is fixed 24 px from the left edge (`source/ui/actionbars/ActionBarContainer.h:20`).
+
+## Why this order
+
+- Part A first: it is the daily pain, and A1 must be tested on the real Surface before A2 is built on it.
+- Part B next: these are the tools used in every class. B1 is small and gives a quick win.
+- Part C after: it is the biggest change to how notebooks are stored, so it needs the most care.
+- Part D last and in small parts: it touches the most files. But rule 3 means each step in A, B and C already brings its own clear settings.
+
+## Risks to remember
+
+- **Speed.** Pen types, dashed lines and the quick bar add work while you draw. Measure on an old device before and after. The app has a performance display (F10).
+- **File format.** B3, C1 and C6 change what is saved. Old files must open. New files opened in the original SpeedyNote will lose the new parts.
+- **The original project.** This repo follows another author's work. Big changes (A3, C1, D2) make later updates from that author harder to merge.
+- **The big file.** `source/core/DocumentViewport.cpp` has 19,383 lines and 513 methods. New features go in new small files when possible.
+- **Pen hardware.** The side button works only near the screen. Windows can keep the top click for itself. Both must be checked on the real device.
+
+## Done outside the steps
+
+- 2026-11-19: One unit setting for the whole app: millimetres or pixels (Settings > Page > Units, code in `source/ui/widgets/LengthSpinBox.h`). It covers pen and eraser width, grid and line spacing, page size and scroll speed. A page unit is 1/96 inch, so 1 unit = 0.2646 mm. Only the display changed, not the files. Limit: grid and line spacing are stored as whole units, so "5 mm" is kept as 5.03 mm. An exact 5 mm grid needs a change in the page format.
+- 2026-11-19: Icons replaced by Lucide icons (https://lucide.dev, ISC license, text in `resources/icons/LUCIDE_LICENSE.txt`). 73 icons. To run again or change an icon: `resources/icons/lucide-icons.ps1` (needs `rsvg-convert` from MSYS2). Not replaced, no good match: `benchmark`, `dial`, `preset`, `savepreset`, `selection_ocr`, `selection_pdf`.
+- 2026-11-19: Fixed: a black pen colour and its width dots were invisible on the dark toolbar.
+- 2026-11-19: Fixed: pressing OK in the settings repainted every page of the open notebook with the app's default paper.
+- 2026-11-19: Fixed: the top bar was white on white with a light Windows accent colour.
+
+## Ideas for later
+
+Add new ideas here so they are not lost.
+
+- **Connect an AI (LLM) with your own API key.** A settings screen where you choose a service (Claude, Gemini, OpenAI, or any other with a compatible address) and paste your key. The key stays on your computer. To decide later: what the AI does in the app (explain a page, summarise notes, turn handwriting into LaTeX, answer questions about a PDF). Rule 1 applies: no AI code may slow the pen.
+- Quick bar: you choose its content, more colours, line width, open with a long finger press.
+- Toolbar: when undo and redo are both hidden, a small empty gap stays where they were.

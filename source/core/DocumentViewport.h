@@ -28,6 +28,7 @@ enum class TouchGestureMode {
 #include "Document.h"
 #include "Page.h"
 #include "ToolType.h"
+#include "PenBindings.h"
 #include "ViewportPerfMonitor.h"
 #include "../objects/HighlightRegion.h"
 #include "../objects/TextBoxObject.h"
@@ -3793,6 +3794,28 @@ private:
     bool m_hardwareEraserActive = false; ///< True when stylus eraser end is being used
     bool m_pointerInViewport = false;   ///< True when pointer is hovering inside viewport (for eraser cursor)
     QTimer* m_tabletHoverTimer = nullptr; ///< Timer to detect when tablet stylus leaves (no events = left)
+
+    // ===== Pen buttons (see PenBindings.h) =====
+    PenGestures m_penGestures;                ///< Side button taps and holds
+    QTimer* m_penGestureTimer = nullptr;      ///< Runs only while a tap or a hold in the air is pending
+    bool m_penSideDown = false;               ///< Side button state at the last tablet event
+    bool m_penLastContact = false;            ///< Tip was on the screen at the last tablet event
+    bool m_penContactSideEraser = false;      ///< This contact erases: the side button was held at press
+    ToolType m_penToggleReturnTool = ToolType::Pen;  ///< Where a "toggle" binding goes back to
+    bool m_penHoldActive = false;             ///< A "hold" binding switched the tool
+    ToolType m_penHoldTool = ToolType::Pen;   ///< The tool it switched to
+    ToolType m_penHoldReturnTool = ToolType::Pen;    ///< The tool to give back
+    bool m_penHoldStraightLine = false;       ///< Straight line mode to give back (a lasso switches it off)
+
+    /// Read the side button from a tablet event and run any finished gesture.
+    /// @return true if the tip is on the screen.
+    bool updatePenButtons(QTabletEvent* event);
+    void runPenGesture(PenGestures::Fired fired);
+    /// Apply the "hold" bindings to a stylus event: may switch the tool at
+    /// press, and decides whether this contact erases.
+    void applyPenBindings(PointerEvent& pe);
+    /// Give back the tool a "hold" binding replaced, unless its selection is still in use.
+    void restorePenHoldTool();
 
     // Re-entrancy guard for modal dialogs opened from canvas press handlers.
     // On ChromeOS Crostini and KDE Plasma 6 Wayland, QTabletEvents leak into

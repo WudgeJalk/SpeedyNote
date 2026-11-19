@@ -571,6 +571,7 @@ static void applyAndroidFonts(QApplication& app)
 #include "core/NotebookLibraryTests.h"
 #include "core/SandboxPdfOwnershipTests.h"
 #include "core/DocumentViewportTests.h"
+#include "core/PenBindingsTests.h"
 #include "ui/ToolbarButtonTests.h"
 #include "objects/LinkObjectTests.h"
 #include "objects/TextBoxObjectTests.h"
@@ -958,6 +959,8 @@ static int runTests(const QString& testType)
         success = SandboxPdfOwnershipTests::runAllTests();
     } else if (testType == "viewport-unit") {
         success = DocumentViewportTests::runUnitTests();
+    } else if (testType == "penbindings") {
+        success = PenBindingsTests::runAllTests();
     } else if (testType == "linkobject") {
         success = LinkObjectTests::runAllTests();
     } else if (testType == "textboxobject") {
@@ -1333,6 +1336,8 @@ int main(int argc, char* argv[])
             testToRun = "buttons";
         } else if (arg == "--test-buttons-visual") {
             runButtonVisualTest = true;
+        } else if (arg == "--test-penbindings") {
+            testToRun = "penbindings";
         } else if (arg == "--test-linkobject") {
             testToRun = "linkobject";
         } else if (arg == "--test-textboxobject") {

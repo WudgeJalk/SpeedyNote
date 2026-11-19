@@ -6,6 +6,9 @@
 #include <QColor>
 #include <QPoint>
 #include <QVector>
+#include <QIcon>
+#include <QPair>
+#include <QStringList>
 #include "ToolbarButtons.h"
 #include "../core/ToolType.h"
 #include "../core/DocumentViewport.h"
@@ -68,6 +71,18 @@ public:
      * the width where paging takes over.
      */
     QSize minimumSizeHint() const override;
+
+    // ----- Buttons the user can hide (Settings > Tools) -----
+    // A hidden tool still works from its key, a pen button or the quick bar.
+    struct ButtonChoice { QString id; QString label; QIcon icon; };
+    /// Every button the user can move or hide, in its current order.
+    QVector<ButtonChoice> buttonChoices() const;
+    /// The saved list of hidden button ids ("toolbar/hiddenButtons").
+    static QStringList hiddenButtons();
+    /// The saved order of button ids ("toolbar/buttonOrder"). Empty = the built-in order.
+    static QStringList buttonOrder();
+    /// Save the order and the hidden list, and apply them now.
+    void setButtonLayout(const QStringList& order, const QStringList& hidden);
 
 signals:
     void toolSelected(ToolType tool);
@@ -152,8 +167,12 @@ private:
     // Overflow paging
     ActionButton *m_pagerBackButton = nullptr;
     ActionButton *m_pagerNextButton = nullptr;
-    QVector<QWidget*> m_page1Widgets;
+    QVector<QWidget*> m_page1Widgets;   ///< Shown buttons of page 1 (user-hidden ones removed)
     QVector<QWidget*> m_page2Widgets;
+    QVector<QWidget*> m_allPage1Widgets;  ///< Every button of page 1, hidden or not
+    QVector<QWidget*> m_allPage2Widgets;
+    QVector<QPair<QString, QWidget*>> customizableButtons() const;
+    void applyButtonLayout(const QStringList& order, const QStringList& hidden);
 
     // Tool group for exclusive selection
     QButtonGroup *m_toolGroup;

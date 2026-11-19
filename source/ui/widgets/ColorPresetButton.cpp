@@ -95,6 +95,19 @@ void ColorPresetButton::paintEvent(QPaintEvent* event)
     painter.setPen(Qt::NoPen);
     painter.setBrush(adjustedFillColor());
     painter.drawRoundedRect(fillRect, fillRadius, fillRadius);
+
+    // A colour close to the bar's own (black on the dark toolbar, white on
+    // the light one) vanished. Give it a grey outline so the swatch shows.
+    const bool darkBar = palette().color(QPalette::Window).lightness() < 128;
+    if (qAbs(m_color.lightness() - (darkBar ? 0 : 255)) < 60) {
+        QPen outline(QColor(140, 140, 140));
+        outline.setWidthF(m_selected ? BORDER_WIDTH_SELECTED : 1.5);
+        painter.setPen(outline);
+        painter.setBrush(Qt::NoBrush);
+        const qreal half = outline.widthF() / 2.0;
+        const QRectF ring = m_selected ? QRectF(rect()).adjusted(half, half, -half, -half) : fillRect;
+        painter.drawEllipse(ring);
+    }
 }
 
 void ColorPresetButton::mousePressEvent(QMouseEvent* event)

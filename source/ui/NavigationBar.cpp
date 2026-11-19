@@ -150,7 +150,12 @@ void NavigationBar::updateTheme(bool darkMode, const QColor &accentColor)
     QPalette pal = palette();
     pal.setColor(QPalette::Window, accentColor);
     setPalette(pal);
-    
+
+    // Icons and text sit on the accent colour, so they follow ITS brightness,
+    // not the app theme. With a light system accent in dark mode they were
+    // white on white: the whole bar looked empty.
+    darkMode = qGray(accentColor.rgb()) < 150;
+
     // Apply button stylesheets (hover effects, sizing, etc.)
     ButtonStyles::applyToWidget(this, darkMode);
     

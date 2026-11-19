@@ -75,6 +75,11 @@ public:
      */
     void cycleThickness();
 
+    // For the quick bar: the same presets, picked from somewhere else.
+    QColor presetColor(int index) const;
+    int selectedColorPreset() const { return m_selectedColorIndex; }
+    void pickColorPreset(int index) { onColorPresetClicked(index); }
+
 signals:
     /**
      * @brief Emitted when the pen color changes.

@@ -78,6 +78,9 @@ private:
     QColor selectedBgColor;
     QColor selectedGridColor;
     void createBackgroundTab();
+    /// The Background tab's values as one string, to see if the user changed any.
+    QString backgroundSignature() const;
+    QString m_loadedBackground;  ///< backgroundSignature() when the dialog opened / last applied
     void onPageSizePresetChanged(int index);
 
     // === Tools tab ===
@@ -126,12 +129,13 @@ private:
     void onOpenConfigFolder();
     void updateShortcutDisplay(QTreeWidgetItem* item, const QString& actionId);
 
-#ifdef Q_OS_LINUX
-    // === Stylus tab (Linux only) ===
+    // === Stylus tab ===
     QWidget *stylusTab;
+    void createStylusTab();
+#ifdef Q_OS_LINUX
+    // Palm rejection (Linux only - Windows has it built in)
     QCheckBox *palmRejectionCheckbox;
     QSpinBox *palmRejectionDelaySpinBox;
-    void createStylusTab();
 #endif
 };
 

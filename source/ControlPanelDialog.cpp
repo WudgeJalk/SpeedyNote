@@ -3,10 +3,13 @@
 #include "core/Page.h"
 #include "core/ShortcutManager.h"
 #include "core/DocumentViewport.h"
+#include "ui/widgets/LengthSpinBox.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QFormLayout>
+#include <QGridLayout>
+#include <QListWidget>
 #include <QGroupBox>
 #include <QLabel>
 #include <QCheckBox>
@@ -172,9 +175,7 @@ ControlPanelDialog::ControlPanelDialog(MainWindow *mainWindow, QWidget *parent)
 
     createThemeTab();
     createLanguageTab();
-#ifdef Q_OS_LINUX
     createStylusTab();
-#endif
     createCacheTab();
     createAboutTab();
     
@@ -302,7 +303,8 @@ void ControlPanelDialog::loadSettings()
     
     gridSpacingSpin->setValue(settings.value("background/gridSpacing", 32).toInt());
     lineSpacingSpin->setValue(settings.value("background/lineSpacing", 32).toInt());
-    
+    m_loadedBackground = backgroundSignature();
+
     // Load theme settings
     if (mainWindowRef) {
         useCustomAccentCheckbox->setChecked(mainWindowRef->isUsingCustomAccentColor());
@@ -330,6 +332,15 @@ void ControlPanelDialog::loadSettings()
     }
 }
 
+QString ControlPanelDialog::backgroundSignature() const
+{
+    return QStringLiteral("%1|%2|%3|%4|%5")
+        .arg(styleCombo->currentData().toInt())
+        .arg(selectedBgColor.name(), selectedGridColor.name())
+        .arg(gridSpacingSpin->value())
+        .arg(lineSpacingSpin->value());
+}
+
 void ControlPanelDialog::applyChanges()
 {
     if (!mainWindowRef) return;
@@ -351,14 +362,20 @@ void ControlPanelDialog::applyChanges()
     settings.setValue("background/gridSpacing", gridSpacingSpin->value());
     settings.setValue("background/lineSpacing", lineSpacingSpin->value());
     
-    // Apply background settings to current document (if any)
-    mainWindowRef->applyBackgroundSettings(
-        static_cast<Page::BackgroundType>(bgTypeValue),
-        selectedBgColor,
-        selectedGridColor,
-        gridSpacingSpin->value(),
-        lineSpacingSpin->value()
-    );
+    // Apply background settings to the current document, but only if the user
+    // changed them here. These values are the app-wide defaults, not this
+    // notebook's own paper: applying them on every OK repainted every page of
+    // the open notebook when the user had only changed some other setting.
+    if (backgroundSignature() != m_loadedBackground) {
+        m_loadedBackground = backgroundSignature();
+        mainWindowRef->applyBackgroundSettings(
+            static_cast<Page::BackgroundType>(bgTypeValue),
+            selectedBgColor,
+            selectedGridColor,
+            gridSpacingSpin->value(),
+            lineSpacingSpin->value()
+        );
+    }
     
     // Apply theme settings
     mainWindowRef->setUseCustomAccentColor(useCustomAccentCheckbox->isChecked());
@@ -380,7 +397,8 @@ void ControlPanelDialog::applyChanges()
     // thickness preset (see PenSubToolbar / ThicknessEditDialog).  The legacy
     // tools/minStrokeWidth key remains on disk only as a one-shot migration
     // seed for PenSubToolbar::loadFromSettings.
-    qreal wheelSpeed = wheelScrollSpeedSpin->value();
+    qreal wheelSpeed = wheelScrollSpeedSpin->value()
+                       / wheelScrollSpeedSpin->property("unitFactor").toDouble();
     settings.setValue("tools/wheelScrollSpeed", wheelSpeed);
     DocumentViewport::setWheelScrollSpeed(wheelSpeed);
 
@@ -1005,8 +1023,28 @@ void ControlPanelDialog::createBackgroundTab() {
     pageDimLayout->addStretch();
     layout->addLayout(pageDimLayout);
     
+    // Units for every length the app shows (page size, spacing, pen width...)
+    QHBoxLayout *unitLayout = new QHBoxLayout();
+    QLabel *unitLabel = new QLabel(tr("Units:"), backgroundTab);
+    unitLabel->setMinimumWidth(120);
+    unitLayout->addWidget(unitLabel);
+    QComboBox *unitCombo = new QComboBox(backgroundTab);
+    unitCombo->addItem(tr("Millimetres (mm)"));
+    unitCombo->addItem(tr("Pixels (px)"));
+    unitCombo->setCurrentIndex(LengthUnit::useMm() ? 0 : 1);
+    unitLayout->addWidget(unitCombo, 1);
+    layout->addLayout(unitLayout);
+    connect(unitCombo, QOverload<int>::of(&QComboBox::activated), this, [this](int index) {
+        LengthUnit::setUseMm(index == 0);
+        // Show the new unit at once in this tab. The stored values do not change.
+        onPageSizePresetChanged(pageSizeCombo->currentIndex());
+        for (QSpinBox *spin : { gridSpacingSpin, lineSpacingSpin }) {
+            spin->setSuffix(LengthUnit::suffix());  // Also redraws the number in the new unit
+        }
+    });
+
     layout->addSpacing(15);
-    
+
     // ========== BACKGROUND SECTION ==========
     QLabel *bgSectionLabel = new QLabel(tr("Default Background"), backgroundTab);
     bgSectionLabel->setStyleSheet("font-weight: bold;");
@@ -1064,10 +1102,9 @@ void ControlPanelDialog::createBackgroundTab() {
     gridSpacingLabel->setMinimumWidth(120);
     gridSpacingLayout->addWidget(gridSpacingLabel);
     
-    gridSpacingSpin = new QSpinBox(backgroundTab);
+    gridSpacingSpin = new LengthSpinBox(backgroundTab);
     gridSpacingSpin->setRange(8, 128);
     gridSpacingSpin->setSingleStep(8);
-    gridSpacingSpin->setSuffix(" px");
     gridSpacingSpin->setValue(32);
     gridSpacingLayout->addWidget(gridSpacingSpin);
     gridSpacingLayout->addStretch();
@@ -1079,10 +1116,9 @@ void ControlPanelDialog::createBackgroundTab() {
     lineSpacingLabel->setMinimumWidth(120);
     lineSpacingLayout->addWidget(lineSpacingLabel);
     
-    lineSpacingSpin = new QSpinBox(backgroundTab);
+    lineSpacingSpin = new LengthSpinBox(backgroundTab);
     lineSpacingSpin->setRange(8, 128);
     lineSpacingSpin->setSingleStep(8);
-    lineSpacingSpin->setSuffix(" px");
     lineSpacingSpin->setValue(32);
     lineSpacingLayout->addWidget(lineSpacingSpin);
     lineSpacingLayout->addStretch();
@@ -1121,16 +1157,140 @@ void ControlPanelDialog::createToolsTab()
     // The old global "Minimum stroke width" row has moved to the Pen
     // thickness-preset editor (each preset owns its own min width now).
 
+    // --- Toolbar buttons group ---
+    if (Toolbar *toolbar = mainWindowRef ? mainWindowRef->toolbar() : nullptr) {
+        // The toolbar, drawn as a row of icons you can reorder and switch off.
+        enum { IdRole = Qt::UserRole, HiddenRole, IconRole };
+        QGroupBox *buttonsGroup = new QGroupBox(tr("Toolbar buttons"), toolsTab);
+        QVBoxLayout *buttonsLayout = new QVBoxLayout(buttonsGroup);
+
+        QListWidget *list = new QListWidget(buttonsGroup);
+        list->setViewMode(QListView::IconMode);
+        list->setFlow(QListView::LeftToRight);
+        list->setWrapping(true);
+        list->setResizeMode(QListView::Adjust);
+        list->setIconSize(QSize(28, 28));
+        list->setGridSize(QSize(92, 66));
+        list->setWordWrap(true);
+        list->setFixedHeight(150);
+        // Static movement + InternalMove: a drag changes the ORDER of the
+        // items. (The icon mode's own "free" movement only shifts pictures.)
+        list->setMovement(QListView::Static);
+        list->setDragDropMode(QAbstractItemView::InternalMove);
+        list->setDefaultDropAction(Qt::MoveAction);
+        buttonsLayout->addWidget(list);
+
+        auto paintItem = [](QListWidgetItem *item) {
+            const bool hidden = item->data(HiddenRole).toBool();
+            const QIcon icon = item->data(IconRole).value<QIcon>();
+            item->setIcon(hidden ? QIcon(icon.pixmap(28, 28, QIcon::Disabled)) : icon);
+            item->setForeground(hidden ? QBrush(Qt::gray) : QBrush());
+        };
+        auto fill = [list, toolbar, paintItem]() {
+            list->clear();
+            const QStringList hidden = Toolbar::hiddenButtons();
+            for (const Toolbar::ButtonChoice &choice : toolbar->buttonChoices()) {
+                QListWidgetItem *item = new QListWidgetItem(choice.label, list);
+                item->setData(IdRole, choice.id);
+                item->setData(HiddenRole, hidden.contains(choice.id));
+                item->setData(IconRole, choice.icon);
+                item->setTextAlignment(Qt::AlignHCenter);
+                paintItem(item);
+            }
+        };
+        fill();
+
+        // Applies at once, so you see the toolbar change behind the dialog.
+        auto apply = [list, toolbar]() {
+            QStringList order, hidden;
+            for (int i = 0; i < list->count(); ++i) {
+                const QString id = list->item(i)->data(IdRole).toString();
+                if (order.contains(id)) continue;  // A drag in progress can list one twice
+                order << id;
+                if (list->item(i)->data(HiddenRole).toBool()) hidden << id;
+            }
+            toolbar->setButtonLayout(order, hidden);
+        };
+        auto toggle = [paintItem, apply](QListWidgetItem *item) {
+            if (!item) return;
+            item->setData(HiddenRole, !item->data(HiddenRole).toBool());
+            paintItem(item);
+            apply();
+        };
+        auto move = [list, apply](int delta) {
+            const int row = list->currentRow();
+            const int target = row + delta;
+            if (row < 0 || target < 0 || target >= list->count()) return;
+            list->insertItem(target, list->takeItem(row));
+            list->setCurrentRow(target);
+            apply();
+        };
+
+        QHBoxLayout *buttonsRow = new QHBoxLayout();
+        QPushButton *leftButton = new QPushButton(tr("◀ Move left"), buttonsGroup);
+        QPushButton *rightButton = new QPushButton(tr("Move right ▶"), buttonsGroup);
+        QPushButton *toggleButton = new QPushButton(tr("Show / hide"), buttonsGroup);
+        QPushButton *resetButton = new QPushButton(tr("Reset"), buttonsGroup);
+        for (QPushButton *button : { leftButton, rightButton, toggleButton, resetButton }) {
+            buttonsRow->addWidget(button);
+        }
+        buttonsRow->addStretch();
+        buttonsLayout->addLayout(buttonsRow);
+
+        connect(leftButton, &QPushButton::clicked, this, [move]() { move(-1); });
+        connect(rightButton, &QPushButton::clicked, this, [move]() { move(1); });
+        connect(toggleButton, &QPushButton::clicked, this, [list, toggle]() { toggle(list->currentItem()); });
+        connect(list, &QListWidget::itemDoubleClicked, this, toggle);
+        connect(resetButton, &QPushButton::clicked, this, [toolbar, fill]() {
+            toolbar->setButtonLayout(QStringList(), QStringList());
+            fill();
+        });
+        // A drag-and-drop reorder ends as rows moved, or inserted then removed.
+        // Queued, so the list is complete again when the order is read.
+        auto applyLater = [this, apply]() { QTimer::singleShot(0, this, apply); };
+        connect(list->model(), &QAbstractItemModel::rowsMoved, this, applyLater);
+        connect(list->model(), &QAbstractItemModel::rowsRemoved, this, applyLater);
+
+        QHBoxLayout *positionRow = new QHBoxLayout();
+        positionRow->addWidget(new QLabel(tr("Toolbar position:"), buttonsGroup));
+        QComboBox *positionCombo = new QComboBox(buttonsGroup);
+        positionCombo->addItem(tr("Top"), QStringLiteral("top"));
+        positionCombo->addItem(tr("Bottom"), QStringLiteral("bottom"));
+        positionCombo->addItem(tr("Hidden (use the quick bar, Q)"), QStringLiteral("hidden"));
+        positionCombo->setCurrentIndex(qMax(0, positionCombo->findData(
+            QSettings("SpeedyNote", "App").value("toolbar/position", "top"))));
+        positionRow->addWidget(positionCombo);
+        positionRow->addStretch();
+        buttonsLayout->addLayout(positionRow);
+        connect(positionCombo, QOverload<int>::of(&QComboBox::activated), this, [this, positionCombo](int) {
+            if (mainWindowRef) mainWindowRef->setToolbarPosition(positionCombo->currentData().toString());
+        });
+
+        QLabel *buttonsHint = new QLabel(
+            tr("Drag an icon to change the order, or select it and use the buttons. "
+               "Double-tap an icon to hide it or show it again; a hidden one is grey. "
+               "A hidden tool still works from its key, a pen button or the quick bar."),
+            buttonsGroup);
+        buttonsHint->setWordWrap(true);
+        buttonsHint->setStyleSheet("color: gray; font-size: 11px;");
+        buttonsLayout->addWidget(buttonsHint);
+        layout->addWidget(buttonsGroup);
+    }
+
     // --- Panning settings group ---
     QGroupBox *panGroup = new QGroupBox(tr("Panning"), toolsTab);
     QFormLayout *panLayout = new QFormLayout(panGroup);
 
     wheelScrollSpeedSpin = new QDoubleSpinBox(panGroup);
-    wheelScrollSpeedSpin->setRange(5.0, 200.0);
-    wheelScrollSpeedSpin->setSingleStep(5.0);
+    // Shown in the user's unit. The factor is kept on the box, because the
+    // unit can change (Page tab) while this window is open.
+    const double wheelFactor = LengthUnit::factor();
+    wheelScrollSpeedSpin->setProperty("unitFactor", wheelFactor);
+    wheelScrollSpeedSpin->setRange(5.0 * wheelFactor, 200.0 * wheelFactor);
+    wheelScrollSpeedSpin->setSingleStep(LengthUnit::useMm() ? 1.0 : 5.0);
     wheelScrollSpeedSpin->setDecimals(1);
-    wheelScrollSpeedSpin->setSuffix(tr(" px"));
-    wheelScrollSpeedSpin->setValue(settings.value("tools/wheelScrollSpeed", 40.0).toDouble());
+    wheelScrollSpeedSpin->setSuffix(LengthUnit::suffix());
+    wheelScrollSpeedSpin->setValue(settings.value("tools/wheelScrollSpeed", 40.0).toDouble() * wheelFactor);
 
     panLayout->addRow(tr("Mouse wheel scroll speed:"), wheelScrollSpeedSpin);
 
@@ -1512,9 +1672,7 @@ void ControlPanelDialog::onPageSizePresetChanged(int index) {
     if (index < 0 || !pageSizeCombo || !pageSizeDimLabel) return;
     
     QSizeF size = pageSizeCombo->itemData(index).toSizeF();
-    pageSizeDimLabel->setText(tr("%1 × %2 px (at 96 DPI)")
-        .arg(static_cast<int>(size.width()))
-        .arg(static_cast<int>(size.height())));
+    pageSizeDimLabel->setText(LengthUnit::sizeText(size.width(), size.height()));
 }
 
 void ControlPanelDialog::chooseBackgroundColor() {
@@ -1628,6 +1786,18 @@ void ControlPanelDialog::createThemeTab() {
 
     QCheckBox *pinScrollBarsCheckbox = new QCheckBox(tr("Keep scroll bars always visible"), themeTab);
     layout->addWidget(pinScrollBarsCheckbox);
+
+    QCheckBox *hideScrollBarsCheckbox = new QCheckBox(
+        tr("Never show the scroll bars (and the page wheel next to them)"), themeTab);
+    layout->addWidget(hideScrollBarsCheckbox);
+    if (mainWindowRef) {
+        hideScrollBarsCheckbox->setChecked(mainWindowRef->scrollBarsHidden());
+        pinScrollBarsCheckbox->setEnabled(!hideScrollBarsCheckbox->isChecked());
+    }
+    connect(hideScrollBarsCheckbox, &QCheckBox::toggled, this, [this, pinScrollBarsCheckbox](bool checked) {
+        pinScrollBarsCheckbox->setEnabled(!checked);  // "Always" has no meaning when they are off
+        if (mainWindowRef) mainWindowRef->setScrollBarsHidden(checked);
+    });
 
     QLabel *scrollBarNote = new QLabel(tr("Choose which edge each scroll bar docks against (right-side placement can "
         "help avoid accidental palm input for pen users). When not pinned, bars float in on pen or cursor "
@@ -2104,13 +2274,79 @@ void ControlPanelDialog::createLanguageTab() {
 }
 
 
-// ===== Stylus Tab (Linux Only) =====
+// ===== Stylus Tab =====
 
-#ifdef Q_OS_LINUX
 void ControlPanelDialog::createStylusTab() {
     stylusTab = new QWidget(this);
     QVBoxLayout *layout = new QVBoxLayout(stylusTab);
-    
+
+    // ----- Pen buttons (see core/PenBindings.h) -----
+    QLabel *penButtonsLabel = new QLabel(tr("Pen Buttons"), stylusTab);
+    penButtonsLabel->setStyleSheet("font-weight: bold; font-size: 14px;");
+    layout->addWidget(penButtonsLabel);
+
+    ShortcutManager *sm = ShortcutManager::instance();
+    static const ToolType kTools[] = {
+        ToolType::Pen, ToolType::Marker, ToolType::Highlighter, ToolType::Eraser,
+        ToolType::Lasso, ToolType::ObjectSelect, ToolType::Pan
+    };
+    auto toolLabel = [sm](ToolType tool) {
+        return sm->displayNameForAction(QStringLiteral("tool.") + PenBindings::toolName(tool));
+    };
+
+    QFormLayout *penForm = new QFormLayout();
+    auto addPenRow = [&](const QString &label, PenBindings::Slot slot, bool whileWriting) {
+        QComboBox *combo = new QComboBox(stylusTab);
+        if (whileWriting) {
+            // The tip is on the screen, so the only useful choice is a tool.
+            combo->addItem(tr("Nothing (write with the current tool)"), QString());
+            for (ToolType tool : kTools) {
+                combo->addItem(toolLabel(tool),
+                               QStringLiteral("hold:") + PenBindings::toolName(tool));
+            }
+        } else {
+            combo->addItem(tr("Nothing"), QString());
+            for (ToolType tool : kTools) {
+                combo->addItem(tr("Switch to %1, and back the next time").arg(toolLabel(tool)),
+                               QStringLiteral("toggle:") + PenBindings::toolName(tool));
+            }
+            // Every command of the Keyboard Shortcuts tab can go on the pen.
+            for (const QString &category : sm->allCategories()) {
+                for (const QString &id : sm->actionsInCategory(category)) {
+                    // tool.pan only works while its key is held; the entries above cover it.
+                    if (id == QLatin1String("tool.pan")) continue;
+                    combo->addItem(category + QStringLiteral(": ") + sm->displayNameForAction(id),
+                                   QStringLiteral("cmd:") + id);
+                }
+            }
+        }
+        const int current = combo->findData(PenBindings::binding(slot));
+        combo->setCurrentIndex(current >= 0 ? current : 0);
+        // Applies at once, like the other settings of this tab.
+        connect(combo, QOverload<int>::of(&QComboBox::activated), this, [combo, slot](int) {
+            PenBindings::setBinding(slot, combo->currentData().toString());
+        });
+        penForm->addRow(label, combo);
+    };
+    addPenRow(tr("Side button, press once:"),           PenBindings::SideTap,       false);
+    addPenRow(tr("Side button, press twice:"),          PenBindings::SideDoubleTap, false);
+    addPenRow(tr("Side button, hold in the air:"),      PenBindings::SideHoldAir,   false);
+    addPenRow(tr("Side button, hold while you write:"), PenBindings::SideHoldWrite, true);
+    addPenRow(tr("Back end of the pen on the screen:"), PenBindings::BackWrite,     true);
+    layout->addLayout(penForm);
+
+    QLabel *penButtonsNote = new QLabel(
+        tr("The side button only works when the pen tip is near the screen.\n"
+           "\"Press once\" acts when you release the button. To make it act the moment you press, set the three other side button lines to Nothing.\n"
+           "If you set \"press twice\", a single press waits a short moment to see if a second one comes.\n"
+           "\"Hold in the air\" starts after 0.4 seconds, also when you then put the pen down to write.\n"
+           "Not every pen reports its buttons. If a line does nothing, your pen or its driver does not send that button."),
+        stylusTab);
+    penButtonsNote->setWordWrap(true);
+    penButtonsNote->setStyleSheet("color: gray; font-size: 10px;");
+    layout->addWidget(penButtonsNote);
+
+#ifdef Q_OS_LINUX
     // Palm rejection section
     QLabel *palmRejectionSectionLabel = new QLabel(tr("Palm Rejection"), stylusTab);
     palmRejectionSectionLabel->setStyleSheet("font-weight: bold; font-size: 14px;");
@@ -2155,11 +2391,11 @@ void ControlPanelDialog::createStylusTab() {
     connect(palmRejectionDelaySpinBox, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int value) {
         mainWindowRef->setPalmRejectionDelay(value);
     });
-    
+#endif
+
     layout->addStretch();
     tabWidget->addTab(stylusTab, tr("Stylus"));
 }
-#endif
 
 /*
 // ===== Compatibility Tab =====

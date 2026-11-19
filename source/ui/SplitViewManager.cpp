@@ -103,6 +103,7 @@ SplitViewManager::SplitViewManager(QWidget* parent)
         QSettings settings;
         m_scrollBarsPinned = settings.value(QStringLiteral("scrollbar/pinned"),
                                              defaultScrollBarsPinned()).toBool();
+        m_scrollBarsHidden = settings.value(QStringLiteral("scrollbar/hidden"), false).toBool();
         // SB4: docked edges (page-axis Left/Right, cross-axis Top/Bottom).
         m_vEdge = settings.value(QStringLiteral("scrollbar/verticalEdge"),
                                  QStringLiteral("Left")).toString() == QLatin1String("Right")
@@ -691,8 +692,8 @@ void SplitViewManager::createScrollBars(Pane pane)
     });
 
     // Initial visibility follows the pin state.
-    b.vBar->setVisible(m_scrollBarsPinned);
-    b.hBar->setVisible(m_scrollBarsPinned);
+    b.vBar->setVisible(m_scrollBarsPinned && !m_scrollBarsHidden);
+    b.hBar->setVisible(m_scrollBarsPinned && !m_scrollBarsHidden);
 
     repositionScrollBars(pane);
     bindScrollBars(pane, viewportForPane(pane));
@@ -1244,7 +1245,7 @@ void SplitViewManager::applyEdgelessVisibility(Pane pane)
     PaneBars& b = m_paneBars[static_cast<int>(pane)];
     if (!b.vBar || !b.hBar) return;
 
-    if (paneIsEdgeless(pane)) {
+    if (m_scrollBarsHidden || paneIsEdgeless(pane)) {
         if (b.vFadeTimer) b.vFadeTimer->stop();
         if (b.hFadeTimer) b.hFadeTimer->stop();
         b.vBar->setVisible(false);
@@ -1268,7 +1269,8 @@ void SplitViewManager::applyEdgelessVisibility(Pane pane)
 void SplitViewManager::showScrollBar(Pane pane, BarAxis axis)
 {
     // Edgeless documents never show the scroll bar (overrides pin/proximity/scroll).
-    if (paneIsEdgeless(pane)) return;
+    // The same when the user turned the scroll bars off.
+    if (m_scrollBarsHidden || paneIsEdgeless(pane)) return;
 
     PaneBars& b = m_paneBars[static_cast<int>(pane)];
     ViewportScrollBar* bar = (axis == BarAxis::Vertical) ? b.vBar : b.hBar;
@@ -1328,6 +1330,16 @@ void SplitViewManager::applyScrollBarDarkMode()
         // SB2 accent colors are theme-dependent, so recompute the document map.
         if (m_paneBars[i].bound) updateScrollBarDocumentMap(m_paneBars[i].bound);
     }
+}
+
+void SplitViewManager::setScrollBarsHidden(bool hidden)
+{
+    if (m_scrollBarsHidden == hidden) return;
+    m_scrollBarsHidden = hidden;
+    QSettings().setValue(QStringLiteral("scrollbar/hidden"), hidden);
+    // One place decides hidden / pinned / floating for a pane.
+    applyEdgelessVisibility(Pane::Left);
+    applyEdgelessVisibility(Pane::Right);
 }
 
 void SplitViewManager::setScrollBarsPinned(bool pinned)

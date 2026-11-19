@@ -5,6 +5,7 @@
 // ============================================================================
 
 #include "DocumentViewport.h"
+#include "ShortcutManager.h"  // Pen buttons can run any registered command
 #include "DarkModeUtils.h"
 #include "ObjectConstraints.h"      // Page containment for inserted objects
 #include "TouchGestureHandler.h"
@@ -56,6 +57,8 @@
 #include <QPlainTextEdit>  // For text input focus check
 #include <QSignalBlocker>
 #include <QElapsedTimer>  // For double/triple click detection (Phase A)
+
+static qint64 penNowMs();  // Defined with the pen button code below
 #include <QBuffer>
 #include <QFile>
 #include <QFileInfo>
@@ -297,6 +300,18 @@ DocumentViewport::DocumentViewport(QWidget* parent)
         }
     });
     
+    // Pen side button: the timer only runs for the short time a tap waits for
+    // its double or a hold in the air waits for its delay.
+    PenBindings::installNativeHook();
+    m_penGestureTimer = new QTimer(this);
+    m_penGestureTimer->setInterval(40);
+    connect(m_penGestureTimer, &QTimer::timeout, this, [this]() {
+        runPenGesture(m_penGestures.poll(
+            penNowMs(),
+            !PenBindings::binding(PenBindings::SideHoldAir).isEmpty()));
+        if (!m_penGestures.pending()) m_penGestureTimer->stop();
+    });
+
     // Initialize PDF cache capacity based on default layout mode
     updatePdfCacheCapacity();
 }
@@ -4527,6 +4542,9 @@ void DocumentViewport::tabletEvent(QTabletEvent* event)
         return;
     }
 
+    const bool penWasInContact = m_penLastContact;
+    const bool penContact = updatePenButtons(event);
+
     // Determine event type
     PointerEvent::Type peType;
     switch (event->type()) {
@@ -4557,13 +4575,25 @@ void DocumentViewport::tabletEvent(QTabletEvent* event)
         event->accept();
         return;
     }
-    
+
+    // Qt turns every button change into a press or a release. A side button
+    // pressed or released while the tip stays on the screen is neither: without
+    // this the stroke restarted on the press and ended early on the release.
+    // "Was in contact" matters: a press after a lost release (a dialog took the
+    // input) is a real new press and must restart the stroke as before.
+    const bool penButtonChangeOnly = m_pointerActive && m_activeSource == PointerEvent::Stylus
+        && ((peType == PointerEvent::Press && penWasInContact)
+            || (peType == PointerEvent::Release && penContact));
+    if (penButtonChangeOnly) {
+        peType = PointerEvent::Move;
+    }
+
     // ===== Tablet Hover Tracking for Eraser Cursor =====
     // TabletMove events arrive even when the pen is hovering (not pressed).
     // We need to track position for eraser cursor even during hover.
     // handlePointerEvent() returns early if m_pointerActive is false,
     // so we handle hover tracking separately here.
-    if (event->type() == QEvent::TabletMove && !m_pointerActive) {
+    if (peType == PointerEvent::Move && !m_pointerActive) {
 #ifdef Q_OS_ANDROID
         // Pre-warm JNI eraser detection during hover (before first press).
         // FindClass + GetStaticMethodID are expensive (~20-50ms on slow devices);
@@ -4609,8 +4639,143 @@ void DocumentViewport::tabletEvent(QTabletEvent* event)
     }
     
     PointerEvent pe = tabletToPointerEvent(event, peType);
+    applyPenBindings(pe);
     handlePointerEvent(pe);
+    if (peType == PointerEvent::Release) {
+        m_penContactSideEraser = false;
+        restorePenHoldTool();
+    }
     event->accept();
+}
+
+// ===== Pen buttons (PenBindings) =====
+
+/// Monotonic clock for gesture timing (the wall clock can jump).
+static qint64 penNowMs()
+{
+    static QElapsedTimer timer;
+    if (!timer.isValid()) timer.start();
+    return timer.elapsed();
+}
+
+bool DocumentViewport::updatePenButtons(QTabletEvent* event)
+{
+    const Qt::MouseButtons buttons = event->buttons();
+#if defined(Q_OS_WIN) && QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    // Qt6 on Windows: Left = tip down, Right = tip down with the side button
+    // held. Never both, and no button at all while the pen is in the air.
+    const bool contact = buttons != Qt::NoButton;
+#else
+    // Elsewhere (and Qt5/Wintab) the side button is also reported in the air.
+    const bool contact = buttons.testFlag(Qt::LeftButton);
+#endif
+    m_penLastContact = contact;
+    m_penSideDown = !SN_IS_ERASER_TABLET(event)
+        && (buttons.testFlag(Qt::RightButton) || PenBindings::nativeSideButtonDown());
+
+    const bool doubleBound = !PenBindings::binding(PenBindings::SideDoubleTap).isEmpty();
+    // Speed: when a press can only mean "tap", act on the press itself.
+    const bool tapOnPress = !doubleBound
+        && PenBindings::binding(PenBindings::SideHoldAir).isEmpty()
+        && PenBindings::binding(PenBindings::SideHoldWrite).isEmpty();
+    runPenGesture(m_penGestures.update(m_penSideDown, contact, penNowMs(), doubleBound, tapOnPress));
+    if (m_penGestures.pending() && !m_penGestureTimer->isActive()) {
+        m_penGestureTimer->start();
+    }
+    return contact;
+}
+
+void DocumentViewport::runPenGesture(PenGestures::Fired fired)
+{
+    if (fired == PenGestures::None) return;
+
+    const QString binding = PenBindings::binding(
+        fired == PenGestures::Tap ? PenBindings::SideTap
+        : fired == PenGestures::DoubleTap ? PenBindings::SideDoubleTap
+        : PenBindings::SideHoldAir);
+
+    ToolType tool;
+    if (binding.startsWith(QLatin1String("cmd:"))) {
+        if (QAction* action = ShortcutManager::instance()->action(binding.mid(4))) {
+            if (m_penLastContact) {
+                // A tap that waited for its double, and the pen now writes:
+                // the command must run before this stroke starts, not in it.
+                action->trigger();
+            } else {
+                // Queued: a command may open a dialog, and its event loop must
+                // not run inside the tablet event that is being handled now.
+                QTimer::singleShot(0, action, &QAction::trigger);
+            }
+        }
+    } else if (PenBindings::toolFor(binding, QLatin1String("toggle:"), &tool)) {
+        if (m_currentTool != tool) {
+            m_penToggleReturnTool = m_currentTool;
+            setCurrentTool(tool);
+        } else {
+            setCurrentTool(m_penToggleReturnTool);
+        }
+    }
+}
+
+void DocumentViewport::applyPenBindings(PointerEvent& pe)
+{
+    static const QLatin1String kHoldEraser("hold:eraser");
+    const bool backEnd = pe.isEraser;
+
+    if (pe.type == PointerEvent::Press) {
+        // Decided once for the whole contact, so a button pressed in the
+        // middle of a stroke changes nothing.
+        restorePenHoldTool();
+        const QString held = backEnd ? PenBindings::binding(PenBindings::BackWrite)
+                           : m_penSideDown ? PenBindings::binding(PenBindings::SideHoldWrite)
+                           : QString();
+        m_penContactSideEraser = !backEnd && held == kHoldEraser;
+
+        // The eraser needs no tool switch: it has its own "erase with any
+        // tool" path (m_hardwareEraserActive), used below through pe.isEraser.
+        ToolType tool;
+        if (PenBindings::toolFor(held, QLatin1String("hold:"), &tool)
+            && tool != ToolType::Eraser && tool != m_currentTool) {
+            if (!m_penHoldActive) {
+                m_penHoldActive = true;
+                m_penHoldReturnTool = m_currentTool;
+                m_penHoldStraightLine = m_straightLineMode;
+            }
+            m_penHoldTool = tool;
+            setCurrentTool(tool);
+        }
+    }
+
+    pe.isEraser = backEnd ? PenBindings::binding(PenBindings::BackWrite) == kHoldEraser
+                          : m_penContactSideEraser;
+
+    // The bindings own the side button, so the tools see a plain tip. Without
+    // this a side button released before the tip lifts looked like a lost
+    // release to the object gesture, which then rolled the drag back.
+    // Not for a button pressed in the air (some platforms send that as a
+    // press): it must stay a right button so it does not arm the off-page pan.
+    if (m_penLastContact || m_pointerActive) {
+        if (pe.button != Qt::NoButton) pe.button = Qt::LeftButton;
+        if (pe.buttons != Qt::NoButton) pe.buttons = Qt::LeftButton;
+        pe.stylusButtons = static_cast<int>(pe.buttons);
+    }
+}
+
+void DocumentViewport::restorePenHoldTool()
+{
+    if (!m_penHoldActive) return;
+
+    if (m_currentTool != m_penHoldTool) {
+        m_penHoldActive = false;  // The user picked another tool; nothing to give back
+        return;
+    }
+    // A selection made with the held tool must stay usable (move it, copy
+    // it). The tool goes back once the selection is dropped.
+    if (hasLassoSelection() || hasSelectedObjects() || hasTextSelection()) return;
+
+    m_penHoldActive = false;
+    setCurrentTool(m_penHoldReturnTool);
+    if (m_penHoldStraightLine) setStraightLineMode(true);
 }
 
 // ===== Coordinate Transforms (Task 1.3.5) =====

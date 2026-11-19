@@ -1,4 +1,5 @@
 #include "ThicknessPresetButton.h"
+#include "LengthSpinBox.h"
 
 #include <cmath>
 #include <QPainter>
@@ -25,6 +26,9 @@
 // ThicknessEditDialog
 // ============================================================================
 
+// Widths are stored in page units and shown in the user's unit (mm or px).
+static qreal unitFactor() { return LengthUnit::factor(); }
+
 ThicknessEditDialog::ThicknessEditDialog(qreal currentThickness,
                                          qreal minThickness,
                                          qreal maxThickness,
@@ -41,7 +45,9 @@ ThicknessEditDialog::ThicknessEditDialog(qreal currentThickness,
     auto* layout = new QVBoxLayout(this);
 
     // Thickness label + slider + spinbox row
-    auto* label = new QLabel(tr("Thickness (pt):"), this);
+    // Shown in millimetres, stored in page units. A page unit is 1/96 inch
+    // (an A4 page is 794 units wide), so this is the real width on paper.
+    auto* label = new QLabel(tr("Thickness (%1):").arg(LengthUnit::name()), this);
     layout->addWidget(label);
 
     auto* controlLayout = new QHBoxLayout();
@@ -53,11 +59,11 @@ ThicknessEditDialog::ThicknessEditDialog(qreal currentThickness,
     controlLayout->addWidget(m_slider, 1);
 
     m_spinBox = new QDoubleSpinBox(this);
-    m_spinBox->setRange(minThickness, maxThickness);
-    m_spinBox->setSingleStep(0.5);
-    m_spinBox->setDecimals(1);
-    m_spinBox->setValue(currentThickness);
-    m_spinBox->setSuffix(" pt");
+    m_spinBox->setRange(minThickness * unitFactor(), maxThickness * unitFactor());
+    m_spinBox->setSingleStep(LengthUnit::useMm() ? 0.1 : 0.5);
+    m_spinBox->setDecimals(LengthUnit::useMm() ? 2 : 1);
+    m_spinBox->setValue(currentThickness * unitFactor());
+    m_spinBox->setSuffix(LengthUnit::suffix());
     controlLayout->addWidget(m_spinBox);
 
     layout->addLayout(controlLayout);
@@ -70,16 +76,17 @@ ThicknessEditDialog::ThicknessEditDialog(qreal currentThickness,
     // entirely so marker/eraser callers get the single-row dialog.
     if (currentMinWidth >= 0.0) {
         auto* minLabel = new QLabel(
-            tr("Minimum width (pt):  (set equal to thickness for uniform strokes)"), this);
+            tr("Minimum width (%1):  (set equal to thickness for uniform strokes)")
+                .arg(LengthUnit::name()), this);
         minLabel->setWordWrap(true);
         layout->addWidget(minLabel);
 
         m_minWidthSpinBox = new QDoubleSpinBox(this);
-        m_minWidthSpinBox->setRange(0.0, currentThickness);
-        m_minWidthSpinBox->setSingleStep(0.1);
-        m_minWidthSpinBox->setDecimals(1);
-        m_minWidthSpinBox->setSuffix(" pt");
-        m_minWidthSpinBox->setValue(qBound(0.0, currentMinWidth, currentThickness));
+        m_minWidthSpinBox->setRange(0.0, currentThickness * unitFactor());
+        m_minWidthSpinBox->setSingleStep(LengthUnit::useMm() ? 0.05 : 0.1);
+        m_minWidthSpinBox->setDecimals(LengthUnit::useMm() ? 2 : 1);
+        m_minWidthSpinBox->setSuffix(LengthUnit::suffix());
+        m_minWidthSpinBox->setValue(qBound(0.0, currentMinWidth, currentThickness) * unitFactor());
         layout->addWidget(m_minWidthSpinBox);
 
         // Re-clamping is driven by onSliderChanged / onSpinBoxChanged calling
@@ -97,18 +104,18 @@ ThicknessEditDialog::ThicknessEditDialog(qreal currentThickness,
 
 qreal ThicknessEditDialog::thickness() const
 {
-    return m_spinBox->value();
+    return m_spinBox->value() / unitFactor();
 }
 
 qreal ThicknessEditDialog::minWidth() const
 {
-    return m_minWidthSpinBox ? m_minWidthSpinBox->value() : -1.0;
+    return m_minWidthSpinBox ? m_minWidthSpinBox->value() / unitFactor() : -1.0;
 }
 
 void ThicknessEditDialog::onSliderChanged(int value)
 {
-    // Slider uses integer values * 10 for 0.1 precision
-    const qreal thickness = value / 10.0;
+    // Slider uses page units * 10; the spin boxes (and the clamp) use mm.
+    const qreal thickness = value / 10.0 * unitFactor();
 
     // Block signals to prevent feedback loop with onSpinBoxChanged
     {
@@ -126,7 +133,7 @@ void ThicknessEditDialog::onSpinBoxChanged(double value)
     // Block signals to prevent feedback loop with onSliderChanged
     {
         QSignalBlocker blocker(m_slider);
-        m_slider->setValue(static_cast<int>(value * 10));
+        m_slider->setValue(qRound(value / unitFactor() * 10));
     }
 
     clampMinWidthToThickness(value);
@@ -336,10 +343,19 @@ bool ThicknessPresetButton::isDarkMode() const
     return luminance < 0.5;
 }
 
+/// A pen colour too close to the button's own background (black on the dark
+/// toolbar, white on the light one) made the dot and its ring vanish. Such a
+/// colour is drawn in grey here; the colour swatch next to it shows the real one.
+static QColor visibleOn(const QColor& color, bool darkBackground)
+{
+    const int background = darkBackground ? 0 : 255;
+    return qAbs(color.lightness() - background) < 60 ? QColor(140, 140, 140) : color;
+}
+
 QColor ThicknessPresetButton::borderColor() const
 {
     if (m_selected) {
-        return m_lineColor;
+        return visibleOn(m_lineColor, isDarkMode());
     } else {
         return Qt::transparent;
     }
@@ -347,8 +363,8 @@ QColor ThicknessPresetButton::borderColor() const
 
 QColor ThicknessPresetButton::adjustedLineColor() const
 {
-    QColor color = m_lineColor;
-    
+    QColor color = visibleOn(m_lineColor, isDarkMode());
+
     if (m_pressed) {
         // Darken when pressed
         color = color.darker(120);

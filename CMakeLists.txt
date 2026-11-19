@@ -887,6 +887,7 @@ set(CORE_SOURCES
     source/core/TouchGestureHandler.cpp
     source/core/MarkdownNote.cpp
     source/core/ShortcutManager.cpp
+    source/core/PenBindings.cpp
     source/core/DarkModeUtils.cpp
 )
 
@@ -955,6 +956,7 @@ set(UI_SOURCES
     source/ui/ToolbarButtons.cpp
     source/ui/NavigationBar.cpp
     source/ui/Toolbar.cpp
+    source/ui/QuickBar.cpp
     source/ui/StyleLoader.cpp
     source/ui/MenuPopup.cpp
     source/ui/TabBar.cpp

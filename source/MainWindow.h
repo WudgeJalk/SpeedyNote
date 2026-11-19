@@ -68,6 +68,7 @@ struct OcrSnapParams;
 
 // Action Bar includes
 class ActionBarContainer;
+class QuickBar;
 class LassoActionBar;
 class ObjectSelectActionBar;
 class PagePanelActionBar;
@@ -141,6 +142,12 @@ public:
     // Keep bars pinned (visible; disables proximity auto-hide).
     bool scrollBarsPinned() const;
     void setScrollBarsPinned(bool pinned);
+    Toolbar* toolbar() const { return m_toolbar; }  ///< For the settings dialog (buttons to hide)
+    /// "top", "bottom" or "hidden". Saved in "toolbar/position".
+    void setToolbarPosition(const QString &position);
+    void applyToolbarPosition();
+    bool scrollBarsHidden() const;
+    void setScrollBarsHidden(bool hidden);
 
     // OCR language query (for ControlPanelDialog and per-document dialog)
     QStringList ocrAvailableLanguages() const { return m_ocrAvailableLanguages; }
@@ -350,6 +357,7 @@ protected:
     void keyPressEvent(QKeyEvent *event) override;  // New: Handle keyboard shortcuts
     void keyReleaseEvent(QKeyEvent *event) override; // Track Ctrl key release for trackpad pinch-zoom detection
     void focusInEvent(QFocusEvent *event) override;  // MAC.1: track active MainWindow
+    void paintEvent(QPaintEvent *event) override;    // Colours the strip under the Windows title bar
     void changeEvent(QEvent *event) override;        // Sync nav bar fullscreen button when window state changes (e.g. macOS green button)
     // REMOVED: tabletEvent removed - tablet event handling deleted
 
@@ -676,6 +684,8 @@ private:
     
     // Action Bar system
     ActionBarContainer *m_actionBarContainer = nullptr;
+    QuickBar *m_quickBar = nullptr;   ///< Created on first use (view.quick_bar)
+    void showQuickBar();              ///< Open the quick bar at the pointer, or close it
     LassoActionBar *m_lassoActionBar = nullptr;
     ObjectSelectActionBar *m_objectSelectActionBar = nullptr;
     PagePanelActionBar *m_pagePanelActionBar = nullptr;

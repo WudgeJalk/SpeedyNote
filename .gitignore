@@ -102,3 +102,5 @@ scripts/
 app_icon.rc
 packaging.iss
 android/app-resources/AndroidManifest.xml
+# graphify knowledge graph output
+graphify-out/
