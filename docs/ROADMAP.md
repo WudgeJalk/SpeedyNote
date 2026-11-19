@@ -117,7 +117,9 @@ What the user likes in GoodNotes, from two screenshots:
 | T5 | **Pen window.** Pen type with a live preview, stabilisation slider, "draw and hold" switch, link to the pen button settings. | M | Needs T2, B3, B5, B6 |
 | T6 | **Shape bar.** The shapes and connectors above, line style, colour. | M-L | Needs T2, B6 |
 
-Order proposed: T1, T2, T3, T4 first. They change the bar itself and need no change in the note files. T5 and T6 come with the pen types and the shapes of Part B.
+**Decided by the user on 2026-11-20: go all in.** Build T1 to T6 in one batch, with the parts of Part B they need (B3, B4, B5, B6). "Make sure the pen has dotted and dashed lines as well": the line style is a choice of the pen, not only of the shapes. The brief for that work is `docs/NEXT_SESSION.md`.
+
+What the user's 50-frame recording of the GoodNotes shape tool shows: the free shape icon is selected and a freehand outline is drawn until it nearly closes. The recording stops before the pen lifts, so what GoodNotes does at that moment is not visible in it.
 
 ### Part B - Tools for class (engineering first)
 
