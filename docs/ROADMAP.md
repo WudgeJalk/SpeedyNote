@@ -98,6 +98,27 @@ Known limits:
 - A command from the pen acts on the active pane. In split view, that can be a different pane from the one under the pen.
 - Linux, macOS, Android, iPad and the Qt5 Windows build: the code is there, with no default on the side button. Not tested.
 
+### Part T - The new toolbar (GoodNotes is the model)
+
+The user's words, 2026-11-19: the GoodNotes toolbar "feels smooth, limitless and great"; OneNote "has been built by people who never take notes". Today's toolbar has only 3 colours, and options the user does not understand ("there's like three different erasers").
+
+What the user likes in GoodNotes, from two screenshots:
+- **Two levels.** A main bar with the tool families (lasso, pen, eraser, text, image, shapes, ruler). Under it, a small bar with the options of the tool in use.
+- **Pen bar**: the pen, then 3 line widths, then a row of colours (many, not 3), then "add a colour".
+- **Pen window** (tap the pen again): the pen type (fountain, ball, brush) with a drawn preview of the stroke, a "stroke stabilisation" slider, a "draw and hold" switch, and the pen gestures.
+- **Shape bar**: free shape, two kinds of connector lines, rectangle, circle, triangle, diamond, rounded rectangle, then the line style and the colour.
+
+| # | Step | Size | Status |
+|---|---|---|---|
+| T1 | **The floating bar.** It floats above the page and takes only the room it needs. Drag it; it snaps to the top, bottom, left or right, never the middle. Vertical on the left and right. (This is the rest of A3.) | M | |
+| T2 | **Two levels.** Main bar = tool families. Option bar = the options of the tool in use. This replaces the options that open inside the row today. | M-L | Needs T1 |
+| T3 | **Colours without a limit.** Any number of colours in the option bar. Add, remove, change, reorder. The row scrolls when it is long. Each tool keeps its own list. | M | Needs T2 |
+| T4 | **One eraser, clear choices.** One eraser button. Its options use plain words and a small picture: "the whole line", "only what I touch", "all lines in a loop". | S | Needs T2. The 4 eraser modes exist today; this is naming and layout. |
+| T5 | **Pen window.** Pen type with a live preview, stabilisation slider, "draw and hold" switch, link to the pen button settings. | M | Needs T2, B3, B5, B6 |
+| T6 | **Shape bar.** The shapes and connectors above, line style, colour. | M-L | Needs T2, B6 |
+
+Order proposed: T1, T2, T3, T4 first. They change the bar itself and need no change in the note files. T5 and T6 come with the pen types and the shapes of Part B.
+
 ### Part B - Tools for class (engineering first)
 
 | # | Step | Size | Status |
@@ -181,6 +202,7 @@ Later idea for E2: "copy as LaTeX" that gives a ready `\begin{FancyCode}` block.
 |---|---|---|---|
 | D1 | **Settings you can understand.** One settings page with a search box, good icons and good readability. Each setting: a clear name and one line of help. The user asked for this again on 2026-11-19: today an option is hard to find. Also to fix here: the Background tab shows the app defaults, not the paper of the open notebook. | M-L | Next big step after the Part A tests |
 | D0 | **Window bar like a native app (OneNote is the model).** The user's words, 2026-11-19: OneNote has the perfect top (logo, quick tools, minimise / maximise / close in one integrated bar); GoodNotes looks like a cheap Chromium web app; SpeedyNote looked the cheapest. | M | Step 1 done 2026-11-19: the Windows title bar has no grey band of its own, our bar colour runs under it, and the native buttons stay (`Qt::ExpandedClientAreaHint`, Qt 6.9+, in `MainWindow`). Step 2 done 2026-11-19: one row. From left to right: app icon, back, left panel, save, new, search, the title with the app name, full screen, export, right panel, menu, then minimise / maximise / close. Qt offers each press in that row to our buttons first, and empty space drags the window. **To check by the user: every button of the row reacts to a mouse click and to a pen tap.** Still to do: a real search field in the row (today the search button opens the search bar that exists). Also done 2026-11-19: house icon for home; minimise / maximise / close drawn with Lucide icons, placed exactly on the real Windows button zones (so snap, double-click and Win+arrows stay native); full screen is a real full screen (no title row, no tab bar, no taskbar, a small button to leave) and uses every pixel (it lost 8 px on three sides before). How it works: `MainWindow::hideQtTitleBarDrawing()` and the `WM_NCHITTEST` / `WM_NCCALCSIZE` cases in `MainWindow::nativeEvent()`. |
+| D1b | **Each menu and window looks like a real app.** The user, 2026-11-19: the menus look "too generic", and some options cannot be understood. Each window gets the same treatment as the settings: clear words, grouping, the app's own style. Remove or explain each option that a student cannot understand. | L | With D1 |
 | D2 | **Modern look.** First all colours and sizes in one place. Then one screen at a time. | L | |
 
 ## How the screen is built today

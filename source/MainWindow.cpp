@@ -1246,6 +1246,7 @@ void MainWindow::setupUi() {
             vp->setObjectInsertMode(mode);
         }
     });
+    connect(m_toolbar, &Toolbar::exitFullscreenClicked, this, &MainWindow::toggleFullscreen);
     connect(m_toolbar, &Toolbar::straightLineToggled, this, [this](bool enabled) {
         // Straight line mode toggle
         if (DocumentViewport* vp = currentViewport()) {
@@ -6527,6 +6528,14 @@ void MainWindow::applyFullscreenChrome(bool fullscreen)
             tabs->show();
         }
     }
+    // The way out sits at the end of the toolbar, with the other controls.
+    // Only when the user hid the toolbar does it float on the page corner.
+    const bool inToolbar = m_toolbar && m_toolbar->isVisible();
+    if (m_toolbar) m_toolbar->setExitFullscreenVisible(fullscreen && inToolbar);
+    if (inToolbar) {
+        if (m_exitFullscreenButton) m_exitFullscreenButton->hide();
+        return;
+    }
     if (fullscreen && !m_exitFullscreenButton && m_canvasContainer) {
         m_exitFullscreenButton = new ActionButton(m_canvasContainer);
         m_exitFullscreenButton->setThemedIcon(QStringLiteral("exit_fullscreen"));
@@ -9351,6 +9360,17 @@ bool MainWindow::nativeEvent(const QByteArray &eventType, void *message, long *r
                 // page the whole screen.
                 if (isFullScreen() && msg->wParam) {
                     *result = 0;
+                    return true;
+                }
+                break;
+            case WM_NCACTIVATE:
+            case WM_NCPAINT:
+                // In full screen there is no frame to paint. Left to Windows,
+                // each time the app lost or got the focus (a screenshot tool
+                // is enough) it painted an old-style title strip over the
+                // top of the page.
+                if (isFullScreen()) {
+                    *result = (msg->message == WM_NCACTIVATE) ? TRUE : 0;
                     return true;
                 }
                 break;

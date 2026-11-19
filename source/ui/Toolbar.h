@@ -84,7 +84,11 @@ public:
     /// Save the order and the hidden list, and apply them now.
     void setButtonLayout(const QStringList& order, const QStringList& hidden);
 
+    /// Show the "leave full screen" button at the end of the bar.
+    void setExitFullscreenVisible(bool visible) { m_exitFullscreenButton->setVisible(visible); }
+
 signals:
+    void exitFullscreenClicked();
     void toolSelected(ToolType tool);
     void objectInsertModeSelected(DocumentViewport::ObjectInsertMode mode);
     void straightLineToggled(bool enabled);
@@ -167,6 +171,7 @@ private:
     // Overflow paging
     ActionButton *m_pagerBackButton = nullptr;
     ActionButton *m_pagerNextButton = nullptr;
+    ActionButton *m_exitFullscreenButton = nullptr;
     QVector<QWidget*> m_page1Widgets;   ///< Shown buttons of page 1 (user-hidden ones removed)
     QVector<QWidget*> m_page2Widgets;
     QVector<QWidget*> m_allPage1Widgets;  ///< Every button of page 1, hidden or not

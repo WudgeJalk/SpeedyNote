@@ -188,6 +188,16 @@ void Toolbar::setupUi()
     connect(m_pagerNextButton, &QPushButton::clicked,
             this, [this]() { setToolbarPage(1); });
 
+    // Leaves full screen. At the far end of the bar, and only shown in full
+    // screen: the title row with the normal button is hidden then.
+    m_exitFullscreenButton = new ActionButton(this);
+    m_exitFullscreenButton->setThemedIcon("exit_fullscreen");
+    m_exitFullscreenButton->setToolTip(tr("Leave full screen (F11)"));
+    m_exitFullscreenButton->hide();
+    mainLayout->addWidget(m_exitFullscreenButton);
+    connect(m_exitFullscreenButton, &QPushButton::clicked,
+            this, &Toolbar::exitFullscreenClicked);
+
     m_allPage1Widgets = m_page1Widgets;
     m_allPage2Widgets = m_page2Widgets;
     applyButtonLayout(buttonOrder(), hiddenButtons());  // Ends with applyPageVisibility()
@@ -533,6 +543,8 @@ void Toolbar::updateTheme(bool darkMode)
     m_borderColor = darkMode ? QColor(0x4d, 0x4d, 0x4d) : QColor(0xD0, 0xD0, 0xD0);
 
     ButtonStyles::applyToWidget(this, darkMode);
+
+    m_exitFullscreenButton->setDarkMode(darkMode);
 
     // Update expandable tool buttons
     m_penExpandable->setDarkMode(darkMode);
