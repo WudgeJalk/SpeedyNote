@@ -119,7 +119,7 @@ What the user likes in GoodNotes, from two screenshots:
 
 **Decided by the user on 2026-11-20: go all in.** Build T1 to T6 in one batch, with the parts of Part B they need (B3, B4, B5, B6). "Make sure the pen has dotted and dashed lines as well": the line style is a choice of the pen, not only of the shapes. The brief for that work is `docs/NEXT_SESSION.md`.
 
-What the user's 50-frame recording of the GoodNotes shape tool shows: the free shape icon is selected and a freehand outline is drawn until it nearly closes. The recording stops before the pen lifts, so what GoodNotes does at that moment is not visible in it.
+What the user's second recording of the GoodNotes free shape tool shows (2026-11-20; full description in `docs/NEXT_SESSION.md`): each stroke is cleaned when the pen lifts (straight parts become straight, curves stay smooth, corners where the pen turned); it closes only when the end is near the start, otherwise it stays an open smooth curve; the ends of a new stroke snap onto the edge of a shape that is already there, so shapes join; the eraser removes one whole shape at a time.
 
 ### Part B - Tools for class (engineering first)
 

@@ -64,7 +64,18 @@ The model is GoodNotes. The user's screenshots and a 50-frame recording are desc
 - **Shape bar**: free shape, two connector lines, rectangle, circle, triangle, diamond, rounded rectangle, line style, colour.
 - **Four independent pen choices**: colour, width, pen type, line style. Changing one never changes another.
 
-What the recording shows: the first shape icon (free shape) is selected, and the user draws a freehand outline that nearly closes. The recording ends before the pen lifts, so the result of the snap is **not visible**. Ask the user what GoodNotes does at that moment if the design depends on it.
+### How the GoodNotes free shape tool behaves
+
+From the user's second recording (289 frames, 2026-11-20, 24 of them looked at). This is the behaviour to copy.
+
+1. **Each stroke is cleaned when the pen lifts.** A wobbly freehand outline becomes clean: the parts that were nearly straight become straight lines, the parts that were curved stay smooth curves, and a corner appears where the pen changed direction.
+2. **It closes only if it makes sense.** When the end is near the start, the result is a closed shape. A spiral whose end stays far from its start stays an **open** smooth curve. Nothing is forced into a rectangle or a circle.
+3. **New strokes snap to shapes that are there.** A loop drawn next to the first shape became a clean teardrop whose two ends meet **on the edge of the first shape**, at one point. A third stroke became a smooth oval that joins the same shape and the same point. So the ends of a new stroke snap to a nearby edge or corner of an existing shape.
+4. **The stroke keeps the pen's colour and width.** The colour comes from the last button of the shape bar.
+5. **The eraser removes one whole shape at a time.** Two added shapes were erased and the first one stayed whole.
+6. **The eraser option bar uses words.** It shows a drop-down that reads "Trait" (stroke), a settings icon, then three sizes. This confirms T4: name the eraser mode in words.
+
+The fixed shapes of the bar (rectangle, circle, triangle, diamond, rounded rectangle) and the two connector lines were not used in the recording.
 
 ## What exists today (do not rebuild, do not break)
 
@@ -94,6 +105,5 @@ What the recording shows: the first shape icon (free shape) is selected, and the
 
 ## Still open with the user
 
-- What does the GoodNotes free shape do when the pen lifts (see above)?
 - "Spaces on both sides": fixed as 8 lost pixels in full screen. The user has not said if they also meant the grey area beside the page.
 - Where the library folder lives (Part C). Not needed for the toolbar.
