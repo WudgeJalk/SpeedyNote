@@ -44,6 +44,18 @@
     <file>resources/icons/bookmark_reversed.png</file>
     <file>resources/icons/star.png</file>
     <file>resources/icons/star_reversed.png</file>
+    <file>resources/icons/search.png</file>
+    <file>resources/icons/search_reversed.png</file>
+    <file>resources/icons/home.png</file>
+    <file>resources/icons/home_reversed.png</file>
+    <file>resources/icons/win_min.png</file>
+    <file>resources/icons/win_min_reversed.png</file>
+    <file>resources/icons/win_max.png</file>
+    <file>resources/icons/win_max_reversed.png</file>
+    <file>resources/icons/win_restore.png</file>
+    <file>resources/icons/win_restore_reversed.png</file>
+    <file>resources/icons/exit_fullscreen.png</file>
+    <file>resources/icons/exit_fullscreen_reversed.png</file>
     <file>resources/icons/zoom.png</file>
     <file>resources/icons/zoom_reversed.png</file>
     <file>resources/icons/thickness.png</file>

@@ -75,7 +75,7 @@ Size: S = about one sitting. M = a few sittings. L = many sittings.
 | 0 | Build tools, build, run the tests. | S | Done 2026-11-19. Build: `.\compile.ps1 -norun`. Tests need `.\compile.ps1 -debug -norun`, then `build\speedynote.exe --test-viewport-unit` (also `page`, `document`, `notebooklibrary`, `linkobject`, `textboxobject`, `actionbars`, `buttons`, `pdfexporter`). All 9 passed. |
 | A1 | **Pen buttons.** Side button and back end. Each gesture (press, press twice, hold while writing, hold in the air) can call: any app command, a tool while held, or "switch tool then back". Settings table in the Stylus tab. | S | Code written 2026-11-19, tests pass (`--test-penbindings`). Tried by the user on the Surface: the lasso hold and the press-once toggle work. Fixed after that test: the toggle acted late, and the top bar was white on white with a light Windows accent colour. |
 | A2 | **Quick bar at the pen tip.** Hold the side button (or long-press with a finger, or a key): a small bar opens where the pen is. It holds what you change often: favourite colours, pen / highlighter / eraser, straight line, line type. You choose what is in it. Release or tap to pick. | M | First version written 2026-11-19 (`source/ui/QuickBar.cpp`). Opens with a side button hold in the air, or the Q key. Holds 5 tools, straight line, and the 3 pen colours. **Not yet tried with a real pen.** Still to do: you choose its content, more colours, line width, open with a long finger press. |
-| A3 | **Bar where you want.** Main toolbar: top, bottom, left, right, or hidden. Action bar: left or right. Hide the buttons you do not use. | M | Partly done 2026-11-19: you can hide toolbar buttons (Settings > Tools > Toolbar buttons) and turn the scroll bars off for good (Settings > Theme). Also done 2026-11-19: an icon editor for the toolbar (drag to reorder, double-tap to hide; Settings > Tools) and toolbar position top / bottom / hidden. Still to do: toolbar on the left or right edge, move the action bar. |
+| A3 | **Bar where you want.** Main toolbar: top, bottom, left, right, or hidden. Action bar: left or right. Hide the buttons you do not use. | M | Partly done 2026-11-19: you can hide toolbar buttons (Settings > Tools > Toolbar buttons) and turn the scroll bars off for good (Settings > Theme). Also done 2026-11-19: an icon editor for the toolbar (drag to reorder, double-tap to hide; Settings > Tools) and toolbar position top / bottom / hidden. **Next to do, asked again by the user on 2026-11-19 (GoodNotes is the model):** the toolbar floats above the page and takes only the room its buttons need. You drag it. When you drop it, it snaps to the nearest side: top, bottom, left or right, never the middle. On the left and right it is vertical. Hard parts: the toolbar is one horizontal row with a paging system and tool options that open in the row; all three must learn the vertical direction. Also: move the action bar. |
 | A4 | **Top click and vibration** of the Slim Pen 2. Windows only. | M | Needs A1 |
 | A5 | **Profiles.** Save a full setup (bars + pen buttons + quick bar) under a name. Example: "Lecture", "Exercise", "Reading". | S-M | Needs A1-A3 |
 
@@ -116,13 +116,47 @@ Known limits:
 
 | # | Step | Size | Status |
 |---|---|---|---|
-| C1 | **Notebook > section > sub-section.** Like OneNote, but the student chooses the levels. Example: Year > Class > Theory / Exercises / Draft / Summary. On disk it stays normal folders. | M-L | |
-| C2 | **Structure templates.** Make a new class with its sections in one action. | S | Needs C1 |
+| C1 | **Notebook > section > sub-section > note.** See "The library model" below. A side panel with 3 columns, like OneNote: notebooks, sections, notes. | M-L | Plan written 2026-11-19, to be corrected by the user |
+| C1b | **Export a whole notebook as one PDF.** All notes, in the order of the panel, from top to bottom. | M | Needs C1. The app already exports one note to PDF and has a batch export. |
+| C2 | **Structure templates.** Make a new class with its sections in one action (Cours, Examen, Résumé, Exercices, Corrigés). | S | Needs C1 |
 | C3 | **PDF between pages.** Drop a PDF on a section, or between two pages of a notebook. Example: an A4 PDF between two A4 note pages. | M | To check: what works today |
 | C3b | **PDF on a page.** Drop a PDF on top of a page, like an image. You move it, resize it and write on it. | M | |
 | C4 | **Change old notes easily.** Move, copy and reorder pages between notebooks. | M | To check: what works today |
 | C5 | **Other files next to the notes.** Link or keep files in a section and open them from the app. | M | |
 | C6 | **Page designs and notebook covers.** Dots, Cornell, planner. Covers so a notebook looks like a book. | M | |
+
+#### The library model (plan for C1, 2026-11-19)
+
+The user's example, from OneNote: notebook `HEIG26` > section `04_Math_TIN` > sub-sections `Cours`, `Examen`, `Résumé`, `Exercices`, `Corrigés` > notes. Two loose sections at the top: `Info-Générale`, `Brouillon`.
+
+What the user wants: you work in ONE note of ONE section, and only that note is loaded. So it stays fast, however big the notebook is. At the end you can export the whole notebook as one PDF.
+
+The plan: **the library is a folder tree on disk. Nothing new in the file format.**
+
+| In the app | On disk |
+|---|---|
+| Notebook (`HEIG26`) | A normal folder |
+| Section, sub-section (`04_Math_TIN`, `Cours`) | A sub-folder, as deep as the student wants |
+| Note (`outil pour hachure`) | One `.snb` bundle, the format the app has today, with its own pages |
+
+Why this way:
+- Only the open `.snb` is loaded. This is the speed the user asked for, and it is already how the app works.
+- The student owns plain folders. They can be copied, backed up or synced with any tool.
+- Old notebooks still open (rule 2): an old `.snb` is just a note that is not in a section yet.
+
+Decided with the user on 2026-11-19:
+- **Free names.** The app never forces a name or a number on a section.
+- **Free order by drag and drop** in the panel. The order is saved in a small file in each folder. The PDF of a whole notebook follows that order: the top section first, the bottom section last.
+- **A colour for each section.** Saved in the same small file.
+- **Cloud without an integration.** The library is a normal folder, so the student puts it inside OneDrive, iCloud Drive, Dropbox or any other synced folder. Many small files sync well: only the note that changed is sent.
+
+Proposed, waiting for the user's yes: **many small files to work, one file to carry.**
+- Work: the folder tree above. Fast, and safe (a damaged file costs one note, not the notebook).
+- Carry: "Pack notebook" makes ONE file of a whole notebook (all sections, order and colours). "Open a packed notebook" unpacks it into the library. The app already has this for a single note (`.snbx` package, `source/batch/BatchOperations.h`); the work is to extend it to a whole notebook.
+
+Still to decide:
+- Where the library lives on disk: one root folder chosen in the settings.
+- What happens to today's "starred" list and its folders: keep it as a "favourites" view.
 
 ### Part E - Hoverbox
 
@@ -146,7 +180,7 @@ Later idea for E2: "copy as LaTeX" that gives a ready `\begin{FancyCode}` block.
 | # | Step | Size | Status |
 |---|---|---|---|
 | D1 | **Settings you can understand.** One settings page with a search box, good icons and good readability. Each setting: a clear name and one line of help. The user asked for this again on 2026-11-19: today an option is hard to find. Also to fix here: the Background tab shows the app defaults, not the paper of the open notebook. | M-L | Next big step after the Part A tests |
-| D0 | **Window bar like a native app (OneNote is the model).** The user's words, 2026-11-19: OneNote has the perfect top (logo, quick tools, minimise / maximise / close in one integrated bar); GoodNotes looks like a cheap Chromium web app; SpeedyNote looked the cheapest. | M | Step 1 done 2026-11-19: the Windows title bar has no grey band of its own, our bar colour runs under it, and the native buttons stay (`Qt::ExpandedClientAreaHint`, Qt 6.9+, in `MainWindow`). Step 2 to do: move our buttons (back, sidebar, save, title) INTO the title row, so there is one row, not two. Hard part: Windows treats that row as "drag the window", so clicks on our buttons need a hit-test rule. |
+| D0 | **Window bar like a native app (OneNote is the model).** The user's words, 2026-11-19: OneNote has the perfect top (logo, quick tools, minimise / maximise / close in one integrated bar); GoodNotes looks like a cheap Chromium web app; SpeedyNote looked the cheapest. | M | Step 1 done 2026-11-19: the Windows title bar has no grey band of its own, our bar colour runs under it, and the native buttons stay (`Qt::ExpandedClientAreaHint`, Qt 6.9+, in `MainWindow`). Step 2 done 2026-11-19: one row. From left to right: app icon, back, left panel, save, new, search, the title with the app name, full screen, export, right panel, menu, then minimise / maximise / close. Qt offers each press in that row to our buttons first, and empty space drags the window. **To check by the user: every button of the row reacts to a mouse click and to a pen tap.** Still to do: a real search field in the row (today the search button opens the search bar that exists). Also done 2026-11-19: house icon for home; minimise / maximise / close drawn with Lucide icons, placed exactly on the real Windows button zones (so snap, double-click and Win+arrows stay native); full screen is a real full screen (no title row, no tab bar, no taskbar, a small button to leave) and uses every pixel (it lost 8 px on three sides before). How it works: `MainWindow::hideQtTitleBarDrawing()` and the `WM_NCHITTEST` / `WM_NCCALCSIZE` cases in `MainWindow::nativeEvent()`. |
 | D2 | **Modern look.** First all colours and sizes in one place. Then one screen at a time. | L | |
 
 ## How the screen is built today
@@ -184,6 +218,21 @@ Checked in the code on 2026-11-19.
 
 Add new ideas here so they are not lost.
 
-- **Connect an AI (LLM) with your own API key.** A settings screen where you choose a service (Claude, Gemini, OpenAI, or any other with a compatible address) and paste your key. The key stays on your computer. To decide later: what the AI does in the app (explain a page, summarise notes, turn handwriting into LaTeX, answer questions about a PDF). Rule 1 applies: no AI code may slow the pen.
+- **Connect an AI (LLM) with your own API key.** A settings screen where you choose a service (Claude, Gemini, OpenAI, or any other with a compatible address) and paste your key. The key stays on your computer. Rule 1 applies: no AI code may slow the pen. What the user wants from it (handwritten list, 2026-11-19):
+  - Index the content of the notes, to search in them.
+  - Generate images.
+  - An MCP connection, so an AI can create notes in the app.
+  - Earlier ideas: explain a page, summarise notes, turn handwriting into LaTeX, answer questions about a PDF.
+
+From the user's handwritten list of 2026-11-19 (each one still needs a size and a place in the parts above):
+
+- **Hatching tool** (outil pour hachure): fill a closed area with parallel lines. Goes with shapes (B6).
+- **Flip** a selection, horizontal or vertical (symétrie). Small: the lasso already rotates and scales.
+- **Circle from a centre and a radius.** Goes with shapes (B6) and the ruler (B2).
+- **Paper colour yellow / white / black, with or without effect on printing.** The colour exists today. New: a choice "print with the paper colour" or "print on white".
+- **Insert space**: push the content below a line up or down, as in OneNote.
+- **Floating toolbar that snaps to any side.** This is the rest of A3.
+- **Templates: a ruler with an angle you set in degrees or radians, to 1 degree.** Extends B2.
+- **Several notes open in split screen.** Exists today (split view, `Ctrl+\`). To check with the user if it does what they need.
 - Quick bar: you choose its content, more colours, line width, open with a long finger press.
 - Toolbar: when undo and redo are both hidden, a small empty gap stays where they were.

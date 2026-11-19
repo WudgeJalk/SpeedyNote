@@ -220,10 +220,19 @@ MainWindow::MainWindow(QWidget *parent)
     setWindowTitle(QStringLiteral("SpeedyNote"));
 
 #if defined(Q_OS_WIN) && QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
-    // One header, not a grey Windows title bar above ours: the window keeps
-    // its native buttons (and snap layouts), but the title bar has no
-    // background of its own, so paintEvent() can run our bar colour under it.
+    // The navigation bar IS the title row: the window keeps its native
+    // buttons (and snap layouts), but the title bar has no background of its
+    // own and our content starts at the very top, under it. Qt then offers
+    // each press in that row to our widgets first: a button takes it, empty
+    // space drags the window (qwindowswindow.cpp, handleNonClientHitTest).
+    // The window flags stay the standard ones, so Windows and Qt keep all
+    // their normal behaviour (snap, double-click to maximise, the three
+    // button zones at the top right). Only Qt's DRAWING of the row (small
+    // icon, small title, button glyphs) is hidden, see hideQtTitleBarDrawing().
+    // The navigation bar puts its own icons exactly on the button zones.
     setWindowFlags(windowFlags() | Qt::ExpandedClientAreaHint | Qt::NoTitleBarBackgroundHint);
+    setAttribute(Qt::WA_ContentsMarginsRespectsSafeArea, false);
+    m_navBarIsTitleRow = true;
 #endif
 
     // Before anything can realise this window: on HarmonyOS it has to be a
@@ -1154,6 +1163,18 @@ void MainWindow::setupUi() {
     connect(m_navigationBar, &NavigationBar::addClicked, this, [this]() {
         // Phase P.4.3: Show dropdown menu for new document options
         showAddMenu();
+    });
+    if (m_navBarIsTitleRow) {
+        // 3 window buttons of 46 px each, as Windows 11 draws them.
+        m_navigationBar->setTitleBarMode(QIcon(QStringLiteral(":/resources/icons/mainicon.svg")), 0);
+        connect(m_navigationBar, &NavigationBar::minimizeClicked, this, &QWidget::showMinimized);
+        connect(m_navigationBar, &NavigationBar::maximizeClicked, this, [this]() {
+            isMaximized() ? showNormal() : showMaximized();
+        });
+        connect(m_navigationBar, &NavigationBar::closeClicked, this, &QWidget::close);
+    }
+    connect(m_navigationBar, &NavigationBar::searchClicked, this, []() {
+        if (QAction *find = ShortcutManager::instance()->action(QStringLiteral("app.find"))) find->trigger();
     });
     connect(m_navigationBar, &NavigationBar::filenameClicked, this, [this]() {
         // Toggle tab bar visibility
@@ -5017,6 +5038,12 @@ void MainWindow::focusInEvent(QFocusEvent *event) {
 }
 
 void MainWindow::changeEvent(QEvent *event) {
+    // Our own maximise button shows "restore" while the window is maximised.
+    if (event->type() == QEvent::WindowStateChange && m_navigationBar) {
+        if (m_navBarIsTitleRow) m_navigationBar->setWindowMaximized(isMaximized());
+        applyFullscreenChrome(isFullScreen());
+    }
+
     // MAC.4: Window-activation hook. focusInEvent only fires when the
     // MainWindow itself is the focus widget; on multi-window setups the
     // active widget is almost always a child (canvas, QTextBrowser, etc.),
@@ -5200,6 +5227,9 @@ bool MainWindow::eventFilter(QObject *obj, QEvent *event) {
     // BUG-AB-001/UI-001 FIX: Use m_canvasContainer directly instead of m_viewportStack->parentWidget()
     // The event filter was installed on m_canvasContainer, so compare with that directly
     if (obj == m_canvasContainer && event->type() == QEvent::Resize) {
+        if (m_exitFullscreenButton && m_exitFullscreenButton->isVisible()) {
+            m_exitFullscreenButton->move(m_canvasContainer->width() - m_exitFullscreenButton->width() - 8, 8);
+        }
         updateScrollbarPositions();  // SB1: repositions the action bar + PDF search bar
         return false; // Let the event propagate
     }
@@ -6468,18 +6498,47 @@ bool MainWindow::scrollBarsPinned() const
     return m_splitViewManager && m_splitViewManager->scrollBarsPinned();
 }
 
-void MainWindow::paintEvent(QPaintEvent *event)
+void MainWindow::hideQtTitleBarDrawing()
 {
-    QMainWindow::paintEvent(event);
-#if defined(Q_OS_WIN) && QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
-    // The strip under the (background-less) Windows title bar takes the same
-    // colour as the navigation bar right below it, so the two read as one.
-    const int top = windowHandle() ? windowHandle()->safeAreaMargins().top() : 0;
-    if (top > 0) {
-        QPainter painter(this);
-        painter.fillRect(0, 0, width(), top, getAccentColor());
+#ifdef Q_OS_WIN
+    // Qt paints the title row (icon, title, button glyphs) in a small child
+    // window of class "_q_titlebar...". Hiding it leaves the row to our bar;
+    // the click zones of the three window buttons do not depend on it.
+    const HWND hwnd = reinterpret_cast<HWND>(internalWinId());
+    if (!hwnd) return;
+    for (HWND child = GetWindow(hwnd, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT)) {
+        wchar_t name[80] = {};
+        GetClassNameW(child, name, 80);
+        if (wcsstr(name, L"_q_titlebar") && IsWindowVisible(child)) ShowWindow(child, SW_HIDE);
     }
 #endif
+}
+
+void MainWindow::applyFullscreenChrome(bool fullscreen)
+{
+    // Full screen is for the page: no title row, no tab bar. The toolbar
+    // stays (unless the user hid it), and a small button leaves full screen.
+    if (m_navigationBar) m_navigationBar->setVisible(!fullscreen);
+    if (QWidget *tabs = m_splitViewManager ? m_splitViewManager->tabBarContainer() : nullptr) {
+        if (fullscreen) {
+            m_tabsShownBeforeFullscreen = tabs->isVisible();
+            tabs->hide();
+        } else if (m_tabsShownBeforeFullscreen) {
+            tabs->show();
+        }
+    }
+    if (fullscreen && !m_exitFullscreenButton && m_canvasContainer) {
+        m_exitFullscreenButton = new ActionButton(m_canvasContainer);
+        m_exitFullscreenButton->setThemedIcon(QStringLiteral("exit_fullscreen"));
+        m_exitFullscreenButton->setToolTip(tr("Leave full screen (F11)"));
+        m_exitFullscreenButton->setDarkMode(isDarkMode());
+        connect(m_exitFullscreenButton, &QPushButton::clicked, this, &MainWindow::toggleFullscreen);
+    }
+    if (m_exitFullscreenButton) {
+        m_exitFullscreenButton->setVisible(fullscreen);
+        m_exitFullscreenButton->move(m_canvasContainer->width() - m_exitFullscreenButton->width() - 8, 8);
+        m_exitFullscreenButton->raise();
+    }
 }
 
 void MainWindow::setToolbarPosition(const QString &position)
@@ -9273,7 +9332,38 @@ bool MainWindow::nativeEvent(const QByteArray &eventType, void *message, long *r
     // Detect Windows theme changes at runtime
     if (eventType == "windows_generic_MSG") {
         MSG *msg = static_cast<MSG *>(message);
-        
+
+        if (m_navBarIsTitleRow) {
+            switch (msg->message) {
+            case WM_NCHITTEST:
+                // In full screen there is no title row, but Qt would still
+                // treat the top right corner as "close / maximise / minimise":
+                // a pen stroke there would close the app. All of it is page.
+                if (isFullScreen()) {
+                    *result = HTCLIENT;
+                    return true;
+                }
+                break;
+            case WM_NCCALCSIZE:
+                // In full screen Qt still keeps 8 px of window frame on the
+                // left, the right and the bottom (measured: content 2384 wide
+                // on a 2400 screen). Answering "no frame at all" gives the
+                // page the whole screen.
+                if (isFullScreen() && msg->wParam) {
+                    *result = 0;
+                    return true;
+                }
+                break;
+            case WM_SHOWWINDOW:
+            case WM_WINDOWPOSCHANGED:
+            case WM_ACTIVATE:
+                hideQtTitleBarDrawing();  // Qt shows it again in some cases
+                break;
+            default:
+                break;
+            }
+        }
+
         // WM_SETTINGCHANGE (0x001A) is sent when system settings change
         if (msg->message == 0x001A) {
             // Check if this is a theme-related setting change

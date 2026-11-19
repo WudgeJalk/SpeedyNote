@@ -357,7 +357,11 @@ protected:
     void keyPressEvent(QKeyEvent *event) override;  // New: Handle keyboard shortcuts
     void keyReleaseEvent(QKeyEvent *event) override; // Track Ctrl key release for trackpad pinch-zoom detection
     void focusInEvent(QFocusEvent *event) override;  // MAC.1: track active MainWindow
-    void paintEvent(QPaintEvent *event) override;    // Colours the strip under the Windows title bar
+    bool m_navBarIsTitleRow = false;                 // Windows: the navigation bar replaces the title bar
+    void hideQtTitleBarDrawing();                    // Hides what Qt paints in the title row
+    void applyFullscreenChrome(bool fullscreen);     // Full screen shows the page, not the bars
+    bool m_tabsShownBeforeFullscreen = false;
+    ActionButton *m_exitFullscreenButton = nullptr;  // Floats on the page in full screen
     void changeEvent(QEvent *event) override;        // Sync nav bar fullscreen button when window state changes (e.g. macOS green button)
     // REMOVED: tabletEvent removed - tablet event handling deleted
 

@@ -1,5 +1,7 @@
 #include "NavigationBar.h"
 #include <QHBoxLayout>
+#include <QLabel>
+#include <QIcon>
 #include <QFontMetrics>
 #include <QPalette>
 #include <QDebug>
@@ -22,10 +24,17 @@ void NavigationBar::setupUi()
     mainLayout->setContentsMargins(4, 4, 4, 4);
     mainLayout->setSpacing(4);
     
+    // App icon: only in title bar mode, where this bar replaces the title row.
+    m_appIconLabel = new QLabel(this);
+    m_appIconLabel->setFixedSize(28, 28);
+    m_appIconLabel->setAlignment(Qt::AlignCenter);
+    m_appIconLabel->hide();
+    mainLayout->addWidget(m_appIconLabel);
+
     // === Left side buttons ===
     m_launcherButton = new ActionButton(this);
-    m_launcherButton->setThemedIcon("left_arrow");  // Back to launcher/recent
-    m_launcherButton->setToolTip(tr("Back to Launcher"));
+    m_launcherButton->setThemedIcon("home");  // Back to the launcher (the home page)
+    m_launcherButton->setToolTip(tr("Home"));
     mainLayout->addWidget(m_launcherButton);
     
     m_leftSidebarButton = new ToggleButton(this);
@@ -42,7 +51,12 @@ void NavigationBar::setupUi()
     m_addButton->setThemedIcon("addtab");
     m_addButton->setToolTip(tr("New Document"));
     mainLayout->addWidget(m_addButton);
-    
+
+    m_searchButton = new ActionButton(this);
+    m_searchButton->setThemedIcon("search");
+    m_searchButton->setToolTip(tr("Find in Document (Ctrl+F)"));
+    mainLayout->addWidget(m_searchButton);
+
     // === Center - Filename (with stretch on both sides) ===
     mainLayout->addStretch(1);
     
@@ -80,6 +94,54 @@ void NavigationBar::setupUi()
     m_menuButton->setThemedIcon("menu");
     m_menuButton->setToolTip(tr("Menu"));
     mainLayout->addWidget(m_menuButton);
+
+    m_captionSpacer = new QWidget(this);
+    m_captionSpacer->setFixedWidth(0);
+    mainLayout->addWidget(m_captionSpacer);
+
+    // Our own minimise / maximise / close, shown in title bar mode only.
+    // Each one is 46 px wide with no gap, flush with the right edge: that is
+    // exactly where Windows/Qt keep the real button zones (1.5 x the 31 px
+    // title height). A click in the top part is handled by Windows itself;
+    // a click lower down, or a pen tap, reaches these buttons. Same result.
+    m_windowButtons = new QWidget(this);
+    m_windowButtons->hide();
+    auto *windowLayout = new QHBoxLayout(m_windowButtons);
+    windowLayout->setContentsMargins(0, 0, 0, 0);
+    windowLayout->setSpacing(0);
+    mainLayout->addWidget(m_windowButtons);
+    auto addWindowButton = [&](const char *icon, const QString &tip, void (NavigationBar::*signal)()) {
+        auto *button = new ActionButton(m_windowButtons);
+        button->setThemedIcon(QLatin1String(icon));
+        button->setToolTip(tip);
+        button->setFixedWidth(46);
+        connect(button, &QPushButton::clicked, this, signal);
+        windowLayout->addWidget(button);
+        return button;
+    };
+    m_minimizeButton = addWindowButton("win_min", tr("Minimize"), &NavigationBar::minimizeClicked);
+    m_maximizeButton = addWindowButton("win_max", tr("Maximize"), &NavigationBar::maximizeClicked);
+    m_closeButton = addWindowButton("cross", tr("Close"), &NavigationBar::closeClicked);
+}
+
+void NavigationBar::setTitleBarMode(const QIcon &appIcon, int captionReserve)
+{
+    m_titleBarMode = true;
+    m_appIconLabel->setPixmap(appIcon.pixmap(22, 22));
+    m_appIconLabel->show();
+    m_captionSpacer->setFixedWidth(captionReserve);
+    m_windowButtons->show();
+    // Flush with the right edge, so the icons sit on the real button zones.
+    QMargins margins = layout()->contentsMargins();
+    margins.setRight(0);
+    layout()->setContentsMargins(margins);
+    setFilename(m_fullFilename);
+}
+
+void NavigationBar::setWindowMaximized(bool maximized)
+{
+    m_maximizeButton->setThemedIcon(maximized ? QStringLiteral("win_restore") : QStringLiteral("win_max"));
+    m_maximizeButton->setToolTip(maximized ? tr("Restore") : tr("Maximize"));
 }
 
 void NavigationBar::connectSignals()
@@ -93,6 +155,8 @@ void NavigationBar::connectSignals()
             this, &NavigationBar::saveClicked);
     connect(m_addButton, &QPushButton::clicked,
             this, &NavigationBar::addClicked);
+    connect(m_searchButton, &QPushButton::clicked,
+            this, &NavigationBar::searchClicked);
     
     // Center
     connect(m_filenameButton, &QPushButton::clicked,
@@ -115,7 +179,9 @@ void NavigationBar::setFilename(const QString &filename)
     
     // Elide if too long (max ~200px for filename area)
     QString displayName = elideFilename(filename, 250);
-    m_filenameButton->setText(displayName);
+    // As the window's title row, it also carries the app name, like a title bar.
+    m_filenameButton->setText(m_titleBarMode ? displayName + QStringLiteral(" — SpeedyNote")
+                                             : displayName);
     
     // Show full name in tooltip if elided
     if (displayName != filename) {
@@ -164,6 +230,8 @@ void NavigationBar::updateTheme(bool darkMode, const QColor &accentColor)
     m_leftSidebarButton->setDarkMode(darkMode);
     m_saveButton->setDarkMode(darkMode);
     m_addButton->setDarkMode(darkMode);
+    m_searchButton->setDarkMode(darkMode);
+    for (ActionButton *button : { m_minimizeButton, m_maximizeButton, m_closeButton }) button->setDarkMode(darkMode);
     m_fullscreenButton->setDarkMode(darkMode);
     m_shareButton->setDarkMode(darkMode);
     m_rightSidebarButton->setDarkMode(darkMode);

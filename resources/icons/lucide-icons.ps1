@@ -17,7 +17,7 @@ $map = [ordered]@{
     marker = 'highlighter'; menu = 'ellipsis-vertical'; move = 'move'; notvisible = 'eye-off'
     objectinsert = 'image'; ocr = 'scan-text'; outline = 'list-tree'; paste = 'clipboard-paste'
     pdf = 'file-text'; pen = 'pen'; recent = 'rotate-ccw-clock'; redo = 'redo'; right_arrow = 'arrow-right'
-    rightsidebar = 'panel-right'; rope = 'lasso'; rope_partial = 'lasso-select'; save = 'save'
+    rightsidebar = 'panel-right'; rope = 'lasso'; rope_partial = 'lasso-select'; save = 'save'; exit_fullscreen = 'minimize'; win_restore = 'copy'; win_max = 'square'; win_min = 'minus'; home = 'house'; search = 'search'
     scan = 'scan'; scanall = 'scan-line'; scroll = 'move-vertical'; select = 'square-dashed-mouse-pointer|mouse-pointer-2'
     settings = 'settings'; shape = 'shapes'; showtext = 'text-initial'; star = 'star'; straightLine = 'slash'
     tabs = 'app-window'; text = 'text-cursor'; thickness = 'spline'; trash = 'trash'; undo = 'undo'

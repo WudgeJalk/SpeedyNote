@@ -6,6 +6,9 @@
 #include <QPushButton>
 #include "ToolbarButtons.h"
 
+class QLabel;
+class QIcon;
+
 /**
  * NavigationBar - Top bar for global/app-wide actions.
  * 
@@ -59,7 +62,20 @@ public:
      */
     QWidget* addButton() const { return m_addButton; }
 
+    /**
+     * Use this bar as the window's title row (Windows, see MainWindow).
+     * Shows the app icon on the left, adds the app name to the title, and
+     * keeps @p captionReserve px free on the right for minimise / maximise / close.
+     */
+    void setTitleBarMode(const QIcon &appIcon, int captionReserve);
+    /// Swap the maximise button between "maximise" and "restore".
+    void setWindowMaximized(bool maximized);
+
 signals:
+    void searchClicked();  // Find in the open document
+    void minimizeClicked();
+    void maximizeClicked();
+    void closeClicked();
     // Left side
     void launcherClicked();
     void leftSidebarToggled(bool checked);
@@ -85,7 +101,15 @@ private:
     ToggleButton *m_leftSidebarButton;
     ActionButton *m_saveButton;
     ActionButton *m_addButton;
-    
+    ActionButton *m_searchButton;
+    QLabel *m_appIconLabel;          // Shown in title bar mode only
+    QWidget *m_captionSpacer;        // Room for system window buttons, if any are kept
+    QWidget *m_windowButtons;        // Holds the three window buttons, no gaps
+    ActionButton *m_minimizeButton;  // Our own window buttons (title bar mode)
+    ActionButton *m_maximizeButton;
+    ActionButton *m_closeButton;
+    bool m_titleBarMode = false;
+
     // Center
     QPushButton *m_filenameButton;
     QString m_fullFilename;  // Store full name for tooltip
