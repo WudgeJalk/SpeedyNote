@@ -7,7 +7,8 @@ Written 2026-11-20, before a `/clear`. Read this file and `docs/ROADMAP.md` firs
 "If you create the brand new toolbar, you just need to go all in with all the toolbar modifications I asked for. Take your time, do a workflow of as many agents as you want."
 
 - Build **all of Part T** of `docs/ROADMAP.md` (T1 to T6), in one batch.
-- T5 and T6 need parts of Part B. Build those too: **B3** (stroke style saved in the file), **B4** (dotted and dashed lines), **B5** (pen types), **B6** (shapes).
+- T5 and T6 need parts of Part B. Build those too: **B1** (laser pointer), **B2** (ruler), **B3** (stroke style saved in the file), **B4** (dotted and dashed lines), **B5** (pen types), **B6** (shapes, connectors, arrows).
+- This is a very large batch. If it must be cut into stages, keep this order of value for the user: the floating two-level bar with colours and stroke presets; draw and hold with arrows; the eraser; the laser; fixed shapes; connectors that follow shapes; the ruler.
 - "Make sure the pen has dotted and dashed lines as well." Line style is a choice of the pen itself, not only of the shape tool.
 - Use a multi-agent **workflow**. Agents run on **Opus and Sonnet only**.
 - The user tests **once, at the end**. Do not ask for a test after each step.
@@ -76,6 +77,53 @@ From the user's second recording (289 frames, 2026-11-20, 24 of them looked at).
 6. **The eraser option bar uses words.** It shows a drop-down that reads "Trait" (stroke), a settings icon, then three sizes. This confirms T4: name the eraser mode in words.
 
 The fixed shapes of the bar (rectangle, circle, triangle, diamond, rounded rectangle) and the two connector lines were not used in the recording.
+
+### More details, from four more recordings and six screenshots (2026-11-20)
+
+The user's rule for all of it: GoodNotes is "not perfect", and "everything should be parameterable in the settings, which is not the case in GoodNotes". Each threshold below (hold time, snap distance, fade time, animation) is a setting.
+
+**Pen bar** (recording and screenshots)
+- Tool row: pen (with a small arrow that opens the pen window), pencil, highlighter, tape, shapes.
+- Then **three stroke presets**. A preset is a width AND a line style: the recording shows "dashed, thin solid, thick solid". So the dotted and dashed choice lives in the preset.
+- Then the colours: black, blue, red, green, purple, grey, and "add". The chosen colour has a small arrow to edit it.
+- **The colour is on the pen**: the pen icon itself shows the chosen colour on its tip.
+- The highlighter has its own three sizes and its own colours.
+- There are short animations when the tool changes. Rule 1 applies: they must cost nothing while the pen writes, and there must be a switch to turn them off.
+
+**Stroke preset window** ("Réglages du trait", shows the width as "0.30 mm" with a reset button)
+- Solid / dashed / dotted.
+- A width slider.
+- "Rounded corners" switch.
+- **Arrow heads**: for the start and for the end, one of: none, open arrow, filled arrow.
+
+**Draw and hold** (pen recording)
+- Draw a line and keep the pen still at the end: it becomes a straight line. Draw a curve and hold: it becomes a smooth curve.
+- **GoodNotes cannot draw an arrow by hand.** The user drew a line and then a small triangle for the head: the head was turned into a broken shape. The user showed this as a failure.
+
+**Arrows by hand** (OneNote recording)
+- OneNote does it right in one way: a line plus a hand-drawn head becomes a clean arrow with a proper head.
+- OneNote does it wrong in two ways: it is **not fluid** (the change comes late and jumps), and a curved line was flattened into a straight arrow.
+- Target for SpeedyNote: recognise "a line, then a head at its end" and make a clean arrow, at once, and **keep the curve** of the line.
+
+**Shape tool** (shape recording)
+- Fixed shapes (rectangle, circle, triangle, diamond, rounded rectangle) are placed as **objects**: they show corner handles, side handles and a rotate handle. A small bar under a selected shape changes its type. A second bar offers order, cut, copy, delete and more.
+- **Connectors.** Two kinds: with right angles (the corners are rounded) and curved. A rough L drawn by hand became a clean right-angle connector. A connector **attaches to the side of a shape**, and it is drawn again when the shape moves. A connector can also start from another connector.
+- Design consequence: fixed shapes and connectors are objects (the app has an object system: `source/objects/InsertedObject.h`). The free shape and "draw and hold" produce cleaned strokes. These are two different models. Decide this early.
+
+**Eraser** (two screenshots)
+- The mode list has two entries with words and one line of help: "Standard eraser" and "Stroke eraser: erases whole strokes by touching them once". Then three sizes.
+- Advanced settings: an **eraser filter** with one switch per tool (pen, pencil, highlighter, tape: "the eraser ignores what was added with the tools that are off"), an "auto deselect" switch, and "Clear the page".
+
+**Laser pointer** (recording and screenshot)
+- Two modes: **Point** (a glowing red dot that follows the pen) and **Line** (a glowing red trail).
+- In line mode the strokes stay while the user keeps writing, then they **fade out together** a moment after the pen stops. Nothing is saved.
+
+**Ruler** (screenshot)
+- A wide ruler lies across the page, with ticks and numbers, and a rotate handle in its centre.
+- Its menu: "Set the angle", "Set the position", "Hide", "Options".
+- The user wants the ruler to **show its current angle on itself**, and to set the angle by number (degrees or radians, to 1 degree, from the earlier list).
+
+**Not asked for by the user, seen in GoodNotes only**: pencil tool, tape tool, stickers, sticky note, audio. Do not build them unless the user asks.
 
 ## What exists today (do not rebuild, do not break)
 
