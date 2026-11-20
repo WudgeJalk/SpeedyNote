@@ -123,7 +123,12 @@ The user's rule for all of it: GoodNotes is "not perfect", and "everything shoul
 - Its menu: "Set the angle", "Set the position", "Hide", "Options".
 - The user wants the ruler to **show its current angle on itself**, and to set the angle by number (degrees or radians, to 1 degree, from the earlier list).
 
-**Not asked for by the user, seen in GoodNotes only**: pencil tool, tape tool, stickers, sticky note, audio. Do not build them unless the user asks.
+**The delay before a line or shape is cleaned** (the user, 2026-11-20): "What I find annoying is the delay." OneNote has a little delay, which is acceptable but sometimes too long. GoodNotes "takes way, way too long sometimes, especially for lines". So for draw and hold, arrows and shapes:
+- The hold time must be **short by default** and **a setting** (a slider in milliseconds). Start around 300 ms and let the user go lower.
+- Once the hold time is over, the cleaned result must appear **at once**: no slow animation between the rough stroke and the clean one, and no heavy work at that moment.
+- A straight line is the most common case and must be the fastest one. Offer a way with **no wait at all**: straight line mode exists today, and a pen button can switch it on (PenBindings).
+
+**Wanted by the user, but later** (2026-11-20: "I want them as well, but later"): pencil tool, tape tool, stickers, sticky notes, audio recording. They are in `docs/ROADMAP.md` under "Ideas for later". Do not build them in this batch, but leave room for more tools in the main bar.
 
 ## What exists today (do not rebuild, do not break)
 

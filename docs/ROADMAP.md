@@ -258,5 +258,6 @@ From the user's handwritten list of 2026-11-19 (each one still needs a size and 
 - **Floating toolbar that snaps to any side.** This is the rest of A3.
 - **Templates: a ruler with an angle you set in degrees or radians, to 1 degree.** Extends B2.
 - **Several notes open in split screen.** Exists today (split view, `Ctrl+\`). To check with the user if it does what they need.
+- **More tools from GoodNotes, wanted but later** (the user, 2026-11-20): a pencil, a tape tool (it hides a part of the page until you tap it), stickers, sticky notes, audio recording. The new toolbar must leave room for them.
 - Quick bar: you choose its content, more colours, line width, open with a long finger press.
 - Toolbar: when undo and redo are both hidden, a small empty gap stays where they were.
