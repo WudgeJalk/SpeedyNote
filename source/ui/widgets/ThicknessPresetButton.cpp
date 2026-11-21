@@ -112,6 +112,13 @@ qreal ThicknessEditDialog::minWidth() const
     return m_minWidthSpinBox ? m_minWidthSpinBox->value() / unitFactor() : -1.0;
 }
 
+void ThicknessEditDialog::setValues(qreal thickness, qreal minWidth)
+{
+    m_spinBox->setValue(thickness * unitFactor());  // Moves the slider and re-clamps the minimum
+    if (m_minWidthSpinBox)
+        m_minWidthSpinBox->setValue(qBound(0.0, minWidth, thickness) * unitFactor());
+}
+
 void ThicknessEditDialog::onSliderChanged(int value)
 {
     // Slider uses page units * 10; the spin boxes (and the clamp) use mm.
@@ -272,10 +279,62 @@ void ThicknessPresetButton::paintEvent(QPaintEvent* event)
     // Centered dot preview (diameter represents thickness)
     const qreal dotDiameter = displayLineWidth();
     const QPointF center(BUTTON_SIZE / 2.0, BUTTON_SIZE / 2.0);
+    const QColor color = adjustedLineColor();
 
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(adjustedLineColor());
-    painter.drawEllipse(center, dotDiameter / 2.0, dotDiameter / 2.0);
+    if (m_lineStyle < 0) {   // A size (marker, eraser): a dot
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(color);
+        painter.drawEllipse(center, dotDiameter / 2.0, dotDiameter / 2.0);
+        return;
+    }
+
+    // A stroke preset: a short line in its style and relative width, with its
+    // arrow heads. Horizontal in either bar: a column of them reads like a legend.
+    const qreal w = qBound(1.0, dotDiameter / 2.0, 6.0);
+    const QPointF a(4.5, center.y()), b(BUTTON_SIZE - 4.5, center.y());
+    QPen line(color, w, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+    // Dash patterns are in pen widths: keep the gaps visible on a thin line.
+    if (m_lineStyle == 1) {
+        line.setCapStyle(Qt::FlatCap);
+        line.setDashPattern({qMax(2.0, 4.0 / w), qMax(1.5, 3.0 / w)});
+    } else if (m_lineStyle == 2) {
+        line.setDashPattern({0.01, qMax(2.0, 3.5 / w)});  // Round caps make each dash a dot
+    }
+    painter.setPen(line);
+    painter.setBrush(Qt::NoBrush);
+    painter.drawLine(a, b);
+
+    auto head = [&](const QPointF& tip, qreal dir, int kind) {
+        if (kind == 0) return;
+        const qreal back = tip.x() - dir * (3.0 + 0.6 * w), half = 1.5 + w / 2.0;
+        QPolygonF wings;  // Built with <<: Qt5's QPolygonF has no initializer-list constructor
+        wings << QPointF(back, tip.y() - half) << tip << QPointF(back, tip.y() + half);
+        painter.setPen(QPen(color, qMin(w, 1.5), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        if (kind == 2) {
+            painter.setBrush(color);
+            painter.drawPolygon(wings);
+        } else {
+            painter.setBrush(Qt::NoBrush);
+            painter.drawPolyline(wings);
+        }
+    };
+    head(b, 1.0, m_arrowEnd);
+    head(a, -1.0, m_arrowStart);
+}
+
+void ThicknessPresetButton::setLineStyle(int lineStyle)
+{
+    if (m_lineStyle == lineStyle) return;
+    m_lineStyle = lineStyle;
+    update();
+}
+
+void ThicknessPresetButton::setArrows(int arrowStart, int arrowEnd)
+{
+    if (m_arrowStart == arrowStart && m_arrowEnd == arrowEnd) return;
+    m_arrowStart = arrowStart;
+    m_arrowEnd = arrowEnd;
+    update();
 }
 
 void ThicknessPresetButton::mousePressEvent(QMouseEvent* event)

@@ -138,6 +138,17 @@ void NavigationBar::setTitleBarMode(const QIcon &appIcon, int captionReserve)
     setFilename(m_fullFilename);
 }
 
+bool NavigationBar::hasOwnButtonAt(const QPoint &pos) const
+{
+    const QWidget *child = childAt(pos);
+    return child && qobject_cast<const QAbstractButton *>(child) && !m_windowButtons->isAncestorOf(child);
+}
+
+QPoint NavigationBar::menuAnchor() const
+{
+    return m_menuButton->mapToGlobal(QPoint(m_menuButton->width(), m_menuButton->height()));
+}
+
 void NavigationBar::setWindowMaximized(bool maximized)
 {
     m_maximizeButton->setThemedIcon(maximized ? QStringLiteral("win_restore") : QStringLiteral("win_max"));

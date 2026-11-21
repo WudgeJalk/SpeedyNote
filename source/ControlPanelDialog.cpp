@@ -4,6 +4,9 @@
 #include "core/ShortcutManager.h"
 #include "core/DocumentViewport.h"
 #include "ui/widgets/LengthSpinBox.h"
+#include "ui/widgets/ColorListRow.h"
+#include "ui/actionbars/ActionBarContainer.h"
+#include "ui/dialogs/DialogSizing.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -47,7 +50,6 @@
 #ifdef Q_OS_HARMONY
 #include "harmony/HarmonyEnvironment.h"
 #include "harmony/HarmonyPersistentGrant.h"
-#include "ui/dialogs/DialogSizing.h"
 #endif
 
 // Android/iOS keyboard fix (BUG-A001)
@@ -164,13 +166,13 @@ ControlPanelDialog::ControlPanelDialog(MainWindow *mainWindow, QWidget *parent)
     : QDialog(parent), mainWindowRef(mainWindow) {
 
     setWindowTitle(tr("Settings"));
-    resize(450, 400);
 
     tabWidget = new QTabWidget(this);
 
     // === Working Tabs ===
     createBackgroundTab();  // Background settings (first tab for importance)
     createToolsTab();       // Stroke tool settings
+    createDrawingTab();     // Lines and drawing thresholds
     createShortcutsTab();   // Phase 5.1: Keyboard shortcuts tab
 
     createThemeTab();
@@ -201,6 +203,22 @@ ControlPanelDialog::ControlPanelDialog(MainWindow *mainWindow, QWidget *parent)
     QVBoxLayout *mainLayout = new QVBoxLayout(this);
     mainLayout->addWidget(tabWidget);
     mainLayout->addLayout(buttonLayout);
+
+    // Every tab scrolls, so the dialog fits its screen and OK / Cancel stay in
+    // view. It opens as big as its tallest tab, capped by the screen; QDialog
+    // centres it on the window.
+    const QSize natural = sizeHint().expandedTo(QSize(450, 400));
+    for (int i = 0; i < tabWidget->count(); ++i) {
+        QWidget *page = tabWidget->widget(i);
+        if (qobject_cast<QScrollArea *>(page)) continue;  // Drawing scrolls already
+        const QString text = tabWidget->tabText(i);
+        tabWidget->removeTab(i);
+        QScrollArea *scroll = DialogSizing::inScrollArea(page, this);
+        tabWidget->insertTab(i, scroll, text);
+        if (page == stylusTab) stylusTab = scroll;  // switchToStylusTab() shows the tab
+    }
+    tabWidget->setCurrentIndex(0);
+    DialogSizing::openAtSize(this, natural);
     
     // Load current settings into UI
     loadSettings();
@@ -418,6 +436,8 @@ void ControlPanelDialog::applyChanges()
 
     if (ocrCjkGridModeCheck)
         settings.setValue("ocrCjkGridMode", ocrCjkGridModeCheck->isChecked());
+
+    applyDrawingTab();
 
     // Apply language settings
     settings.setValue("useSystemLanguage", useSystemLanguageCheckbox->isChecked());
@@ -1256,6 +1276,8 @@ void ControlPanelDialog::createToolsTab()
         QComboBox *positionCombo = new QComboBox(buttonsGroup);
         positionCombo->addItem(tr("Top"), QStringLiteral("top"));
         positionCombo->addItem(tr("Bottom"), QStringLiteral("bottom"));
+        positionCombo->addItem(tr("Left"), QStringLiteral("left"));
+        positionCombo->addItem(tr("Right"), QStringLiteral("right"));
         positionCombo->addItem(tr("Hidden (use the quick bar, Q)"), QStringLiteral("hidden"));
         positionCombo->setCurrentIndex(qMax(0, positionCombo->findData(
             QSettings("SpeedyNote", "App").value("toolbar/position", "top"))));
@@ -1264,6 +1286,92 @@ void ControlPanelDialog::createToolsTab()
         buttonsLayout->addLayout(positionRow);
         connect(positionCombo, QOverload<int>::of(&QComboBox::activated), this, [this, positionCombo](int) {
             if (mainWindowRef) mainWindowRef->setToolbarPosition(positionCombo->currentData().toString());
+        });
+
+        // Both apply at once, like the position.
+        QCheckBox *floatingCheck = new QCheckBox(
+            tr("Float above the page (drag its grip to move it to another edge)"), buttonsGroup);
+        floatingCheck->setChecked(QSettings("SpeedyNote", "App").value("toolbar/floating", true).toBool());
+        floatingCheck->setToolTip(tr("Off: the toolbar is a row of the window, at the top or the bottom."));
+        buttonsLayout->addWidget(floatingCheck);
+        QCheckBox *animationsCheck = new QCheckBox(tr("Animations"), buttonsGroup);
+        animationsCheck->setChecked(QSettings("SpeedyNote", "App").value("toolbar/animations", true).toBool());
+        animationsCheck->setToolTip(tr("Slide the toolbar to its edge and fade in the tool options."));
+        buttonsLayout->addWidget(animationsCheck);
+        auto reapply = [this, positionCombo]() {
+            if (mainWindowRef) mainWindowRef->setToolbarPosition(positionCombo->currentData().toString());
+        };
+        connect(floatingCheck, &QCheckBox::toggled, this, [reapply](bool on) {
+            QSettings("SpeedyNote", "App").setValue("toolbar/floating", on);
+            reapply();
+        });
+        connect(animationsCheck, &QCheckBox::toggled, this, [reapply](bool on) {
+            QSettings("SpeedyNote", "App").setValue("toolbar/animations", on);
+            reapply();
+        });
+
+        // The same gap on all four edges of the page area. Applies at once.
+        QHBoxLayout *gapRow = new QHBoxLayout();
+        gapRow->addWidget(new QLabel(tr("Gap between the floating toolbar and the edge:"), buttonsGroup));
+        LengthSpinBox *edgeGapSpin = new LengthSpinBox(buttonsGroup);
+        edgeGapSpin->setRange(0, 64);   // Same bounds as Toolbar::setPlacement()
+        edgeGapSpin->setValue(QSettings("SpeedyNote", "App").value("toolbar/edgeGap", Toolbar::FLOAT_MARGIN).toInt());
+        gapRow->addWidget(edgeGapSpin);
+        gapRow->addStretch();
+        buttonsLayout->addLayout(gapRow);
+        connect(edgeGapSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [reapply](int gap) {
+            QSettings("SpeedyNote", "App").setValue("toolbar/edgeGap", gap);
+            reapply();
+        });
+
+        // Applies at once; hidden options come back when it is turned off.
+        QCheckBox *tapHidesCheck = new QCheckBox(
+            tr("Tap the selected tool again to hide its options"), buttonsGroup);
+        tapHidesCheck->setChecked(QSettings("SpeedyNote", "App").value("toolbar/tapHidesOptions", true).toBool());
+        tapHidesCheck->setToolTip(tr("Another tap shows them again. Hidden, they stay hidden when you "
+                                     "change tools. Off: that tap opens the tool's window."));
+        buttonsLayout->addWidget(tapHidesCheck);
+        connect(tapHidesCheck, &QCheckBox::toggled, this, [toolbar](bool on) {
+            QSettings("SpeedyNote", "App").setValue("toolbar/tapHidesOptions", on);
+            toolbar->setTapHidesOptions(on);
+        });
+
+        // Pen icons: applies at once, and the list above shows the new buttons.
+        QHBoxLayout *penIconsRow = new QHBoxLayout();
+        penIconsRow->addWidget(new QLabel(tr("Pen icons:"), buttonsGroup));
+        QComboBox *penIconsCombo = new QComboBox(buttonsGroup);
+        penIconsCombo->addItem(tr("Three icons: fountain pen, ball pen, brush pen"), true);
+        penIconsCombo->addItem(tr("One pen icon with the pen window"), false);
+        penIconsCombo->setCurrentIndex(
+            QSettings("SpeedyNote", "App").value("toolbar/threePenIcons", true).toBool() ? 0 : 1);
+        penIconsCombo->setToolTip(tr("Three icons: each picks its pen type. One icon: the pen type is in "
+                                     "the pen window, opened by the gear of the pen bar. Stabilisation "
+                                     "and draw and hold are also in Settings > Drawing."));
+        penIconsRow->addWidget(penIconsCombo);
+        penIconsRow->addStretch();
+        buttonsLayout->addLayout(penIconsRow);
+        connect(penIconsCombo, QOverload<int>::of(&QComboBox::activated), this,
+                [toolbar, penIconsCombo, fill](int) {
+            const bool three = penIconsCombo->currentData().toBool();
+            QSettings("SpeedyNote", "App").setValue("toolbar/threePenIcons", three);
+            toolbar->setThreePenIcons(three);
+            fill();
+        });
+
+        // How many colours a tool's row shows before it scrolls. Applies at once.
+        QHBoxLayout *colorsRow = new QHBoxLayout();
+        colorsRow->addWidget(new QLabel(tr("Colors shown before the row scrolls:"), buttonsGroup));
+        QSpinBox *colorsSpin = new QSpinBox(buttonsGroup);
+        colorsSpin->setRange(3, 20);
+        colorsSpin->setValue(QSettings("SpeedyNote", "App").value("toolbar/visibleColors", 8).toInt());
+        colorsRow->addWidget(colorsSpin);
+        colorsRow->addStretch();
+        buttonsLayout->addLayout(colorsRow);
+        connect(colorsSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int count) {
+            QSettings("SpeedyNote", "App").setValue("toolbar/visibleColors", count);
+            if (mainWindowRef) {
+                for (ColorListRow *row : mainWindowRef->findChildren<ColorListRow*>()) row->reload();
+            }
         });
 
         QLabel *buttonsHint = new QLabel(
@@ -1275,6 +1383,44 @@ void ControlPanelDialog::createToolsTab()
         buttonsHint->setStyleSheet("color: gray; font-size: 11px;");
         buttonsLayout->addWidget(buttonsHint);
         layout->addWidget(buttonsGroup);
+    }
+
+    // --- Selection menu (copy, delete, order...): next to the selection or at the side ---
+    {
+        QGroupBox *menuGroup = new QGroupBox(tr("Selection menu"), toolsTab);
+        QFormLayout *menuLayout = new QFormLayout(menuGroup);
+        QComboBox *placeCombo = new QComboBox(menuGroup);
+        placeCombo->addItem(tr("Next to the selection"), true);
+        placeCombo->addItem(tr("At the side of the window"), false);
+        placeCombo->setCurrentIndex(settings.value("actionBar/nextToSelection", true).toBool() ? 0 : 1);
+        menuLayout->addRow(tr("Selection menu:"), placeCombo);
+        LengthSpinBox *gapSpin = new LengthSpinBox(menuGroup);
+        gapSpin->setRange(0, 200);   // Same bounds as ActionBarContainer::reloadSettings()
+        gapSpin->setValue(settings.value("actionBar/distance", 12).toInt());
+        gapSpin->setEnabled(placeCombo->currentIndex() == 0);
+        menuLayout->addRow(tr("Distance from the selection:"), gapSpin);
+        QLabel *menuHint = new QLabel(
+            tr("Next to the selection: a row under the selected lines or shapes (over them near the "
+               "bottom of the view). It follows the selection and never covers its handles."),
+            menuGroup);
+        menuHint->setWordWrap(true);
+        menuHint->setStyleSheet("color: gray; font-size: 11px;");
+        menuLayout->addRow(menuHint);
+        layout->addWidget(menuGroup);
+        // Applies at once, like the toolbar settings above.
+        auto applyMenu = [this, placeCombo, gapSpin]() {
+            QSettings s("SpeedyNote", "App");
+            s.setValue("actionBar/nextToSelection", placeCombo->currentData().toBool());
+            s.setValue("actionBar/distance", gapSpin->value());
+            gapSpin->setEnabled(placeCombo->currentIndex() == 0);
+            if (!mainWindowRef) return;
+            for (ActionBarContainer *container : mainWindowRef->findChildren<ActionBarContainer*>()) {
+                container->reloadSettings();
+                container->updatePosition(QRect());   // Keeps its view and selection
+            }
+        };
+        connect(placeCombo, QOverload<int>::of(&QComboBox::activated), this, applyMenu);
+        connect(gapSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, applyMenu);
     }
 
     // --- Panning settings group ---
@@ -2288,7 +2434,7 @@ void ControlPanelDialog::createStylusTab() {
     ShortcutManager *sm = ShortcutManager::instance();
     static const ToolType kTools[] = {
         ToolType::Pen, ToolType::Marker, ToolType::Highlighter, ToolType::Eraser,
-        ToolType::Lasso, ToolType::ObjectSelect, ToolType::Pan
+        ToolType::Lasso, ToolType::ObjectSelect, ToolType::Pan, ToolType::Shape, ToolType::Laser
     };
     auto toolLabel = [sm](ToolType tool) {
         return sm->displayNameForAction(QStringLiteral("tool.") + PenBindings::toolName(tool));
@@ -2345,6 +2491,8 @@ void ControlPanelDialog::createStylusTab() {
     penButtonsNote->setWordWrap(true);
     penButtonsNote->setStyleSheet("color: gray; font-size: 10px;");
     layout->addWidget(penButtonsNote);
+
+    addPenVibrationGroup(layout, stylusTab);   // ControlPanelDrawingTab.cpp
 
 #ifdef Q_OS_LINUX
     // Palm rejection section

@@ -20,7 +20,9 @@ enum class ToolType {
     Highlighter,///< Vector highlighter - highlight blend mode (Phase 2B)
     Lasso,      ///< Selection tool - select and manipulate strokes (Phase 2B)
     ObjectSelect,///< Object selection tool - select and manipulate inserted objects (Phase O2)
-    Pan         ///< Hand tool - click-drag to pan the viewport
+    Pan,        ///< Hand tool - click-drag to pan the viewport
+    Shape,      ///< Shape bar: free shape, connectors and fixed shapes (new values go last)
+    Laser       ///< Laser pointer: a glowing dot or trail that fades, never saved
 };
 
 // Qt5 does not auto-generate qHash for enum class types used as QHash keys.

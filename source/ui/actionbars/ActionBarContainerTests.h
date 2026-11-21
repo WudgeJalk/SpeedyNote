@@ -202,9 +202,10 @@ inline bool testTextSelectionShape()
 
     Fixture f;
 
-    // setupButtons() order: mode, aspect lock, OCR lock, OCR convert, Copy, Paste.
-    QWidget* copyButton = f.objectBarButton(4);
-    QWidget* pasteButton = f.objectBarButton(5);
+    // setupButtons() order: mode, aspect lock, OCR lock, OCR convert, Edit points,
+    // corners, Copy, Paste.
+    QWidget* copyButton = f.objectBarButton(6);
+    QWidget* pasteButton = f.objectBarButton(7);
     if (!copyButton || !pasteButton) {
         qDebug() << "FAIL: could not reach the Copy / Paste buttons";
         return false;
@@ -248,6 +249,33 @@ inline bool testTextSelectionShape()
     return success;
 }
 
+/**
+ * The selection menu next to the selection: under it at the distance, over it
+ * when the view has no room below, centred on it and always inside the view.
+ */
+inline bool testPlaceNear()
+{
+    qDebug() << "=== Test: selection menu next to the selection ===";
+    bool success = true;
+    const QRect view(0, 0, 1000, 800);
+    const QSize bar(200, 44);
+    const auto expect = [&success](const char* what, const QRect& got, const QPoint& at) {
+        if (got.topLeft() != at) {
+            qDebug() << "FAIL:" << what << "at" << got.topLeft() << "expected" << at;
+            success = false;
+        } else {
+            qDebug() << "  -" << what << ": OK";
+        }
+    };
+    using C = ActionBarContainer;
+    expect("under the selection", C::placeNear(bar, QRect(400, 100, 200, 100), view, 12), QPoint(400, 212));
+    expect("over it near the bottom", C::placeNear(bar, QRect(400, 700, 200, 60), view, 12), QPoint(400, 644));
+    expect("kept inside on the left", C::placeNear(bar, QRect(-50, 100, 60, 60), view, 12), QPoint(8, 172));
+    expect("selection taller than the view", C::placeNear(bar, QRect(400, 10, 200, 790), view, 12),
+           QPoint(400, 748));
+    return success;
+}
+
 inline bool runAllTests()
 {
     qDebug() << "";
@@ -267,6 +295,7 @@ inline bool runAllTests()
     run(testVisibilityRouting());
     run(testActionModeToggleScope());
     run(testTextSelectionShape());
+    run(testPlaceNear());
 
     qDebug() << "=== Results:" << passed << "passed," << failed << "failed ===";
     return failed == 0;

@@ -5,6 +5,7 @@
 #include <QVBoxLayout>
 
 class QFrame;
+class ActionBarButton;
 
 /**
  * @brief Abstract base class for all action bars.
@@ -48,6 +49,20 @@ public:
      */
     virtual void setDarkMode(bool darkMode);
 
+    /// Vertical: the column at the side of the window. Horizontal: the pill
+    /// next to the selection.
+    void setOrientation(Qt::Orientation orientation);
+
+    /// The shape buttons ("Edit points" and the corner rounding), for bars that
+    /// added them. @p canEditPoints false hides both; @p step -1 hides the rounding.
+    void setShapeEdit(bool canEditPoints, bool editPointsOn, int step);
+
+signals:
+    /// "Edit points" turned on or off.
+    void editPointsToggled(bool on);
+    /// A corner rounding was chosen: 0 sharp, 1 small, 2 medium, 3 large.
+    void cornerStepChosen(int step);
+
 protected:
     /**
      * @brief Add a button widget to the action bar layout.
@@ -55,6 +70,9 @@ protected:
      */
     void addButton(QWidget* button);
     
+    /// Add the two shape buttons here, hidden until setShapeEdit() shows them.
+    void addShapeEditButtons();
+
     /**
      * @brief Add a horizontal separator line between button groups.
      */
@@ -93,6 +111,11 @@ protected:
     
     /// Border radius for rounded corners
     static constexpr int BORDER_RADIUS = 8;
+
+private:
+    ActionBarButton* m_editPointsButton = nullptr;
+    ActionBarButton* m_cornersButton = nullptr;
+    int m_cornerStep = -1;
 };
 
 #endif // ACTIONBAR_H

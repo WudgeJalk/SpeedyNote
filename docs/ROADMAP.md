@@ -76,7 +76,7 @@ Size: S = about one sitting. M = a few sittings. L = many sittings.
 | A1 | **Pen buttons.** Side button and back end. Each gesture (press, press twice, hold while writing, hold in the air) can call: any app command, a tool while held, or "switch tool then back". Settings table in the Stylus tab. | S | Code written 2026-11-19, tests pass (`--test-penbindings`). Tried by the user on the Surface: the lasso hold and the press-once toggle work. Fixed after that test: the toggle acted late, and the top bar was white on white with a light Windows accent colour. |
 | A2 | **Quick bar at the pen tip.** Hold the side button (or long-press with a finger, or a key): a small bar opens where the pen is. It holds what you change often: favourite colours, pen / highlighter / eraser, straight line, line type. You choose what is in it. Release or tap to pick. | M | First version written 2026-11-19 (`source/ui/QuickBar.cpp`). Opens with a side button hold in the air, or the Q key. Holds 5 tools, straight line, and the 3 pen colours. **Not yet tried with a real pen.** Still to do: you choose its content, more colours, line width, open with a long finger press. |
 | A3 | **Bar where you want.** Main toolbar: top, bottom, left, right, or hidden. Action bar: left or right. Hide the buttons you do not use. | M | Partly done 2026-11-19: you can hide toolbar buttons (Settings > Tools > Toolbar buttons) and turn the scroll bars off for good (Settings > Theme). Also done 2026-11-19: an icon editor for the toolbar (drag to reorder, double-tap to hide; Settings > Tools) and toolbar position top / bottom / hidden. **Next to do, asked again by the user on 2026-11-19 (GoodNotes is the model):** the toolbar floats above the page and takes only the room its buttons need. You drag it. When you drop it, it snaps to the nearest side: top, bottom, left or right, never the middle. On the left and right it is vertical. Hard parts: the toolbar is one horizontal row with a paging system and tool options that open in the row; all three must learn the vertical direction. Also: move the action bar. |
-| A4 | **Top click and vibration** of the Slim Pen 2. Windows only. | M | Needs A1 |
+| A4 | **Top click and vibration** of the Slim Pen 2. Windows only. | M | Vibration written 2026-11-21 (`source/core/PenHaptics.cpp`, Windows 11 + C++/WinRT): a click when something snaps into place, a light click on a tool change, a paper feel while writing (by tool). Settings > Stylus > Pen Vibration. Decision logic tested (`--test-penbindings`). **Not yet felt on the real pen.** Top click: still to do. |
 | A5 | **Profiles.** Save a full setup (bars + pen buttons + quick bar) under a name. Example: "Lecture", "Exercise", "Reading". | S-M | Needs A1-A3 |
 
 #### A1 device test (to do on the Surface with the Slim Pen 2)
@@ -110,12 +110,12 @@ What the user likes in GoodNotes, from two screenshots:
 
 | # | Step | Size | Status |
 |---|---|---|---|
-| T1 | **The floating bar.** It floats above the page and takes only the room it needs. Drag it; it snaps to the top, bottom, left or right, never the middle. Vertical on the left and right. (This is the rest of A3.) | M | |
-| T2 | **Two levels.** Main bar = tool families. Option bar = the options of the tool in use. This replaces the options that open inside the row today. | M-L | Needs T1 |
-| T3 | **Colours without a limit.** Any number of colours in the option bar. Add, remove, change, reorder. The row scrolls when it is long. Each tool keeps its own list. | M | Needs T2 |
-| T4 | **One eraser, clear choices.** One eraser button. Its options use plain words and a small picture: "the whole line", "only what I touch", "all lines in a loop". | S | Needs T2. The 4 eraser modes exist today; this is naming and layout. |
-| T5 | **Pen window.** Pen type with a live preview, stabilisation slider, "draw and hold" switch, link to the pen button settings. | M | Needs T2, B3, B5, B6 |
-| T6 | **Shape bar.** The shapes and connectors above, line style, colour. | M-L | Needs T2, B6 |
+| T1 | **The floating bar.** It floats above the page and takes only the room it needs. Drag it; it snaps to the top, bottom, left or right, never the middle. Vertical on the left and right. (This is the rest of A3.) | M | Code written 2026-11-20, all test groups pass. **Not yet tried by the user.** |
+| T2 | **Two levels.** Main bar = tool families. Option bar = the options of the tool in use. This replaces the options that open inside the row today. | M-L | Code written 2026-11-20, all test groups pass. **Not yet tried by the user.** |
+| T3 | **Colours without a limit.** Any number of colours in the option bar. Add, remove, change, reorder. The row scrolls when it is long. Each tool keeps its own list. | M | Code written 2026-11-20, all test groups pass. **Not yet tried by the user.** |
+| T4 | **One eraser, clear choices.** One eraser button. Its options use plain words and a small picture: "the whole line", "only what I touch", "all lines in a loop". | S | Code written 2026-11-20, all test groups pass. **Not yet tried by the user.** |
+| T5 | **Pen window.** Pen type with a live preview, stabilisation slider, "draw and hold" switch, link to the pen button settings. | M | Code written 2026-11-20, all test groups pass. **Not yet tried by the user.** |
+| T6 | **Shape bar.** The shapes and connectors above, line style, colour. | M-L | Code written 2026-11-20, all test groups pass. **Not yet tried by the user.** |
 
 **Decided by the user on 2026-11-20: go all in.** Build T1 to T6 in one batch, with the parts of Part B they need (B3, B4, B5, B6). "Make sure the pen has dotted and dashed lines as well": the line style is a choice of the pen, not only of the shapes. The brief for that work is `docs/NEXT_SESSION.md`.
 
@@ -125,12 +125,12 @@ What the user's second recording of the GoodNotes free shape tool shows (2026-11
 
 | # | Step | Size | Status |
 |---|---|---|---|
-| B1 | **Laser pointer.** A trail that fades, and is never saved. For when you explain to a friend. | S | |
-| B2 | **Ruler.** A ruler on the page that you move and turn. The pen follows its edge. | M | |
-| B3 | **Stroke style in the file.** Two optional fields in a stroke: pen type and line style. Opens B4 and B5. | S | |
-| B4 | **Dotted and dashed lines.** | S | Needs B3 |
-| B5 | **Pen types.** Ball pen, fountain pen, brush pen, with sizes. | M | Needs B3 |
-| B6 | **Shapes, two ways.** (1) Hold the pen still at the end of a stroke: that one stroke becomes clean. (2) **Shape mode** (a switch): each stroke is cleaned when the pen leaves the screen. The stroke is cut where the pen stops or turns, each part becomes a straight line, and the shape closes if the end is near the start. It then becomes a line, triangle, rectangle, polygon, circle or ellipse. | M-L | |
+| B1 | **Laser pointer.** A trail that fades, and is never saved. For when you explain to a friend. | S | Code written 2026-11-20, all test groups pass. **Not yet tried by the user.** |
+| B2 | **Ruler.** A ruler on the page that you move and turn. The pen follows its edge. | M | Code written 2026-11-20, all test groups pass. **Not yet tried by the user.** |
+| B3 | **Stroke style in the file.** Two optional fields in a stroke: pen type and line style. Opens B4 and B5. | S | Code written 2026-11-20, all test groups pass. **Not yet tried by the user.** |
+| B4 | **Dotted and dashed lines.** | S | Code written 2026-11-20, all test groups pass. **Not yet tried by the user.** |
+| B5 | **Pen types.** Ball pen, fountain pen, brush pen, with sizes. | M | Code written 2026-11-20, all test groups pass. **Not yet tried by the user.** |
+| B6 | **Shapes, two ways.** (1) Hold the pen still at the end of a stroke: that one stroke becomes clean. (2) **Shape mode** (a switch): each stroke is cleaned when the pen leaves the screen. The stroke is cut where the pen stops or turns, each part becomes a straight line, and the shape closes if the end is near the start. It then becomes a line, triangle, rectangle, polygon, circle or ellipse. | M-L | Code written 2026-11-20, all test groups pass. **Not yet tried by the user.** |
 | B7 | **Shape handles.** Rotate and resize a shape with 4 corner handles. Reuse the lasso handles. | S-M | Needs B6 |
 
 **Pen rule for all of Part B: four independent choices.** Colour, width, pen type (pencil, ball pen, fountain pen, brush pen) and line type (solid, dotted, dashed). A change to one never changes the other three.
@@ -139,7 +139,7 @@ What the user's second recording of the GoodNotes free shape tool shows (2026-11
 
 | # | Step | Size | Status |
 |---|---|---|---|
-| C1 | **Notebook > section > sub-section > note.** See "The library model" below. A side panel with 3 columns, like OneNote: notebooks, sections, notes. | M-L | Plan written 2026-11-19, to be corrected by the user |
+| C1 | **Notebook > section > sub-section > note.** See "The library model" below. A side panel with 3 columns, like OneNote: notebooks, sections, notes. | M-L | Built 2026-11-21 ("Library" page of the start screen, `source/core/LibraryTree.*`, `source/ui/launcher/LibraryView.*`, packed notebook `.snbpack`). To test by the user. |
 | C1b | **Export a whole notebook as one PDF.** All notes, in the order of the panel, from top to bottom. | M | Needs C1. The app already exports one note to PDF and has a batch export. |
 | C2 | **Structure templates.** Make a new class with its sections in one action (Cours, Examen, Résumé, Exercices, Corrigés). | S | Needs C1 |
 | C3 | **PDF between pages.** Drop a PDF on a section, or between two pages of a notebook. Example: an A4 PDF between two A4 note pages. | M | To check: what works today |
@@ -177,9 +177,10 @@ Proposed, waiting for the user's yes: **many small files to work, one file to ca
 - Work: the folder tree above. Fast, and safe (a damaged file costs one note, not the notebook).
 - Carry: "Pack notebook" makes ONE file of a whole notebook (all sections, order and colours). "Open a packed notebook" unpacks it into the library. The app already has this for a single note (`.snbx` package, `source/batch/BatchOperations.h`); the work is to extend it to a whole notebook.
 
-Still to decide:
-- Where the library lives on disk: one root folder chosen in the settings.
-- What happens to today's "starred" list and its folders: keep it as a "favourites" view.
+Decided by the user on 2026-11-21:
+- **No single root folder.** The user chooses the folder each time he creates a notebook. The app keeps the list of the notebook folders it knows.
+- **"Pack notebook": yes.** One file to carry or back up a whole notebook. The user's worry: a folder with inner folders is easier to damage than one file. The answer is this pack file, and that one damaged file costs one note only.
+- Today's "starred" list stays, as a "favourites" view.
 
 ### Part E - Hoverbox
 
@@ -202,9 +203,10 @@ Later idea for E2: "copy as LaTeX" that gives a ready `\begin{FancyCode}` block.
 
 | # | Step | Size | Status |
 |---|---|---|---|
-| D1 | **Settings you can understand.** One settings page with a search box, good icons and good readability. Each setting: a clear name and one line of help. The user asked for this again on 2026-11-19: today an option is hard to find. Also to fix here: the Background tab shows the app defaults, not the paper of the open notebook. | M-L | Next big step after the Part A tests |
+| D1 | **Settings you can understand.** One settings page with a search box, good icons and good readability. Each setting: a clear name and one line of help. The user asked for this again on 2026-11-19: today an option is hard to find. Also to fix here: the Background tab shows the app defaults, not the paper of the open notebook. | M-L | Next big step after the Part A tests. The user again on 2026-11-21, after the toolbar batch added many settings: "We will need to create a setting panel with categories, interface, writing experience, and many other things in order for the user not to get lost." So: a list of categories on the left (Interface, Writing experience, Pen and touch, Shapes, Page, Files...), one page per category, a search box. Each new feature keeps its settings (rule 3), and each setting goes in its category. |
 | D0 | **Window bar like a native app (OneNote is the model).** The user's words, 2026-11-19: OneNote has the perfect top (logo, quick tools, minimise / maximise / close in one integrated bar); GoodNotes looks like a cheap Chromium web app; SpeedyNote looked the cheapest. | M | Step 1 done 2026-11-19: the Windows title bar has no grey band of its own, our bar colour runs under it, and the native buttons stay (`Qt::ExpandedClientAreaHint`, Qt 6.9+, in `MainWindow`). Step 2 done 2026-11-19: one row. From left to right: app icon, back, left panel, save, new, search, the title with the app name, full screen, export, right panel, menu, then minimise / maximise / close. Qt offers each press in that row to our buttons first, and empty space drags the window. **To check by the user: every button of the row reacts to a mouse click and to a pen tap.** Still to do: a real search field in the row (today the search button opens the search bar that exists). Also done 2026-11-19: house icon for home; minimise / maximise / close drawn with Lucide icons, placed exactly on the real Windows button zones (so snap, double-click and Win+arrows stay native); full screen is a real full screen (no title row, no tab bar, no taskbar, a small button to leave) and uses every pixel (it lost 8 px on three sides before). How it works: `MainWindow::hideQtTitleBarDrawing()` and the `WM_NCHITTEST` / `WM_NCCALCSIZE` cases in `MainWindow::nativeEvent()`. |
 | D1b | **Each menu and window looks like a real app.** The user, 2026-11-19: the menus look "too generic", and some options cannot be understood. Each window gets the same treatment as the settings: clear words, grouping, the app's own style. Remove or explain each option that a student cannot understand. | L | With D1 |
+| D3 | **An app font of our own.** The user, 2026-11-20: change the default font of the app, to give it an identity. To choose with the user: which font (the license must allow us to ship it, for example OFL), and a setting to go back to the system font. | S | |
 | D2 | **Modern look.** First all colours and sizes in one place. Then one screen at a time. | L | |
 
 ## How the screen is built today

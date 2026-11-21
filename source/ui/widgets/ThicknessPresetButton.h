@@ -50,6 +50,8 @@ public:
 
 protected:
     void done(int result) override;  // Android keyboard fix (BUG-A001)
+    /// Set the shown width and minimum width (page units), e.g. for a reset.
+    void setValues(qreal thickness, qreal minWidth);
 
 private slots:
     void onSliderChanged(int value);
@@ -124,7 +126,13 @@ public:
      * @param color The line color.
      */
     void setLineColor(const QColor& color);
-    
+
+    /// Stroke presets: a line style (StrokeStyle::LineStyle) and arrow heads
+    /// (StrokeStyle::Arrow) turn the dot into a short line in that style.
+    /// Never called (marker, eraser sizes): the dot stays.
+    void setLineStyle(int lineStyle);
+    void setArrows(int arrowStart, int arrowEnd);
+
     /**
      * @brief Get the recommended size for this widget.
      */
@@ -195,7 +203,10 @@ private:
     bool m_pressed = false;
     bool m_hovered = false;
     QColor m_lineColor = Qt::black;
-    
+    int m_lineStyle = -1;   ///< -1: a size, drawn as a dot
+    int m_arrowStart = 0;
+    int m_arrowEnd = 0;
+
     static constexpr int BUTTON_SIZE = 24;
     static constexpr int BORDER_RADIUS = BUTTON_SIZE / 2;
     static constexpr int BORDER_WIDTH_NORMAL = 1;

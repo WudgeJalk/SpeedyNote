@@ -10,11 +10,15 @@
 #include "DocumentViewport.h"
 #include "DarkModeUtils.h"
 #include "Document.h"
+#include "DrawingSettings.h"
+#include "LaserPointer.h"
 #include "ObjectConstraints.h"
 #include "Page.h"
 #include "../objects/ImageObject.h"
 #include "../objects/LinkObject.h"
 #include "../objects/OcrTextObject.h"
+#include "../objects/ConnectorObject.h"
+#include "../objects/ShapeObject.h"
 #include "../ui/banners/MissingPdfBanner.h"
 #include "../ui/panels/InlineTextBoxEditor.h"
 #include "../ui/panels/LinkObjectBar.h"
@@ -26,6 +30,7 @@
 #include "../../markdown/qmarkdowntextedit.h"
 #include "../strokes/VectorStroke.h"
 #include "../strokes/StrokePoint.h"
+#include "../strokes/ShapeCleaner.h"
 
 #include <QAbstractItemView>
 #include <QApplication>
@@ -40,10 +45,13 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QDoubleSpinBox>
+#include <QEventLoop>
 #include <QFontComboBox>
+#include <QImage>
 #include <QLineEdit>
 #include <QMouseEvent>
 #include <QTemporaryDir>
+#include <QSettings>
 #include <QSignalSpy>
 #include <QSlider>
 #include <QTabletEvent>
@@ -51,10 +59,12 @@
 #include <QTextCursor>
 #include <QTextDocument>
 #include <QTextLayout>
+#include <QTimer>
 #include <QToolButton>
 #include <QtNumeric>
 #include <QtMath>
 #include <cstdio>
+#include <limits>
 #include <memory>
 
 /**
@@ -6183,6 +6193,417 @@ public:
         return true;
     }
 
+    /// Puts the default dash look in place for a test and the user's back after.
+    struct DefaultLookGuard {
+        StrokeStyle::Look saved = StrokeStyle::look();
+        DefaultLookGuard() { StrokeStyle::look() = StrokeStyle::Look(); }
+        ~DefaultLookGuard() { StrokeStyle::look() = saved; }
+    };
+
+    /**
+     * @brief A piece of a dashed stroke keeps the dashes of the whole stroke.
+     *
+     * The live stroke redraws ranges of itself, the eraser cuts strokes and
+     * the edgeless canvas splits them at tiles. Each piece must show its
+     * dashes exactly where the whole stroke has them, and each arrow head
+     * must stay only on the piece that holds its end.
+     */
+    static bool testDashedSliceMatchesWhole()
+    {
+        printf("  testDashedSliceMatchesWhole... ");
+        auto fail = [](const char* message) {
+            printf("FAILED: %s\n", message);
+            return false;
+        };
+        DefaultLookGuard look;
+
+        // Horizontal line, 5 units between points, x = 0..500, width 4:
+        // dashes of 12 every 22, open arrow at the start, filled at the end.
+        VectorStroke whole;
+        whole.color = Qt::black;
+        whole.baseThickness = 4.0;
+        whole.lineStyle = StrokeStyle::Dashed;
+        whole.arrowStart = StrokeStyle::Open;
+        whole.arrowEnd = StrokeStyle::Filled;
+        for (int i = 0; i <= 100; ++i) {
+            StrokePoint pt;
+            pt.pos = QPointF(i * 5.0, 50.0);
+            pt.pressure = 1.0;
+            whole.points.append(pt);
+        }
+        whole.updateBoundingBox();
+
+        // Bounds of the pieces lying fully between x = lo and x = hi.
+        auto piecesIn = [](const VectorStroke& s, qreal lo, qreal hi) {
+            QVector<QRectF> rects;
+            for (const QPolygonF& piece : VectorLayer::buildStrokePolygon(s).pieces) {
+                const QRectF r = piece.boundingRect();
+                if (r.left() >= lo && r.right() <= hi) rects.append(r);
+            }
+            return rects;
+        };
+        auto sameRects = [](const QVector<QRectF>& a, const QVector<QRectF>& b) {
+            if (a.isEmpty() || a.size() != b.size()) return false;
+            for (int i = 0; i < a.size(); ++i) {
+                if (qAbs(a[i].left() - b[i].left()) > 1e-6 || qAbs(a[i].right() - b[i].right()) > 1e-6) {
+                    return false;
+                }
+            }
+            return true;
+        };
+
+        const StrokePolygonResult shape = VectorLayer::buildStrokePolygon(whole);
+        // 23 dashes (starting at 0, 22, ..., 484) + 1 triangle + 2 wings.
+        if (!shape.polygon.isEmpty() || shape.hasRoundCaps || shape.pieces.size() != 26) {
+            return fail("a dashed stroke must be drawn as 23 dashes and its arrow heads");
+        }
+        if (whole.boundingBox.left() > -StrokeStyle::arrowLength(4.0)) {
+            return fail("the bounding box must make room for the arrow heads");
+        }
+        // The PDF fills everything with one non-zero fill: every piece must
+        // wind like the stroke ribbon, or overlaps would become holes.
+        for (const QPolygonF& piece : shape.pieces) {
+            qreal area = 0.0;
+            for (int i = 0; i < piece.size(); ++i) {
+                const QPointF& p = piece[i];
+                const QPointF& q = piece[(i + 1) % piece.size()];
+                area += p.x() * q.y() - q.x() * p.y();
+            }
+            if (area >= 0.0) return fail("a dash or arrow head winds the wrong way");
+        }
+
+        // A tile split or a live range: points 20..80 (x = 100..400).
+        VectorStroke slice = whole;
+        slice.points = whole.points.mid(20, 61);
+        slice.keepStyleAsSlice(whole.points, 20, 61);
+        if (!qFuzzyCompare(slice.dashOffset, 100.0)) return fail("the slice must start at its place in the pattern");
+        if (slice.arrowStart != StrokeStyle::None || slice.arrowEnd != StrokeStyle::None) {
+            return fail("a middle slice must not keep the arrow heads");
+        }
+        if (!sameRects(piecesIn(whole, 115, 385), piecesIn(slice, 115, 385))) {
+            return fail("the slice shows other dashes than the whole stroke");
+        }
+
+        // An eraser cut: x in (243, 257) goes.
+        const QVector<VectorStroke> cut = whole.subtractEraserSweep(QPointF(250, 50), QPointF(250, 50), 7.0);
+        if (cut.size() != 2) return fail("the cut should leave two pieces");
+        if (cut[0].arrowStart != StrokeStyle::Open || cut[0].arrowEnd != StrokeStyle::None
+            || cut[1].arrowStart != StrokeStyle::None || cut[1].arrowEnd != StrokeStyle::Filled) {
+            return fail("each arrow head must stay on its own end");
+        }
+        if (qAbs(cut[1].dashOffset - 257.0) > 0.01) return fail("the cut piece lost its place in the pattern");
+        if (!sameRects(piecesIn(whole, 270, 470), piecesIn(cut[1], 270, 470))) {
+            return fail("the cut piece shows other dashes than the whole stroke");
+        }
+
+        // Dotted: a dot every (1 + 2) x 4 = 12 units, x = 0..492.
+        VectorStroke dots = whole;
+        dots.lineStyle = StrokeStyle::Dotted;
+        dots.arrowStart = dots.arrowEnd = StrokeStyle::None;
+        const StrokePolygonResult dotShape = VectorLayer::buildStrokePolygon(dots);
+        if (dotShape.discCenters.size() != 42 || !dotShape.pieces.isEmpty() || !dotShape.polygon.isEmpty()) {
+            return fail("a dotted stroke must be 42 dots");
+        }
+
+        // A plain stroke keeps the old path: no extra shapes at all.
+        dots.lineStyle = StrokeStyle::Solid;
+        const StrokePolygonResult solid = VectorLayer::buildStrokePolygon(dots);
+        if (solid.polygon.isEmpty() || !solid.pieces.isEmpty() || !solid.discCenters.isEmpty()) {
+            return fail("a solid stroke must stay one polygon");
+        }
+
+        printf("PASSED\n");
+        return true;
+    }
+
+    /**
+     * @brief Dashed lines may not make a page much slower to draw.
+     *
+     * Draws 300 strokes the way a cache rebuild does, solid then dashed, and
+     * prints the times. Fails when dashed takes more than 3 times as long.
+     */
+    static bool testDashedRebuildCost()
+    {
+        printf("  testDashedRebuildCost... ");
+        DefaultLookGuard look;
+        auto drawMs = [](quint8 lineStyle) {
+            VectorLayer layer;
+            for (int s = 0; s < 300; ++s) {
+                VectorStroke stroke;
+                stroke.color = Qt::black;
+                stroke.baseThickness = 3.0;
+                stroke.lineStyle = lineStyle;
+                for (int j = 0; j <= 120; ++j) {
+                    const qreal t = j / 120.0;
+                    StrokePoint pt;
+                    pt.pos = QPointF(20 + t * 900, 20 + s * 3 + 15 * qSin(t * 6.28 * 4));
+                    pt.pressure = 0.5 + 0.5 * t;
+                    stroke.points.append(pt);
+                }
+                stroke.updateBoundingBox();
+                layer.addStroke(stroke);
+            }
+            QImage image(1000, 1000, QImage::Format_ARGB32_Premultiplied);
+            qint64 best = std::numeric_limits<qint64>::max();
+            for (int run = 0; run < 3; ++run) {
+                image.fill(Qt::transparent);
+                QElapsedTimer timer;
+                timer.start();
+                QPainter painter(&image);
+                painter.setRenderHint(QPainter::Antialiasing, true);
+                layer.render(painter);
+                painter.end();
+                best = qMin(best, timer.nsecsElapsed());
+            }
+            return best / 1e6;
+        };
+        const double solid = drawMs(StrokeStyle::Solid);
+        const double dashed = drawMs(StrokeStyle::Dashed);
+        const double dotted = drawMs(StrokeStyle::Dotted);
+        printf("solid %.1f ms, dashed %.1f ms, dotted %.1f ms... ", solid, dashed, dotted);
+        if (dashed > 3.0 * solid) {
+            printf("FAILED: dashed lines take more than 3x as long as solid ones\n");
+            return false;
+        }
+        printf("PASSED\n");
+        return true;
+    }
+
+    /**
+     * @brief Stroke stabilisation: off passes points through; on, the drawn
+     * point lags the pen by time (not by event count) and catches up.
+     */
+    static bool testStrokeStabilizer()
+    {
+        printf("  testStrokeStabilizer... ");
+        auto fail = [](const char* message) {
+            printf("FAILED: %s\n", message);
+            return false;
+        };
+        StrokeStabilizer off;
+        off.start(QPointF(0, 0), 1000, 0);
+        if (off.active() || off.apply(QPointF(50, 7), 1001) != QPointF(50, 7)) {
+            return fail("at 0 the points must pass through untouched");
+        }
+
+        StrokeStabilizer on;
+        on.start(QPointF(0, 0), 1000, 50);   // tau = 50 ms
+        const QPointF afterTau = on.apply(QPointF(100, 0), 1050);
+        if (qAbs(afterTau.x() - 100.0 * (1.0 - std::exp(-1.0))) > 1e-6) {
+            return fail("after tau the point must have moved 63% of the way");
+        }
+        if (on.apply(QPointF(100, 0), 1050) != afterTau) {
+            return fail("an event at the same time must not move the point");
+        }
+        // Two 25 ms steps go as far as one 50 ms step: time, not event count.
+        StrokeStabilizer halves;
+        halves.start(QPointF(0, 0), 1000, 50);
+        halves.apply(QPointF(100, 0), 1025);
+        if (qAbs(halves.apply(QPointF(100, 0), 1050).x() - afterTau.x()) > 1e-6) {
+            return fail("the smoothing must not depend on the event rate");
+        }
+        if (on.apply(QPointF(100, 0), 3000).x() < 99.99 || on.rawPosition() != QPointF(100, 0)) {
+            return fail("a still pen must be caught up");
+        }
+        printf("PASSED\n");
+        return true;
+    }
+
+    /**
+     * @brief Draw and hold, free shape and hand-drawn arrows, with their undo.
+     *
+     * The hold timer is not run: the test calls cleanCurrentStroke() where the
+     * timer would. The geometry itself is tested in ShapeCleanerTests.
+     */
+    static bool testCleanedStrokesAndHandArrow()
+    {
+        printf("  testCleanedStrokesAndHandArrow... ");
+        auto fail = [](const char* message) {
+            printf("FAILED: %s\n", message);
+            return false;
+        };
+        // The cached settings come from the user's: set what this needs, put them back after.
+        struct Restore {
+            DrawingSettings& s = const_cast<DrawingSettings&>(DrawingSettings::get());
+            const DrawingSettings saved = s;
+            ~Restore() { s = saved; }
+        } restore;
+        restore.s.handArrows = true;
+        restore.s.stabilisation = 0;
+        restore.s.drawAndHold = false;   // no timer: the test cleans by hand
+        restore.s.cornerAngle = 35;
+        restore.s.closePercent = 12;
+        restore.s.snapPx = 12;
+        restore.s.eraserPen = true;
+        restore.s.eraserAutoDeselect = false;
+
+        // Points along the corners, about 5 units apart.
+        auto path = [](const QVector<QPointF>& corners) {
+            QVector<QPointF> out{corners.first()};
+            for (int i = 1; i < corners.size(); ++i) {
+                const int n = qMax(1, int(QLineF(corners[i - 1], corners[i]).length() / 5.0));
+                for (int k = 1; k <= n; ++k)
+                    out << corners[i - 1] + (corners[i] - corners[i - 1]) * (qreal(k) / n);
+            }
+            return out;
+        };
+        auto draw = [](DocumentViewport& vp, QPointF origin, const QVector<QPointF>& pts, bool hold) {
+            vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Press, origin + pts.first()));
+            for (int i = 1; i < pts.size(); ++i)
+                vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Move, origin + pts[i]));
+            if (hold)
+                vp.cleanCurrentStroke(true);   // what the hold timer does
+            vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Release, origin + pts.last()));
+        };
+        QVector<QPointF> wobblyLine;
+        for (int i = 0; i <= 60; ++i)
+            wobblyLine << QPointF(100 + 5 * i, 200 + 3 * std::sin(i * 0.3));
+        const QVector<QPointF> vee = path({{385, 188}, {401, 200}, {386, 213}});
+
+        {
+            auto doc = Document::createNew("Cleaned strokes");
+            VectorLayer* layer = doc->page(0)->activeLayer();
+            DocumentViewport vp;
+            eraserTestSetupPaged(vp, doc.get(), 1000, 800, 1.0);
+            vp.setCurrentTool(ToolType::Pen);
+            const QPointF o = vp.pagePosition(0);
+
+            draw(vp, o, wobblyLine, true);
+            if (layer->strokeCount() != 1 || layer->strokes().last().points.size() != 2)
+                return fail("a held wobbly line must become one straight stroke");
+            if (QLineF(layer->strokes().last().points.last().pos,
+                       QPointF(400, 200 + 3 * std::sin(18.0))).length() > 0.01)
+                return fail("the straight line must end where the pen stopped");
+            // Undo gives back the handwriting first, then removes it; redo does both again.
+            vp.undo();
+            if (layer->strokeCount() != 1 || layer->strokes().last().points.size() < 30)
+                return fail("undo of a held line must give back the line as drawn");
+            vp.undo();
+            if (layer->strokeCount() != 0)
+                return fail("a second undo must remove the line");
+            vp.redo();
+            vp.redo();
+            if (layer->strokeCount() != 1 || layer->strokes().last().points.size() != 2)
+                return fail("redo must give the straight line back");
+
+            draw(vp, o, vee, false);
+            if (layer->strokeCount() != 1 || layer->strokes().last().arrowEnd != StrokeStyle::Open
+                || layer->strokes().last().points.size() != 2)
+                return fail("a V at the end of the line must turn it into an arrow");
+            // Undo gives back what was drawn: the plain line, and the V on top of it.
+            vp.undo();
+            if (layer->strokeCount() != 2 || layer->strokes().first().arrowEnd != StrokeStyle::None
+                || layer->strokes().first().points.size() != 2 || layer->strokes().last().points.size() < 3)
+                return fail("undo must give the plain line and the drawn head back");
+            vp.undo();
+            if (layer->strokeCount() != 2 || layer->strokes().first().points.size() < 30
+                || layer->strokes().last().points.size() < 3)
+                return fail("the handwritten line must go back under the head");
+            vp.redo();
+            if (layer->strokeCount() != 2 || layer->strokes().first().points.size() != 2)
+                return fail("redo must put the straight line back under the head");
+            vp.redo();
+            if (layer->strokeCount() != 1 || layer->strokes().last().arrowEnd != StrokeStyle::Open)
+                return fail("redo must give the arrow back");
+
+            // Free shape mode cleans on lift; a square whose end is near its start closes.
+            vp.setFreeShapeMode(true);
+            draw(vp, o, path({{200, 400}, {401, 402}, {399, 600}, {201, 598}, {203, 406}}), false);
+            vp.setFreeShapeMode(false);
+            if (layer->strokeCount() != 2)
+                return fail("the free shape must be added as its own stroke");
+            const VectorStroke shape = layer->strokes().last();
+            if (shape.points.first().pos != shape.points.last().pos || shape.arrowEnd != StrokeStyle::None)
+                return fail("a free shape whose end is near its start must close");
+
+            // The whole-line eraser takes one shape and leaves the arrow.
+            vp.setCurrentTool(ToolType::Eraser);
+            vp.setEraserMode(DocumentViewport::EraserMode::Normal);
+            vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Press, o + QPointF(300, 401)));
+            vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Release, o + QPointF(300, 401)));
+            if (layer->strokeCount() != 1 || layer->strokes().last().arrowEnd != StrokeStyle::Open)
+                return fail("the eraser must remove the shape alone");
+        }
+
+        // Edgeless: the shaft is stored in its tile's coordinates, the head in the document's.
+        {
+            auto doc = Document::createNew("Edgeless arrows", Document::Mode::Edgeless);
+            DocumentViewport vp;
+            vp.resize(1000, 700);
+            vp.setAttribute(Qt::WA_DontShowOnScreen, true);
+            vp.show();
+            QApplication::processEvents();
+            vp.setDocument(doc.get());
+            vp.setZoomLevel(1.0);
+            vp.setPanOffset(QPointF(1000, 0));
+            QApplication::processEvents();
+            vp.setCurrentTool(ToolType::Pen);
+            const QPointF o(1000, 100);   // tile (1, 0)
+
+            draw(vp, o, wobblyLine, true);
+            draw(vp, o, vee, false);
+            Page* tile = doc->getTile(1, 0);
+            const VectorLayer* layer = tile ? tile->layer(doc->edgelessActiveLayerIndex()) : nullptr;
+            if (!layer || layer->strokeCount() != 1 || layer->strokes().last().arrowEnd != StrokeStyle::Open)
+                return fail("an edgeless line in one tile must take a hand-drawn head");
+            // Undo empties the tile on the way, which removes and re-creates it: look it up again.
+            const auto tileLayer = [&doc]() -> const VectorLayer* {
+                Page* t = doc->getTile(1, 0);
+                return t ? t->layer(doc->edgelessActiveLayerIndex()) : nullptr;
+            };
+            vp.undo();
+            const QRectF tileRect(0, 0, Document::EDGELESS_TILE_SIZE, Document::EDGELESS_TILE_SIZE);
+            layer = tileLayer();
+            if (!layer || layer->strokeCount() != 2 || layer->strokes().last().points.size() < 3
+                || !tileRect.contains(layer->strokes().last().points.first().pos))
+                return fail("an edgeless undo must give the head back, in its tile's coordinates");
+            vp.undo();
+            layer = tileLayer();
+            if (!layer || layer->strokeCount() != 2 || layer->strokes().first().points.size() < 30)
+                return fail("an edgeless undo must then give the handwritten line back");
+        }
+
+        // A quick line that draws its own head becomes an arrow at lift, without a hold;
+        // a held circle turns and scales about its centre while the pen is down.
+        {
+            auto doc = Document::createNew("One-stroke arrow");
+            VectorLayer* layer = doc->page(0)->activeLayer();
+            DocumentViewport vp;
+            eraserTestSetupPaged(vp, doc.get(), 1000, 800, 1.0);
+            vp.setCurrentTool(ToolType::Pen);
+            const QPointF o = vp.pagePosition(0);
+            draw(vp, o, {{100, 300}, {250, 270}, {400, 260}, {378, 252}, {399, 261}, {380, 275}}, false);
+            if (layer->strokeCount() != 1 || layer->strokes().last().arrowEnd != StrokeStyle::Open
+                || layer->strokes().last().points.size() != 3)
+                return fail("a line that draws its own head must become an arrow when the pen lifts");
+            vp.undo();
+            if (layer->strokeCount() != 1 || layer->strokes().last().points.size() != 6
+                || layer->strokes().last().arrowEnd != StrokeStyle::None)
+                return fail("undo of a one-stroke arrow must give back the ink as drawn");
+
+            QVector<QPointF> ring;
+            for (int i = 0; i <= 64; ++i)
+                ring << QPointF(600 + 80 * std::cos(i * 2 * M_PI / 60), 400 + 80 * std::sin(i * 2 * M_PI / 60));
+            vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Press, o + ring.first()));
+            for (int i = 1; i < ring.size(); ++i)
+                vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Move, o + ring[i]));
+            vp.cleanCurrentStroke(true);   // what the hold timer does
+            const QPointF out = o + ring.last() + (ring.last() - QPointF(600, 400)) * 0.5;   // radius 80 -> 120
+            vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Move, out));
+            vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Release, out));
+            QVector<QPointF> pts;
+            for (const StrokePoint& pt : layer->strokes().last().points)
+                pts << pt.pos;
+            const QPointF c = ShapeCleaner::centre(pts);
+            if (layer->strokeCount() != 2 || QLineF(c, QPointF(600, 400)).length() > 1.0
+                || qAbs(QLineF(c, pts.first()).length() - 120.0) > 2.0)
+                return fail("a held circle must grow about its centre when the pen moves out");
+        }
+
+        printf("PASSED\n");
+        return true;
+    }
+
 /**
      * @brief One eraser pass must cost one undo entry.
      *
@@ -6679,6 +7100,588 @@ public:
         return true;
     }
 
+    /**
+     * @brief The shape tool places a fixed shape, changes its type (one undo
+     * step), and draws a connector that attaches to the shape's side.
+     */
+    static bool testShapeTool()
+    {
+        printf("  testShapeTool... ");
+        auto fail = [](const char* message) {
+            printf("FAILED: %s\n", message);
+            return false;
+        };
+
+        auto doc = Document::createNew("Shapes");
+        DocumentViewport vp;
+        eraserTestSetupPaged(vp, doc.get(), 1000, 800, 1.0);
+        const QPointF o = vp.pagePosition(0);
+        Page* page = doc->page(0);
+        const auto drag = [&vp, o](QPointF a, QPointF mid, QPointF b) {
+            vp.handlePointerPress(eraserEventAt(vp, PointerEvent::Press, o + a));
+            vp.handlePointerMove(eraserEventAt(vp, PointerEvent::Move, o + mid));
+            vp.handlePointerRelease(eraserEventAt(vp, PointerEvent::Release, o + b));
+        };
+
+        vp.setCurrentTool(ToolType::Shape);
+        vp.setShapeKind(3);   // Rectangle
+        vp.setShapeColor(Qt::red);
+        StrokeStyle::Style dashed;
+        dashed.lineStyle = StrokeStyle::Dashed;
+        vp.setShapeStroke(3.0, dashed);
+        drag(QPointF(100, 100), QPointF(200, 150), QPointF(250, 180));
+        auto* shape = page->objects.size() == 1 ? dynamic_cast<ShapeObject*>(page->objects[0].get()) : nullptr;
+        if (!shape || shape->boundingRect() != QRectF(100, 100, 150, 80) || shape->color != QColor(Qt::red)
+            || shape->lineStyle != StrokeStyle::Dashed || shape->lineWidth != 3.0) {
+            return fail("dragging must place a rectangle with the bar's colour and line");
+        }
+        if (vp.m_selectedObjects.size() != 1 || vp.m_selectedObjects.first() != shape) {
+            return fail("the new shape must stay selected");
+        }
+
+        // The way to change its type: pick another kind while it is selected.
+        vp.setShapeKind(6);   // Diamond
+        vp.restyleSelectedShape();
+        if (shape->kind != ShapeObject::Diamond) {
+            return fail("picking a kind must change the selected shape");
+        }
+        vp.undo();
+        if (shape->kind != ShapeObject::Rect) {
+            return fail("undo must bring the rectangle back");
+        }
+        vp.redo();
+        if (shape->kind != ShapeObject::Diamond) {
+            return fail("redo must make it a diamond again");
+        }
+
+        // A rough L from the shape's right side: a right-angle connector attached there.
+        vp.setShapeKind(1);
+        vp.setShapeStroke(3.0, StrokeStyle::Style());
+        drag(QPointF(245, 140), QPointF(400, 142), QPointF(402, 300));
+        auto* line = page->objects.size() == 2 ? dynamic_cast<ConnectorObject*>(page->objects[1].get()) : nullptr;
+        if (!line || line->startId != shape->id || line->startSide != ShapeObject::Right
+            || !line->endId.isEmpty() || line->kind != ConnectorObject::Elbow) {
+            return fail("a connector started on the shape must attach to its right side");
+        }
+        // On the diamond's rounded right corner, which is a little inside its box.
+        const QPointF corner = shape->anchor(ShapeObject::Right);
+        if (QLineF(line->startPoint(), corner).length() > 0.01 || corner.x() > 250.0 || corner.x() < 238.0
+            || line->endDir != ShapeObject::Top) {
+            return fail("the connector must start on the side and come down into its end");
+        }
+        // Moving the shape moves the attached end (rendering re-anchors it).
+        shape->moveBy(QPointF(0, 20));
+        ConnectorObject::resolve(*page);
+        if (QLineF(line->startPoint(), corner + QPointF(0, 20)).length() > 0.01) {
+            return fail("the connector must follow the moved shape");
+        }
+
+        // Its two ends are its handles (no box); dragging the end onto the
+        // diamond's top attaches it there, in one undo step.
+        QPointF endA, endB;
+        if (!vp.connectorEnds(line, &endA, &endB)
+            || vp.objectHandleAtPoint(endB) != DocumentViewport::HandleHit::LineEnd
+            || vp.objectHandleAtPoint(vp.objectBoundsInViewport(line).topLeft()) == DocumentViewport::HandleHit::TopLeft) {
+            return fail("a selected connector must offer its two ends, not a box");
+        }
+        const int undoBefore = vp.m_undoStack.size();
+        const QPointF top = shape->anchor(ShapeObject::Top);
+        vp.handlePointerPress(eraserEventAt(vp, PointerEvent::Press, vp.viewportToDocument(endB)));
+        vp.m_dragUpdateTimer.invalidate();   // Moves are throttled to the frame rate
+        vp.handlePointerMove(eraserEventAt(vp, PointerEvent::Move, o + top));
+        vp.handlePointerRelease(eraserEventAt(vp, PointerEvent::Release, o + top));
+        if (line->endId != shape->id || line->endSide != ShapeObject::Top
+            || QLineF(line->endPoint(), top).length() > 0.01
+            || QLineF(line->startPoint(), corner + QPointF(0, 20)).length() > 0.01) {
+            return fail("dragging a connector end onto a shape must attach it there and keep the other end");
+        }
+        if (vp.m_undoStack.size() != undoBefore + 1) {
+            return fail("a connector end drag must be one undo step");
+        }
+        vp.undo();
+        if (!line->endId.isEmpty()) {
+            return fail("undo must free the end again");
+        }
+
+        // Leaving the tool drops the selection.
+        vp.setCurrentTool(ToolType::Pen);
+        if (!vp.m_selectedObjects.isEmpty()) {
+            return fail("leaving the shape tool must drop the selection");
+        }
+        printf("PASSED\n");
+        return true;
+    }
+
+    /**
+     * @brief A straight line selected with the lasso has a handle on each end.
+     * Dragging one moves that end only, in one undo step; the width, and so
+     * the arrow head, keeps its size; the line stays selected.
+     */
+    static bool testLineEndHandles()
+    {
+        printf("  testLineEndHandles... ");
+        auto fail = [](const char* message) {
+            printf("FAILED: %s\n", message);
+            return false;
+        };
+        auto doc = Document::createNew("Line ends");
+        DocumentViewport vp;
+        eraserTestSetupPaged(vp, doc.get(), 1000, 800, 1.0);
+        const QPointF o = vp.pagePosition(0);
+        VectorLayer* layer = doc->page(0)->activeLayer();
+        VectorStroke arrow = eraserTestLine("line", QPointF(100, 100), QPointF(300, 100), 4, 3.0);
+        arrow.arrowEnd = StrokeStyle::Filled;
+        arrow.updateBoundingBox();
+        layer->addStroke(arrow);
+        const auto at = [&vp, o](PointerEvent::Type type, QPointF p) {
+            vp.handlePointerEvent(eraserEventAt(vp, type, o + p));
+        };
+        const auto samePt = [](QPointF a, QPointF b) { return QLineF(a, b).length() < 0.01; };
+
+        vp.setCurrentTool(ToolType::Lasso);
+        at(PointerEvent::Press, QPointF(80, 80));
+        at(PointerEvent::Move, QPointF(320, 80));
+        at(PointerEvent::Move, QPointF(320, 120));
+        at(PointerEvent::Move, QPointF(80, 120));
+        at(PointerEvent::Release, QPointF(80, 84));
+        QPointF a, b;
+        if (!vp.lassoLineEnds(&a, &b) || !samePt(a, QPointF(100, 100)) || !samePt(b, QPointF(300, 100))
+            || vp.hitTestSelectionHandles(vp.documentToViewport(o + QPointF(300, 100)))
+                   != DocumentViewport::HandleHit::LineEnd) {
+            return fail("a selected straight line must show a handle on each end");
+        }
+
+        const int undoBefore = vp.m_undoStack.size();
+        at(PointerEvent::Press, QPointF(300, 100));
+        at(PointerEvent::Move, QPointF(250, 180));
+        at(PointerEvent::Move, QPointF(200, 200));
+        at(PointerEvent::Release, QPointF(200, 200));
+        const VectorStroke& moved = layer->strokes().last();
+        if (layer->strokeCount() != 1 || !samePt(moved.points.first().pos, QPointF(100, 100))
+            || !samePt(moved.points.last().pos, QPointF(200, 200)) || moved.baseThickness != 3.0
+            || moved.arrowEnd != StrokeStyle::Filled) {
+            return fail("dragging an end must move that end only and keep the width and head");
+        }
+        if (vp.m_undoStack.size() != undoBefore + 1 || !vp.lassoLineEnds(nullptr, nullptr)) {
+            return fail("an end drag must be one undo step and keep the line selected");
+        }
+        vp.clearLassoSelection();
+        vp.undo();
+        if (layer->strokeCount() != 1 || !samePt(layer->strokes().last().points.last().pos, QPointF(300, 100))) {
+            return fail("undo must put the end back");
+        }
+        printf("PASSED\n");
+        return true;
+    }
+
+    /**
+     * @brief Edit points: a cleaned square (lasso) and a fixed triangle (object)
+     * show a handle on each corner; dragging one moves that corner only, in one
+     * undo step; the corner rounding rebuilds the shape, in one undo step.
+     */
+    static bool testEditPoints()
+    {
+        printf("  testEditPoints... ");
+        auto fail = [](const char* message) {
+            printf("FAILED: %s\n", message);
+            return false;
+        };
+        auto doc = Document::createNew("Edit points");
+        DocumentViewport vp;
+        eraserTestSetupPaged(vp, doc.get(), 1000, 800, 1.0);
+        const QPointF o = vp.pagePosition(0);
+        Page* page = doc->page(0);
+        VectorLayer* layer = page->activeLayer();
+        const auto samePt = [](QPointF a, QPointF b) { return QLineF(a, b).length() < 0.01; };
+        const auto at = [&vp, o](PointerEvent::Type type, QPointF p) {
+            vp.m_dragUpdateTimer.invalidate();   // Moves are throttled to the frame rate
+            vp.handlePointerEvent(eraserEventAt(vp, type, o + p));
+        };
+        const auto cornersOf = [](const VectorStroke& s) {
+            QVector<QPointF> pts;
+            for (const StrokePoint& pt : s.points) pts << pt.pos;
+            return ShapeCleaner::jointCorners(pts, s.cornerJoints);
+        };
+        // SN_TEST_SHOTS=<folder>: save what the view draws at each step.
+        const QString shots = qEnvironmentVariable("SN_TEST_SHOTS");
+        const auto shot = [&vp, &shots](const char* name) {
+            if (!shots.isEmpty()) vp.grab().save(shots + QLatin1Char('/') + QLatin1String(name) + ".png");
+        };
+
+        // A cleaned square with small round corners, as draw and hold leaves it.
+        const QVector<QPointF> square{{100, 100}, {300, 100}, {300, 300}, {100, 300}};
+        VectorStroke shape;
+        shape.id = "square";
+        shape.color = Qt::black;
+        shape.baseThickness = 3.0;
+        for (const QPointF& p : ShapeCleaner::polyline(square, true, ShapeCleaner::stepRadius(1, 3.0), 3.0,
+                                                       &shape.cornerJoints)) {
+            StrokePoint pt;
+            pt.pos = p;
+            shape.points.append(pt);
+        }
+        shape.updateBoundingBox();
+        layer->addStroke(shape);
+
+        vp.setCurrentTool(ToolType::Pen);
+        vp.selectByFingerTap(vp.documentToViewport(o + QPointF(200, 100)));
+        if (!vp.m_lassoSelection.isValid() || !vp.canEditPoints() || vp.editPoints() || vp.cornerStep() != 1) {
+            return fail("a tapped cleaned square must offer Edit points, off, with small corners");
+        }
+        shot("a4_1_box");
+        vp.setEditPoints(true);
+        shot("a4_2_edit_on");
+        if (!vp.editPoints() || vp.hitTestSelectionHandles(vp.documentToViewport(o + QPointF(300, 300)))
+                                    != DocumentViewport::HandleHit::Corner) {
+            return fail("Edit points must put a handle on each corner");
+        }
+        int undoBefore = vp.m_undoStack.size();
+        at(PointerEvent::Press, QPointF(300, 300));
+        at(PointerEvent::Move, QPointF(330, 310));
+        at(PointerEvent::Move, QPointF(350, 320));
+        at(PointerEvent::Release, QPointF(350, 320));
+        QVector<QPointF> c = cornersOf(layer->strokes().last());
+        if (layer->strokeCount() != 1 || c.size() != 4 || !samePt(c[2], QPointF(350, 320))
+            || !samePt(c[0], square[0]) || !samePt(c[1], square[1]) || !samePt(c[3], square[3])) {
+            return fail("dragging a corner must move that corner only");
+        }
+        if (vp.m_undoStack.size() != undoBefore + 1 || !vp.editPoints()) {
+            return fail("a corner drag must be one undo step and keep Edit points on");
+        }
+        shot("a4_3_corner_dragged");
+        undoBefore = vp.m_undoStack.size();
+        vp.setCornerStep(0);
+        const VectorStroke& sharp = layer->strokes().last();
+        QVector<QPointF> pts;
+        for (const StrokePoint& pt : sharp.points) pts << pt.pos;
+        if (vp.m_undoStack.size() != undoBefore + 1 || ShapeCleaner::roundingStep(pts, sharp.cornerJoints, 3.0) != 0
+            || !samePt(cornersOf(sharp)[2], QPointF(350, 320)) || vp.cornerStep() != 0) {
+            return fail("sharp corners must rebuild the shape on its corners, in one undo step");
+        }
+        shot("a4_4_sharp");
+        vp.setCornerStep(1);
+        if (vp.cornerStep() != 1 || vp.m_undoStack.size() != undoBefore + 2 || layer->strokeCount() != 1) {
+            return fail("round corners again must be one more undo step");
+        }
+        shot("a4_5_round_again");
+        vp.clearLassoSelection();
+        vp.undo();
+        vp.undo();
+        vp.undo();
+        c = cornersOf(layer->strokes().last());
+        if (layer->strokeCount() != 1 || c.size() != 4 || !samePt(c[2], square[2])) {
+            return fail("undo must give the square back");
+        }
+
+        // A fixed triangle: the same with the object tool.
+        auto owned = std::make_unique<ShapeObject>();
+        ShapeObject* tri = owned.get();
+        tri->kind = ShapeObject::Triangle;
+        tri->setBoundingRect(QRectF(500, 100, 200, 150));
+        page->addObject(std::move(owned));
+        vp.setCurrentTool(ToolType::ObjectSelect);
+        vp.selectObject(tri, false);
+        if (!vp.canEditPoints() || vp.cornerStep() != 1) {
+            return fail("a selected triangle must offer Edit points");
+        }
+        vp.setEditPoints(true);
+        shot("a4_6_tri_edit_on");
+        const QPointF right = tri->corners()[1];
+        if (vp.objectHandleAtPoint(vp.documentToViewport(o + right)) != DocumentViewport::HandleHit::Corner) {
+            return fail("a triangle in Edit points must have a handle on its corner");
+        }
+        undoBefore = vp.m_undoStack.size();
+        const QPointF left = tri->corners()[2];
+        at(PointerEvent::Press, right);
+        at(PointerEvent::Move, right + QPointF(20, 20));
+        at(PointerEvent::Move, right + QPointF(40, 60));
+        at(PointerEvent::Release, right + QPointF(40, 60));
+        if (!samePt(tri->corners()[1], right + QPointF(40, 60)) || !samePt(tri->corners()[2], left)
+            || vp.m_undoStack.size() != undoBefore + 1) {
+            return fail("dragging a triangle's corner must move it only, in one undo step");
+        }
+        shot("a4_7_tri_dragged");
+        vp.setCornerStep(3);
+        shot("a4_8_tri_large");
+        if (tri->roundness != 3 || vp.m_undoStack.size() != undoBefore + 2) {
+            return fail("the rounding of a shape must be one undo step");
+        }
+        vp.undo();
+        vp.undo();
+        if (tri->roundness != 1 || !samePt(tri->corners()[1], right)) {
+            return fail("undo must bring the triangle back");
+        }
+        printf("PASSED\n");
+        return true;
+    }
+
+    /**
+     * @brief A finger tap selects a line (not handwriting) whatever the tool,
+     * and the pen pressing elsewhere or a tap on empty paper gives the tool back.
+     */
+    static bool testFingerTapSelects()
+    {
+        printf("  testFingerTapSelects... ");
+        auto fail = [](const char* message) {
+            printf("FAILED: %s\n", message);
+            return false;
+        };
+        auto doc = Document::createNew("Finger tap");
+        DocumentViewport vp;
+        eraserTestSetupPaged(vp, doc.get(), 1000, 800, 1.0);
+        const QPointF o = vp.pagePosition(0);
+        VectorLayer* layer = doc->page(0)->activeLayer();
+        layer->addStroke(eraserTestLine("line", QPointF(100, 100), QPointF(300, 100), 4, 3.0));
+        VectorStroke hand;   // Handwriting: it bends and its pressure changes
+        hand.id = "hand";
+        hand.color = Qt::black;
+        hand.baseThickness = 3.0;
+        for (int i = 0; i <= 8; ++i) {
+            StrokePoint pt;
+            pt.pos = QPointF(100 + 20 * i, 300 + (i % 2) * 15);
+            pt.pressure = 0.4 + 0.05 * i;
+            hand.points.append(pt);
+        }
+        hand.updateBoundingBox();
+        layer->addStroke(hand);
+        const auto tap = [&vp, o](QPointF p) { vp.selectByFingerTap(vp.documentToViewport(o + p)); };
+        const auto pen = [&vp, o](PointerEvent::Type type, QPointF p) {
+            vp.handlePointerEvent(eraserEventAt(vp, type, o + p));
+        };
+
+        vp.setCurrentTool(ToolType::Pen);
+        tap(QPointF(140, 300));
+        if (vp.m_lassoSelection.isValid() || vp.currentTool() != ToolType::Pen) {
+            return fail("a tap on handwriting must select nothing");
+        }
+        tap(QPointF(200, 108));
+        if (!vp.lassoLineEnds(nullptr, nullptr) || vp.currentTool() != ToolType::Lasso
+            || vp.selectionMenuAnchor().isNull()) {
+            return fail("a tap near a line must select it, with its end handles and a menu place");
+        }
+        pen(PointerEvent::Press, QPointF(500, 500));
+        pen(PointerEvent::Release, QPointF(500, 500));
+        if (vp.currentTool() != ToolType::Pen || vp.m_lassoSelection.isValid()) {
+            return fail("the pen pressing elsewhere must give the pen back");
+        }
+        tap(QPointF(200, 100));
+        tap(QPointF(600, 650));
+        if (vp.currentTool() != ToolType::Pen || vp.m_lassoSelection.isValid()
+            || !vp.selectionMenuAnchor().isNull()) {
+            return fail("a tap on empty paper must let go and give the tool back");
+        }
+        printf("PASSED\n");
+        return true;
+    }
+
+    /**
+     * @brief The laser: trails, the dot, the wait and fade, and nothing saved.
+     */
+    static bool testLaserPointer()
+    {
+        printf("  testLaserPointer... ");
+        auto fail = [](const char* message) {
+            printf("FAILED: %s\n", message);
+            return false;
+        };
+        const auto wait = [](int ms) {
+            QEventLoop loop;
+            QTimer::singleShot(ms, &loop, &QEventLoop::quit);
+            loop.exec();
+        };
+
+        LaserPointer laser;
+        int repaints = 0;
+        QObject::connect(&laser, &LaserPointer::changed, [&repaints](const QRectF&) { ++repaints; });
+
+        // Line mode: one trail per contact, short steps skipped.
+        QRectF step;
+        laser.press(QPointF(0, 0), LaserPointer::Line);
+        if (laser.move(QPointF(1, 0), 2.0, &step)) return fail("a step under the minimum must be skipped");
+        if (!laser.move(QPointF(10, 0), 2.0, &step) || step != QRectF(0, 0, 10, 0)) {
+            return fail("a step must report the area it changed");
+        }
+        if (laser.press(QPointF(0, 50), LaserPointer::Line) || laser.lineCount() != 2
+            || laser.bounds() != QRectF(0, 0, 10, 50)) {
+            return fail("a second contact must add a trail and keep the first");
+        }
+
+        // Point mode: a single dot that moves.
+        if (!laser.press(QPointF(5, 5), LaserPointer::Point) || laser.pointCount() != 1) {
+            return fail("the dot must replace the trails");
+        }
+        laser.move(QPointF(30, 30), 2.0, &step);
+        if (laser.pointCount() != 1 || laser.bounds() != QRectF(30, 30, 0, 0)) {
+            return fail("the dot must follow the pen");
+        }
+
+        // The wait, then the fade; a new contact during the fade brings the trails back.
+        laser.press(QPointF(0, 0), LaserPointer::Line);
+        laser.move(QPointF(40, 0), 2.0, &step);
+        laser.release(0, 2000);
+        wait(100);
+        if (!laser.isFading() || laser.opacity() >= 1.0 || laser.opacity() <= 0.0 || repaints == 0) {
+            return fail("after the wait the trails must fade and repaint");
+        }
+        if (!laser.press(QPointF(0, 20), LaserPointer::Line) || laser.isFading()
+            || laser.opacity() != 1.0 || laser.lineCount() != 2) {
+            return fail("a new contact must stop the fade and keep the trails");
+        }
+        laser.release(150, 60);
+        wait(50);
+        if (laser.isEmpty() || laser.isFading()) return fail("the trails must wait before they fade");
+        wait(400);
+        if (!laser.isEmpty()) return fail("the trails must be gone after the fade");
+
+        // In the viewport: marks anywhere, nothing saved, no undo, cleared on leaving the tool.
+        auto doc = Document::createNew("Laser");
+        DocumentViewport vp;
+        eraserTestSetupPaged(vp, doc.get(), 1000, 800, 1.0);
+        int modified = 0;
+        QObject::connect(&vp, &DocumentViewport::documentModified, [&modified]() { ++modified; });
+        const QPointF o = vp.pagePosition(0);
+        vp.setCurrentTool(ToolType::Laser);
+        vp.handlePointerPress(eraserEventAt(vp, PointerEvent::Press, o + QPointF(100, 100)));
+        vp.handlePointerMove(eraserEventAt(vp, PointerEvent::Move, o + QPointF(200, 150)));
+        vp.handlePointerRelease(eraserEventAt(vp, PointerEvent::Release, o + QPointF(300, 150)));
+        Page* page = doc->page(0);
+        if (!vp.m_laser || vp.m_laser->isEmpty()) return fail("the laser must leave a mark");
+        if ((page->activeLayer() && !page->activeLayer()->isEmpty()) || !page->objects.empty()
+            || modified != 0 || vp.canUndo()) {
+            return fail("the laser must not change the page, mark it modified or add undo");
+        }
+        const QPointF beside = o + QPointF(-60, 100);   // Left of the page
+        vp.handlePointerPress(eraserEventAt(vp, PointerEvent::Press, beside));
+        vp.handlePointerRelease(eraserEventAt(vp, PointerEvent::Release, beside));
+        if (vp.m_offPagePanArmed || vp.m_laser->bounds().left() > beside.x() + 0.01) {
+            return fail("the laser must point beside the pages too, not pan");
+        }
+        vp.setCurrentTool(ToolType::Pen);
+        if (!vp.m_laser->isEmpty()) return fail("leaving the tool must clear the marks");
+        printf("PASSED\n");
+        return true;
+    }
+
+    /**
+     * @brief The ruler: its angle, what a press touches, a line that follows
+     *        its edge, moving and turning it, and hiding it.
+     */
+    static bool testRuler()
+    {
+        printf("  testRuler... ");
+        auto fail = [](const char* message) {
+            printf("FAILED: %s\n", message);
+            return false;
+        };
+        if (Ruler::normalizedAngle(200) != 20 || Ruler::normalizedAngle(-100) != 80
+            || Ruler::normalizedAngle(90) != 90 || Ruler::normalizedAngle(-90) != 90
+            || Ruler::normalizedAngle(91) != -89) {
+            return fail("the angle must be brought into -89..90");
+        }
+
+        // Offsets in screen px from the centre.
+        Ruler r;
+        r.angleDeg = 30;
+        const QPointF u = r.along(), n = r.across();
+        const qreal edge = Ruler::WIDTH_PX / 2;
+        if (qAbs(u.y() + 0.5) > 1e-9) return fail("a positive angle must turn the right end up");
+        if (r.hitTest(QPointF(3, 3)) != Ruler::Handle) return fail("the centre must be the handle");
+        if (r.hitTest(u * 50) != Ruler::Label) return fail("right of the handle must be the angle label");
+        if (r.hitTest(u * 400 + n * 20) != Ruler::Body) return fail("inside must be the body");
+        if (r.hitTest(n * (edge + 5)) != Ruler::None) return fail("outside must touch nothing");
+        if (r.edgeNear(u * 300 + n * (edge + 5), 20) != 1 || r.edgeNear(u * 300 - n * (edge + 5), 20) != -1) {
+            return fail("a press just outside an edge must pick that edge");
+        }
+        if (r.edgeNear(u * 300 + n * (edge + 25), 20) != 0
+            || r.edgeNear(u * (Ruler::LENGTH_PX / 2 + 10) + n * (edge + 5), 20) != 0
+            || r.edgeNear(u * 300 + n * (edge + 5), 0) != 0) {
+            return fail("too far, past the end, or snapping off must pick no edge");
+        }
+
+        struct Restore {
+            DrawingSettings& s = const_cast<DrawingSettings&>(DrawingSettings::get());
+            const DrawingSettings saved = s;
+            ~Restore() { s = saved; }
+        } restore;
+        restore.s.rulerSnapPx = 20;
+        restore.s.stabilisation = 0;
+        restore.s.drawAndHold = false;
+        restore.s.handArrows = false;
+
+        auto doc = Document::createNew("Ruler");
+        DocumentViewport vp;
+        eraserTestSetupPaged(vp, doc.get(), 1000, 800, 1.0);
+        vp.setCurrentTool(ToolType::Pen);
+        int shown = 0;
+        QObject::connect(&vp, &DocumentViewport::rulerVisibleChanged, [&shown](bool on) { shown += on ? 1 : -1; });
+        vp.setRulerVisible(true);
+        vp.setRulerAngle(30);
+        if (!vp.rulerVisible() || shown != 1 || vp.ruler().angleDeg != 30) return fail("the ruler must show");
+        const QPointF o = vp.pagePosition(0);
+        const QPointF c = vp.ruler().centre;
+        const qreal z = vp.zoomLevel();   // the ruler's size is in screen px
+        const VectorLayer* layer = doc->page(0)->activeLayer();
+
+        // A wobbly line started just outside the lower edge lies on that edge.
+        const QPointF start = c - u * 200 + n * ((edge + 6) / z);
+        vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Press, start));
+        for (int i = 1; i <= 40; ++i)
+            vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Move, start + u * (i * 10.0) + n * (4 * std::sin(i * 0.7))));
+        vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Release, start + u * 400));
+        if (layer->strokeCount() != 1) return fail("the line must be drawn");
+        const VectorStroke& line = layer->strokes().last();
+        const qreal offset = edge / z + line.widthAt(1.0) / 2;   // the ink touches the edge from outside
+        for (const StrokePoint& p : line.points) {
+            if (qAbs(QPointF::dotProduct(p.pos + o - c, n) - offset) > 1e-6) {
+                printf("(%g from the edge, %d points) ", QPointF::dotProduct(p.pos + o - c, n) - offset,
+                       int(line.points.size()));
+                return fail("every point must lie along the edge");
+            }
+        }
+
+        // A press on the body moves the ruler and draws nothing.
+        vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Press, c + u * 300));
+        vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Move, c + u * 300 + QPointF(10, 20)));
+        vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Release, c + u * 300 + QPointF(10, 20)));
+        if (QLineF(vp.ruler().centre, c + QPointF(10, 20)).length() > 1e-6 || layer->strokeCount() != 1)
+            return fail("dragging the body must move the ruler");
+
+        // The centre handle turns it as much as the pointer turns around the centre.
+        const QPointF c2 = vp.ruler().centre;
+        vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Press, c2));
+        vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Move, c2 + QPointF(100, 0)));
+        vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Move, c2 + QPointF(0, -100)));
+        vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Release, c2 + QPointF(0, -100)));
+        if (vp.ruler().angleDeg != -60 || layer->strokeCount() != 1)
+            return fail("a quarter turn of the handle must turn the ruler by 90 degrees");
+
+        // Two fingers on the ruler: it follows their middle and turns as they turn.
+        const QPointF v2 = vp.documentToViewport(c2);
+        vp.m_rulerDrag = Ruler::Body;
+        vp.rulerTwoFingers(v2 - QPointF(100, 0), v2 + QPointF(100, 0));
+        vp.rulerTwoFingers(v2 + QPointF(10, -100), v2 + QPointF(10, 100));
+        vp.rulerRelease(eraserEventAt(vp, PointerEvent::Release, c2));
+        if (vp.ruler().angleDeg != Ruler::normalizedAngle(-60 - 90)
+            || QLineF(vp.documentToViewport(vp.ruler().centre), v2 + QPointF(10, 0)).length() > 1e-6)
+            return fail("two fingers must turn the ruler with them and move it with their middle");
+
+        // Cached frames (pan, pinch, drags) leave the ruler out: it is drawn live over them.
+        const QImage withRuler = vp.grabOpaqueViewport().toImage();
+        vp.setRulerVisible(false);
+        const QImage withoutRuler = vp.grabOpaqueViewport().toImage();
+        vp.setRulerVisible(true);
+        if (withRuler != withoutRuler) return fail("a cached frame must not hold the ruler");
+
+        // Hidden, it takes no press: the pen draws there.
+        vp.setRulerVisible(false);
+        vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Press, c2 + QPointF(-50, 0)));
+        vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Move, c2 + QPointF(50, 0)));
+        vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Release, c2 + QPointF(50, 0)));
+        if (shown != 0 || layer->strokeCount() != 2) return fail("a hidden ruler must let the pen draw");
+        printf("PASSED\n");
+        return true;
+    }
+
     // ===== Eraser test helpers =====
 
     /// Pointer event at a document-space point.
@@ -6845,6 +7848,120 @@ public:
             if (kinds(layer) != "AAB")
                 return fail(qPrintable(QString("redo changed the draw order: %1").arg(kinds(layer))));
         }
+
+        printf("PASSED\n");
+        return true;
+    }
+
+    /**
+     * @brief The eraser window: the filter keeps the lines of a tool that is
+     * off, "Clear the page" is one undo step that restores the draw order, and
+     * auto deselect goes back to the last tool when the eraser lifts.
+     */
+    static bool testEraserFilterClearPageAutoDeselect()
+    {
+        printf("  testEraserFilterClearPageAutoDeselect... ");
+        auto fail = [](const char* message) {
+            printf("FAILED: %s\n", message);
+            return false;
+        };
+
+        // The settings are the user's real ones: put them back afterwards.
+        struct DrawingKeys {
+            QMap<QString, QVariant> saved;
+            const QStringList names = {QStringLiteral("drawing/eraserPen"),
+                                       QStringLiteral("drawing/eraserMarker"),
+                                       QStringLiteral("drawing/eraserAutoDeselect")};
+            DrawingKeys() {
+                QSettings settings("SpeedyNote", "App");
+                for (const QString& key : names)
+                    if (settings.contains(key)) saved.insert(key, settings.value(key));
+            }
+            void set(bool pen, bool marker, bool autoDeselect) {
+                QSettings settings("SpeedyNote", "App");
+                settings.setValue(names[0], pen);
+                settings.setValue(names[1], marker);
+                settings.setValue(names[2], autoDeselect);
+                DrawingSettings::reload();
+            }
+            ~DrawingKeys() {
+                QSettings settings("SpeedyNote", "App");
+                for (const QString& key : names) settings.remove(key);
+                for (auto it = saved.constBegin(); it != saved.constEnd(); ++it)
+                    settings.setValue(it.key(), it.value());
+                DrawingSettings::reload();
+            }
+        } keys;
+
+        auto ids = [](const VectorLayer* layer) {
+            QString out;
+            for (const VectorStroke& s : layer->strokes()) out += s.id;
+            return out;
+        };
+
+        auto doc = Document::createNew("Eraser window");
+        VectorLayer* layer = doc->page(0)->activeLayer();
+        layer->addStroke(eraserTestLine("A", QPointF(40, 100), QPointF(560, 100), 40, 4.0));
+        // Marker: see-through, like every marker stroke (old ones have no pen type).
+        layer->addStroke(eraserTestLine("B", QPointF(40, 200), QPointF(560, 200), 40, 12.0,
+                                        QColor(230, 255, 110, 128)));
+        layer->addStroke(eraserTestLine("C", QPointF(40, 300), QPointF(560, 300), 40, 4.0, Qt::blue));
+
+        DocumentViewport vp;
+        eraserTestSetupPaged(vp, doc.get(), 1000, 800, 1.0);
+        const QPointF o = vp.pagePosition(0);
+
+        // Clear the page: everything the filter allows goes, in one undo step.
+        keys.set(true, true, false);
+        vp.clearCurrentPage();
+        if (layer->strokeCount() != 0)
+            return fail("clear the page left lines behind");
+        vp.undo();
+        if (ids(layer) != "ABC")
+            return fail(qPrintable(QString("undo of clear gave the order %1").arg(ids(layer))));
+        // With pen lines protected only the marker (in the middle) goes, and
+        // undo puts it back in its slot, not on top.
+        keys.set(false, true, false);
+        vp.clearCurrentPage();
+        if (ids(layer) != "AC")
+            return fail("clear the page ignored the filter");
+        vp.undo();
+        if (ids(layer) != "ABC")
+            return fail(qPrintable(QString("undo of a filtered clear gave %1").arg(ids(layer))));
+
+        // A lasso around everything takes the marker only.
+        vp.setCurrentTool(ToolType::Eraser);
+        vp.setEraserMode(DocumentViewport::EraserMode::Lasso);
+        vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Press, o + QPointF(20, 50)));
+        vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Move, o + QPointF(580, 50)));
+        vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Move, o + QPointF(580, 350)));
+        vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Move, o + QPointF(20, 350)));
+        vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Release, o + QPointF(20, 50)));
+        if (ids(layer) != "AC")
+            return fail(qPrintable(QString("the filter let the lasso take: %1 left").arg(ids(layer))));
+        vp.undo();
+
+        // The disc eraser obeys it too: rubbing over a pen line does nothing.
+        vp.setEraserMode(DocumentViewport::EraserMode::Normal);
+        vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Press, o + QPointF(300, 100)));
+        vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Release, o + QPointF(300, 100)));
+        if (layer->strokeCount() != 3)
+            return fail("the disc eraser removed a protected pen line");
+
+        // Auto deselect: lifting the eraser goes back to the marker; off, it stays.
+        keys.set(true, true, true);
+        vp.setCurrentTool(ToolType::Marker);
+        vp.setCurrentTool(ToolType::Eraser);
+        vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Press, o + QPointF(300, 450)));
+        vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Release, o + QPointF(300, 450)));
+        if (vp.currentTool() != ToolType::Marker)
+            return fail("auto deselect did not go back to the marker");
+        keys.set(true, true, false);
+        vp.setCurrentTool(ToolType::Eraser);
+        vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Press, o + QPointF(300, 450)));
+        vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Release, o + QPointF(300, 450)));
+        if (vp.currentTool() != ToolType::Eraser)
+            return fail("the eraser left without auto deselect");
 
         printf("PASSED\n");
         return true;
@@ -7078,9 +8195,20 @@ public:
 
         runTest(testPartialEraseFreesEdgelessTile, "testPartialEraseFreesEdgelessTile");
         runTest(testPartialEraseUndoKeepsDrawOrder, "testPartialEraseUndoKeepsDrawOrder");
+        runTest(testEraserFilterClearPageAutoDeselect, "testEraserFilterClearPageAutoDeselect");
         runTest(testEraserUndoAcrossPagesKeepsLayers, "testEraserUndoAcrossPagesKeepsLayers");
         runTest(testPartialEraseDirtyHintIsLocalAndExact, "testPartialEraseDirtyHintIsLocalAndExact");
         runTest(testPartialCutPositionsAndSlivers, "testPartialCutPositionsAndSlivers");
+        runTest(testDashedSliceMatchesWhole, "testDashedSliceMatchesWhole");
+        runTest(testDashedRebuildCost, "testDashedRebuildCost");
+        runTest(testStrokeStabilizer, "testStrokeStabilizer");
+        runTest(testShapeTool, "testShapeTool");
+        runTest(testLineEndHandles, "testLineEndHandles");
+        runTest(testEditPoints, "testEditPoints");
+        runTest(testFingerTapSelects, "testFingerTapSelects");
+        runTest(testLaserPointer, "testLaserPointer");
+        runTest(testRuler, "testRuler");
+        runTest(testCleanedStrokesAndHandArrow, "testCleanedStrokesAndHandArrow");
         runTest(testEraserGestureRobustness, "testEraserGestureRobustness");
 
         runTest(testPdfPlaceholderPaper, "testPdfPlaceholderPaper");
@@ -7128,6 +8256,10 @@ public:
                 pt.pressure = 0.3 + 0.7 * t;
                 stroke.points.append(pt);
             }
+            if (i == 0) {
+                stroke.lineStyle = StrokeStyle::Dashed;
+                stroke.arrowEnd = StrokeStyle::Open;
+            }
             stroke.updateBoundingBox();
             page->activeLayer()->addStroke(stroke);
             
@@ -7141,6 +8273,12 @@ public:
                 pt.pos = QPointF(100 + t * 600, 300 + t * 200);
                 pt.pressure = 0.5 + 0.3 * qSin(t * 6.28 * 2);
                 stroke2.points.append(pt);
+            }
+            // The first page shows a dashed line, a dotted one and both arrow heads.
+            if (i == 0) {
+                stroke2.lineStyle = StrokeStyle::Dotted;
+                stroke2.arrowStart = StrokeStyle::Open;
+                stroke2.arrowEnd = StrokeStyle::Filled;
             }
             stroke2.updateBoundingBox();
             page->activeLayer()->addStroke(stroke2);

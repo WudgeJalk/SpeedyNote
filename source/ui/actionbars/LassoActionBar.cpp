@@ -26,6 +26,9 @@ void LassoActionBar::setupButtons()
     connect(m_recolorButton, &ColorPresetButton::editRequested,
             this, &LassoActionBar::recolorEditRequested);
 
+    // A selected cleaned shape: move its corners, round them.
+    addShapeEditButtons();
+
     // Create Cut button
     // Note: Using cross icon as cut icon is not available
     m_cutButton = new ActionBarButton(this);

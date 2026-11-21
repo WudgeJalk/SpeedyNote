@@ -1,6 +1,10 @@
 #include "ActionBar.h"
+#include "../widgets/ActionBarButton.h"
 
+#include <QAction>
+#include <QActionGroup>
 #include <QFrame>
+#include <QMenu>
 #include <QPalette>
 #include <QApplication>
 #include <QGraphicsDropShadowEffect>
@@ -11,6 +15,8 @@ ActionBar::ActionBar(QWidget* parent)
 {
     // Set fixed width (same as SubToolbar)
     setFixedWidth(ACTIONBAR_WIDTH);
+    // A plain QWidget subclass paints its style sheet background only with this.
+    setAttribute(Qt::WA_StyledBackground, true);
     
     // Create main layout
     m_layout = new QVBoxLayout(this);
@@ -27,6 +33,54 @@ void ActionBar::addButton(QWidget* button)
     if (button) {
         m_layout->addWidget(button, 0, Qt::AlignHCenter);
     }
+}
+
+void ActionBar::addShapeEditButtons()
+{
+    m_editPointsButton = new ActionBarButton(this);
+    m_editPointsButton->setIconName(QStringLiteral("editpoints"));
+    m_editPointsButton->setToolTip(tr("Edit points: drag a corner to move it"));
+    m_editPointsButton->setCheckable(true);
+    m_editPointsButton->hide();
+    addButton(m_editPointsButton);
+    connect(m_editPointsButton, &ActionBarButton::clicked, this, [this]() {
+        m_editPointsButton->setChecked(!m_editPointsButton->isChecked());
+        emit editPointsToggled(m_editPointsButton->isChecked());
+    });
+
+    m_cornersButton = new ActionBarButton(this);
+    m_cornersButton->setIconName(QStringLiteral("corners"));
+    m_cornersButton->setToolTip(tr("Corners: sharp or rounded"));
+    m_cornersButton->hide();
+    addButton(m_cornersButton);
+    connect(m_cornersButton, &ActionBarButton::clicked, this, [this]() {
+        // A popup, not exec(): no event loop inside the click.
+        auto* menu = new QMenu(this);
+        menu->setAttribute(Qt::WA_DeleteOnClose);
+        auto* group = new QActionGroup(menu);
+        const QString names[] = {tr("Sharp corners"), tr("Rounded: small"), tr("Rounded: medium"),
+                                 tr("Rounded: large")};
+        for (int step = 0; step < 4; ++step) {
+            QAction* action = menu->addAction(names[step]);
+            action->setCheckable(true);
+            action->setChecked(step == m_cornerStep);
+            group->addAction(action);
+            connect(action, &QAction::triggered, this, [this, step]() { emit cornerStepChosen(step); });
+        }
+        menu->popup(m_cornersButton->mapToGlobal(QPoint(0, m_cornersButton->height())));
+    });
+}
+
+void ActionBar::setShapeEdit(bool canEditPoints, bool editPointsOn, int step)
+{
+    if (!m_editPointsButton) {
+        return;
+    }
+    m_cornerStep = step;
+    m_editPointsButton->setVisible(canEditPoints);
+    m_editPointsButton->setChecked(canEditPoints && editPointsOn);
+    m_cornersButton->setVisible(canEditPoints && step >= 0);
+    adjustSize();
 }
 
 void ActionBar::addSeparator()
@@ -49,18 +103,49 @@ void ActionBar::addStretch()
     m_layout->addStretch();
 }
 
+void ActionBar::setOrientation(Qt::Orientation orientation)
+{
+    const bool horizontal = orientation == Qt::Horizontal;
+    if (horizontal == (m_layout->direction() == QBoxLayout::LeftToRight)) {
+        return;
+    }
+    m_layout->setDirection(horizontal ? QBoxLayout::LeftToRight : QBoxLayout::TopToBottom);
+    m_layout->setAlignment(horizontal ? (Qt::AlignLeft | Qt::AlignVCenter) : (Qt::AlignTop | Qt::AlignHCenter));
+    for (int i = 0; i < m_layout->count(); ++i) {
+        m_layout->itemAt(i)->setAlignment(horizontal ? Qt::AlignVCenter : Qt::AlignHCenter);
+    }
+    const int across = ACTIONBAR_WIDTH - 2 * PADDING;
+    for (QFrame* frame : findChildren<QFrame*>(QString(), Qt::FindDirectChildrenOnly)) {
+        if (frame->frameShape() == QFrame::HLine || frame->frameShape() == QFrame::VLine) {
+            frame->setFrameShape(horizontal ? QFrame::VLine : QFrame::HLine);
+            frame->setFixedSize(horizontal ? QSize(2, across) : QSize(across, 2));
+        }
+    }
+    setMinimumSize(0, 0);
+    setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+    if (horizontal) {
+        setFixedHeight(ACTIONBAR_WIDTH);
+    } else {
+        setFixedWidth(ACTIONBAR_WIDTH);
+    }
+    m_layout->invalidate();
+    setupStyle();   // A pill has round ends
+    adjustSize();
+}
+
 void ActionBar::setupStyle()
 {
     QString bgColor = m_darkMode ? "#2a2e32" : "#F5F5F5";
     QString borderColor = m_darkMode ? "#4d4d4d" : "#D0D0D0";
-    
+    const bool pill = m_layout && m_layout->direction() == QBoxLayout::LeftToRight;
+
     setStyleSheet(QString(
         "ActionBar {"
         "  background-color: %1;"
         "  border: 1px solid %2;"
         "  border-radius: %3px;"
         "}"
-    ).arg(bgColor, borderColor).arg(BORDER_RADIUS));
+    ).arg(bgColor, borderColor).arg(pill ? ACTIONBAR_WIDTH / 2 : BORDER_RADIUS));
     
     QGraphicsDropShadowEffect* shadow = new QGraphicsDropShadowEffect(this);
     shadow->setBlurRadius(8);
@@ -87,10 +172,14 @@ void ActionBar::setDarkMode(bool darkMode)
     m_darkMode = darkMode;
     
     setupStyle();
+    if (m_editPointsButton) {
+        m_editPointsButton->setDarkMode(darkMode);
+        m_cornersButton->setDarkMode(darkMode);
+    }
     
     const auto frames = findChildren<QFrame*>();
     for (QFrame* frame : frames) {
-        if (frame->frameShape() == QFrame::HLine) {
+        if (frame->frameShape() == QFrame::HLine || frame->frameShape() == QFrame::VLine) {
             frame->setStyleSheet(m_darkMode
                 ? "background-color: #4d4d4d; border: none;"
                 : "background-color: #D0D0D0; border: none;");

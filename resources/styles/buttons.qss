@@ -44,33 +44,35 @@ QPushButton#ToggleButton:hover {
     background: rgba(0, 0, 0, 25);
 }
 
+/* A toggle that is ON (straight line, ruler): a ring, so it never reads as the current tool */
 QPushButton#ToggleButton:checked {
-    background: white;
-    border: 1px solid rgba(0, 0, 0, 20);
+    background: rgba(0, 0, 0, 18);
+    border: 2px solid rgba(0, 0, 0, 190);
 }
 
 QPushButton#ToggleButton:checked:hover {
-    background: white;
-    border: 1px solid rgba(0, 0, 0, 30);
+    background: rgba(0, 0, 0, 40);
+    border: 2px solid rgba(0, 0, 0, 220);
 }
 
 QPushButton#ToggleButton:pressed {
     background: rgba(0, 0, 0, 70);
 }
 
-/* Tool Button - Pure white when checked (standalone buttons like Lasso) */
+/* Tool Button: the current tool is a dark pill with a light icon (ToolButton::invertIcon),
+   much stronger than the grey hover box */
 QPushButton#ToolButton:hover {
     background: rgba(0, 0, 0, 25);
 }
 
 QPushButton#ToolButton:checked {
-    background: white;
-    border: 1px solid rgba(0, 0, 0, 20);
+    background: rgb(40, 40, 40);
+    border: none;
 }
 
 QPushButton#ToolButton:checked:hover {
-    background: white;
-    border: 1px solid rgba(0, 0, 0, 30);
+    background: rgb(0, 0, 0);
+    border: none;
 }
 
 QPushButton#ToolButton:pressed {
@@ -110,11 +112,11 @@ QPushButton#ThreeStateButton[state="1"]:hover {
 }
 
 QPushButton#ThreeStateButton[state="2"] {
-    background: white;
-    border: 1px solid rgba(0, 0, 0, 20);
+    background: rgba(0, 0, 0, 18);
+    border: 2px solid rgba(0, 0, 0, 190);
 }
 
 QPushButton#ThreeStateButton[state="2"]:hover {
-    background: white;
-    border: 1px solid rgba(0, 0, 0, 30);
+    background: rgba(0, 0, 0, 40);
+    border: 2px solid rgba(0, 0, 0, 220);
 }

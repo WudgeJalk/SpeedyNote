@@ -10,7 +10,7 @@
 #include <QToolButton>
 
 namespace {
-const int kColorCount = 3;       // The pen has 3 colour presets
+const int kMaxColors = 10;       // The first pen colours; the bar stays small
 const int kGapAbovePen = 28;     // The bar sits above the tip, so the hand does not hide it
 }
 
@@ -54,7 +54,7 @@ QuickBar::QuickBar(QWidget* parent)
 
     layout->addSpacing(8);
 
-    for (int i = 0; i < kColorCount; ++i) {
+    for (int i = 0; i < kMaxColors; ++i) {
         auto* color = new QToolButton(this);
         color->setFixedSize(30, 30);
         color->setCursor(Qt::PointingHandCursor);

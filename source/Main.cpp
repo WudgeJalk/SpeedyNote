@@ -18,6 +18,7 @@
 #include "ui/launcher/Launcher.h"
 #include "platform/SystemNotification.h"
 #include "core/DocumentViewport.h"
+#include "core/DrawingSettings.h"
 // CLI support (Desktop only). Excluded on HarmonyOS as well: Qt builds the app
 // as a shared module loaded by an ArkTS host there, so there is no argv-taking
 // executable for a command line to attach to.
@@ -569,9 +570,11 @@ static void applyAndroidFonts(QApplication& app)
 #include "core/PageTests.h"
 #include "core/DocumentTests.h"
 #include "core/NotebookLibraryTests.h"
+#include "core/LibraryTreeTests.h"
 #include "core/SandboxPdfOwnershipTests.h"
 #include "core/DocumentViewportTests.h"
 #include "core/PenBindingsTests.h"
+#include "strokes/ShapeCleanerTests.h"
 #include "ui/ToolbarButtonTests.h"
 #include "objects/LinkObjectTests.h"
 #include "objects/TextBoxObjectTests.h"
@@ -827,6 +830,12 @@ static void connectLauncherSignals(Launcher* launcher)
         launcher->hideWithAnimation();
     });
 
+    QObject::connect(launcher, &Launcher::createNewNoteAt, [=](const QString& bundlePath, bool edgeless) {
+        auto [w, _] = getMainWindow(launcher);
+        w->addNewTabAt(bundlePath, edgeless);
+        launcher->hideWithAnimation();
+    });
+
     QObject::connect(launcher, &Launcher::openPdfRequested, [=]() {
         auto [w, _] = getMainWindow(launcher);
         w->showOpenPdfDialog();
@@ -955,12 +964,16 @@ static int runTests(const QString& testType)
         success = DocumentTests::runAllTests();
     } else if (testType == "notebooklibrary") {
         success = NotebookLibraryTests::runAllTests();
+    } else if (testType == "librarytree") {
+        success = LibraryTreeTests::runAllTests();
     } else if (testType == "sandboxpdf") {
         success = SandboxPdfOwnershipTests::runAllTests();
     } else if (testType == "viewport-unit") {
         success = DocumentViewportTests::runUnitTests();
     } else if (testType == "penbindings") {
         success = PenBindingsTests::runAllTests();
+    } else if (testType == "shapes") {
+        success = ShapeCleanerTests::runAllTests();
     } else if (testType == "linkobject") {
         success = LinkObjectTests::runAllTests();
     } else if (testType == "textboxobject") {
@@ -1288,6 +1301,7 @@ int main(int argc, char* argv[])
             toolSettings.value("tools/eraserUndoGrouping", 0).toInt() == 1
                 ? DocumentViewport::EraserUndoGrouping::PerStroke
                 : DocumentViewport::EraserUndoGrouping::PerGesture);
+        DrawingSettings::reload();
     }
 
     // ========== Initialize System Notifications ==========
@@ -1326,6 +1340,8 @@ int main(int argc, char* argv[])
             testToRun = "document";
         } else if (arg == "--test-notebooklibrary") {
             testToRun = "notebooklibrary";
+        } else if (arg == "--test-librarytree") {
+            testToRun = "librarytree";
         } else if (arg == "--test-sandboxpdf") {
             testToRun = "sandboxpdf";
         } else if (arg == "--test-viewport-unit") {
@@ -1338,6 +1354,8 @@ int main(int argc, char* argv[])
             runButtonVisualTest = true;
         } else if (arg == "--test-penbindings") {
             testToRun = "penbindings";
+        } else if (arg == "--test-shapes") {
+            testToRun = "shapes";
         } else if (arg == "--test-linkobject") {
             testToRun = "linkobject";
         } else if (arg == "--test-textboxobject") {

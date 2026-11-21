@@ -5,17 +5,26 @@
 #include "../../core/DocumentViewport.h"
 #include <QColor>
 #include <QHash>
+#include <QPixmap>
 
 class QFrame;
+class QToolButton;
+class QWidgetAction;
 class ThicknessPresetButton;
 class IconPresetButton;
+
+/// The small picture of an eraser mode (a DocumentViewport::EraserMode value):
+/// a grey line, with the part that mode removes in red.
+QPixmap eraserModePicture(int mode, bool dark);
 
 /**
  * @brief Subtoolbar for the Eraser tool.
  *
- * Layout (mirrors the Pen subtoolbar: a row of round preset buttons):
- * - 4 mode buttons: whole-stroke / partial / lasso / lasso-partial
- *   (exactly one selected)
+ * Layout:
+ * - one mode button that names the mode in words ("The whole line"...); it
+ *   opens the list of modes, each with a picture and one line of help
+ *   (only the picture in a vertical bar)
+ * - an options button that opens the eraser window (optionsRequested)
  * - separator + 3 size preset buttons, hidden in lasso mode
  *
  * Size presets are kept per mode: the whole-stroke eraser and the partial
@@ -48,7 +57,9 @@ public:
     void restoreTabState(int tabIndex) override;
     void saveTabState(int tabIndex) override;
     void clearTabState(int tabIndex) override;
-    
+    void setDarkMode(bool darkMode) override;
+    void setOrientation(Qt::Orientation orientation) override;
+
     /**
      * @brief Emit the currently selected preset value.
      * 
@@ -95,6 +106,9 @@ signals:
      * @param mode A DocumentViewport::EraserMode value.
      */
     void eraserModeChanged(int mode);
+
+    /// The options button was pressed: open the eraser window.
+    void optionsRequested();
 
 private slots:
     void onSizePresetClicked(int index);
@@ -154,11 +168,17 @@ private:
     /// @brief Show/hide the size row for the current mode and sync the rings.
     void applyModePresentation();
 
-    /// @brief Show the accent ring on the active mode button only.
+    /// @brief Show the active mode on the mode button and check it in the list.
     void updateModeButtonSelection();
 
+    /// @brief Pick a mode from the list (the click path: saves and emits).
+    void pickMode(int mode);
+
     // Widgets
-    IconPresetButton* m_modeButtons[NUM_MODES] = {};
+    QToolButton* m_modeButton = nullptr;
+    QWidgetAction* m_modeActions[NUM_MODES] = {};   ///< The list, in EraserMode order
+    IconPresetButton* m_optionsButton = nullptr;
+    bool m_darkMode = false;
     ThicknessPresetButton* m_sizeButtons[NUM_PRESETS] = {nullptr, nullptr, nullptr};
     QFrame* m_sizeSeparator = nullptr;
     

@@ -8,6 +8,7 @@
 // ============================================================================
 
 #include "StrokePoint.h"
+#include "StrokeStyle.h"
 
 #include <QMetaType>
 #include <QString>
@@ -40,13 +41,97 @@ struct VectorStroke {
     /// eraser's broad phase is O(1) per stroke instead of walking every point.
     /// Negative until computed; maxHalfWidth() then falls back to a scan.
     qreal cachedMaxHalfWidth = -1.0;
-    
+    // Style (StrokeStyle enums). Saved only when not the default.
+    quint8 penType = StrokeStyle::Fountain;
+    quint8 lineStyle = StrokeStyle::Solid;
+    quint8 arrowStart = StrokeStyle::None;
+    quint8 arrowEnd = StrokeStyle::None;
+    /// Dash pattern position at point 0, so a cut piece keeps its dashes in place.
+    qreal dashOffset = 0.0;
+    /// A cleaned polygon: first and last point index of each corner
+    /// (ShapeCleaner::jointCorners). Saved only when set; a cut drops it.
+    QVector<int> cornerJoints;
+
     /**
      * @brief Default constructor.
      * Initializes baseThickness to 5.0 pixels.
      */
     VectorStroke() : baseThickness(5.0) {}
-    
+
+    /// Drawn with the marker. Old marker strokes have no pen type, but the
+    /// marker always draws see-through, so a see-through fountain stroke is one.
+    bool isMarker() const {
+        return penType == StrokeStyle::Marker
+               || (penType == StrokeStyle::Fountain && color.alpha() < 255);
+    }
+
+    /// Drawn width at pressure p; the pen type gives the curve (at most 1.5 x base).
+    qreal widthAt(qreal p) const {
+        return baseThickness * StrokeStyle::widthFactor(penType, p);
+    }
+
+    /// How far an arrow head can reach from the line (0 without arrows).
+    qreal arrowPad() const {
+        return (arrowStart != StrokeStyle::None || arrowEnd != StrokeStyle::None)
+                   ? StrokeStyle::arrowLength(baseThickness) + baseThickness
+                   : 0.0;
+    }
+
+    /// Length of the polyline pts[0..to].
+    static qreal pathLength(const QVector<StrokePoint>& pts, int to) {
+        qreal length = 0.0;
+        for (int i = 1; i <= to && i < pts.size(); ++i) {
+            length += QLineF(pts[i - 1].pos, pts[i].pos).length();
+        }
+        return length;
+    }
+
+    /// A straight line (a cleaned one, or straight line mode): every point lies
+    /// on the segment between its two ends. Its selection shows two end handles.
+    bool isStraightLine() const {
+        if (points.size() < 2) {
+            return false;
+        }
+        const QPointF a = points.first().pos;
+        const QPointF ab = points.last().pos - a;
+        const qreal len = QLineF(a, points.last().pos).length();
+        if (len < 1.0) {
+            return false;
+        }
+        const qreal tolerance = qMax(0.5, 0.01 * len);
+        for (const StrokePoint& pt : points) {
+            const QPointF d = pt.pos - a;
+            const qreal off = (d.x() * ab.y() - d.y() * ab.x()) / len;
+            const qreal along = (d.x() * ab.x() + d.y() * ab.y()) / len;
+            if (qAbs(off) > tolerance || along < -tolerance || along > len + tolerance) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * @brief Turn this copy of a stroke into its slice wholePoints[first..first+count-1].
+     *
+     * The dashes stay where they were on the whole stroke, and each arrow head
+     * stays only on the piece that holds its end. Call it on a copy of the
+     * whole stroke (same dashOffset and arrows) after setting the points.
+     */
+    void keepStyleAsSlice(const QVector<StrokePoint>& wholePoints, int first, int count) {
+        if (lineStyle != StrokeStyle::Solid) {
+            dashOffset += pathLength(wholePoints, first);
+        }
+        if (first > 0) {
+            arrowStart = StrokeStyle::None;
+        }
+        if (first + count < wholePoints.size()) {
+            arrowEnd = StrokeStyle::None;
+        }
+        if (first > 0 || first + count < wholePoints.size()) {
+            cornerJoints.clear();
+        }
+    }
+
     /**
      * @brief Recalculate the bounding box from current points.
      * 
@@ -59,7 +144,7 @@ struct VectorStroke {
             boundingBox = QRectF();
             return;
         }
-        qreal maxWidth = baseThickness * 2;
+        qreal maxWidth = qMax(baseThickness * 2, arrowPad());
         qreal minX = points[0].pos.x(), maxX = minX;
         qreal minY = points[0].pos.y(), maxY = minY;
         for (const auto& pt : points) {
@@ -67,7 +152,7 @@ struct VectorStroke {
             maxX = qMax(maxX, pt.pos.x());
             minY = qMin(minY, pt.pos.y());
             maxY = qMax(maxY, pt.pos.y());
-            cachedMaxHalfWidth = qMax(cachedMaxHalfWidth, baseThickness * pt.pressure / 2.0);
+            cachedMaxHalfWidth = qMax(cachedMaxHalfWidth, widthAt(pt.pressure) / 2.0);
         }
         boundingBox = QRectF(minX - maxWidth, minY - maxWidth,
                              maxX - minX + maxWidth * 2,
@@ -83,7 +168,7 @@ struct VectorStroke {
      * half-width at the tested sample.
      *
      * Why the half-width is added back: a stroke is a filled ribbon of width
-     * `baseThickness * pressure`, so requiring the eraser centre to come within
+     * `widthAt(pressure)`, so requiring the eraser centre to come within
      * `radius` of the centre line makes the eraser stop short of the visible
      * ink by half the stroke width - the cursor circle would have to overlap
      * the stroke noticeably before anything happened. The previous version had
@@ -132,13 +217,13 @@ struct VectorStroke {
      * @brief Rendered half-width of the stroke at point index `i`.
      *
      * Matches the polygon builder in VectorLayer, which draws a ribbon of
-     * width `baseThickness * pressure`.
+     * width `widthAt(pressure)`.
      */
     qreal halfWidthAt(int i) const {
         if (i < 0 || i >= points.size()) {
             return baseThickness / 2.0;
         }
-        return baseThickness * points[i].pressure / 2.0;
+        return widthAt(points[i].pressure) / 2.0;
     }
     
     /**
@@ -152,7 +237,7 @@ struct VectorStroke {
         }
         qreal hw = baseThickness / 2.0;
         for (const StrokePoint& pt : points) {
-            hw = qMax(hw, baseThickness * pt.pressure / 2.0);
+            hw = qMax(hw, widthAt(pt.pressure) / 2.0);
         }
         return hw;
     }
@@ -374,6 +459,12 @@ struct VectorStroke {
         if (changedBounds && !changed.isNull()) {
             const qreal pad = maxHalfWidth() + 1.0;
             *changedBounds = changed.adjusted(-pad, -pad, pad, pad);
+            // A cut can turn or remove an arrow head: repaint around both ends.
+            const qreal a = arrowPad();
+            if (a > 0.0) {
+                *changedBounds |= QRectF(points.first().pos, QSizeF()).adjusted(-a, -a, a, a);
+                *changedBounds |= QRectF(points.last().pos, QSizeF()).adjusted(-a, -a, a, a);
+            }
         }
         
         if (pieces.isEmpty()) {
@@ -417,6 +508,7 @@ struct VectorStroke {
             VectorStroke fragment = *this;
             fragment.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
             fragment.points.clear();
+            fragment.cornerJoints.clear();
             
             bool haveLast = false;
             for (const Piece& piece : run) {
@@ -441,6 +533,20 @@ struct VectorStroke {
             }
             if (fragment.points.size() < 2 || fragmentLength < MIN_FRAGMENT_LENGTH) {
                 continue;
+            }
+            // Dashes stay in place; each arrow head stays only on its own end.
+            const Piece& head = run.first();
+            const Piece& tail = run.last();
+            if (lineStyle != StrokeStyle::Solid) {
+                fragment.dashOffset = dashOffset + pathLength(points, head.segment)
+                    + head.t0 * QLineF(points[head.segment].pos,
+                                       points[head.segment + 1].pos).length();
+            }
+            if (head.segment > 0 || head.t0 > 1e-9) {
+                fragment.arrowStart = StrokeStyle::None;
+            }
+            if (tail.segment < points.size() - 2 || tail.t1 < 1.0 - 1e-9) {
+                fragment.arrowEnd = StrokeStyle::None;
             }
             fragment.updateBoundingBox();
             fragments.append(fragment);
@@ -506,6 +612,30 @@ struct VectorStroke {
             pointsArray.append(pt.toJson());
         }
         obj["points"] = pointsArray;
+        // Style keys only when not the default: a default stroke stays the
+        // exact 4 keys of the old format, and the original app ignores them.
+        if (penType != StrokeStyle::Fountain) {
+            obj["pen"] = StrokeStyle::penTypeName(penType);
+        }
+        if (lineStyle != StrokeStyle::Solid) {
+            obj["line"] = StrokeStyle::lineStyleName(lineStyle);
+            if (dashOffset != 0.0) {
+                obj["dashOffset"] = dashOffset;
+            }
+        }
+        if (arrowStart != StrokeStyle::None) {
+            obj["arrowStart"] = StrokeStyle::arrowName(arrowStart);
+        }
+        if (arrowEnd != StrokeStyle::None) {
+            obj["arrowEnd"] = StrokeStyle::arrowName(arrowEnd);
+        }
+        if (!cornerJoints.isEmpty()) {
+            QJsonArray joints;
+            for (int i : cornerJoints) {
+                joints.append(i);
+            }
+            obj["corners"] = joints;
+        }
         return obj;
     }
     
@@ -519,7 +649,16 @@ struct VectorStroke {
         stroke.id = obj["id"].toString();
         stroke.color = QColor(obj["color"].toString());
         stroke.baseThickness = obj["thickness"].toDouble(5.0);
-        
+        // Missing or unknown values read as the default (old files).
+        stroke.penType = StrokeStyle::penTypeFromName(obj["pen"].toString());
+        stroke.lineStyle = StrokeStyle::lineStyleFromName(obj["line"].toString());
+        stroke.arrowStart = StrokeStyle::arrowFromName(obj["arrowStart"].toString());
+        stroke.arrowEnd = StrokeStyle::arrowFromName(obj["arrowEnd"].toString());
+        stroke.dashOffset = obj["dashOffset"].toDouble(0.0);
+        for (const auto& joint : obj["corners"].toArray()) {
+            stroke.cornerJoints.append(joint.toInt());
+        }
+
         // Generate UUID if missing (for backwards compatibility)
         if (stroke.id.isEmpty()) {
             stroke.id = QUuid::createUuid().toString(QUuid::WithoutBraces);

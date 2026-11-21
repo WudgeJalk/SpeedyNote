@@ -5,6 +5,7 @@
 #include <QButtonGroup>
 #include <QColor>
 #include <QPoint>
+#include <QRect>
 #include <QVector>
 #include <QIcon>
 #include <QPair>
@@ -13,23 +14,33 @@
 #include "../core/ToolType.h"
 #include "../core/DocumentViewport.h"
 
+class QAbstractButton;
+class QBoxLayout;
+class QLabel;
 class QPaintEvent;
+class QPropertyAnimation;
 class ExpandableToolButton;
+class SubToolbar;
 class PenSubToolbar;
 class MarkerSubToolbar;
 class EraserSubToolbar;
 class HighlighterSubToolbar;
 class OcrSubToolbar;
+class ShapeSubToolbar;
+class LaserSubToolbar;
 
 /**
- * Toolbar - Tab-specific tool selection and actions with inline subtoolbars.
+ * Toolbar - the main bar (tool families) and the option bar (the options of
+ * the tool in use).
  *
- * Layout (center-aligned):
- * [Pen(+presets)][Marker(+presets)][Eraser(+presets)][Lasso][Image][Link][ObjectText][Highlighter(+presets)][OCR(+controls)]  gap  [Undo][Redo] [Touch]
+ * Two looks:
+ * - Docked: one row in the window layout, as before; the option bar sits in
+ *   the row after the last button.
+ * - Floating: two pills above the page, only as long as their buttons. The
+ *   grip drags it; on release it snaps to the nearest edge. On the left and
+ *   right edges both pills are vertical.
  *
- * When a tool is selected its ExpandableToolButton expands to reveal
- * inline preset buttons (colors, thicknesses, toggles).
- * The OCR button is independent and coexists with the active tool's subtoolbar.
+ * The row: [pager back] stretch [buttons] stretch [pager next][leave full screen][grip]
  */
 class Toolbar : public QWidget {
     Q_OBJECT
@@ -40,6 +51,24 @@ class Toolbar : public QWidget {
 public:
     explicit Toolbar(QWidget *parent = nullptr);
 
+    enum class Edge { Top, Bottom, Left, Right };
+    /// Default gap between a floating bar and each edge of its area ("toolbar/edgeGap")
+    static constexpr int FLOAT_MARGIN = 8;
+
+    /// Docked: the caller puts the bar in its layout (Left and Right fall back
+    /// to Top). Floating: the caller makes the bar a child of the page area and
+    /// calls placeFloating() whenever that area changes size.
+    void setPlacement(Edge edge, bool floating);
+    Edge edge() const { return m_edge; }
+    bool isFloating() const { return m_floating; }
+    /// Size and place the floating bar on its edge of @p area (parent coordinates).
+    /// @p animate slides it there (after a drag), if animations are on.
+    void placeFloating(const QRect &area, bool animate = false);
+    static Edge nearestEdge(QPoint centre, QSize area);
+    /// "top", "bottom", "left", "right" <-> Edge (anything else reads as Top).
+    static Edge edgeFromName(const QString &name);
+    static QString edgeName(Edge edge);
+
     void setCurrentTool(ToolType tool);
     void setObjectInsertMode(DocumentViewport::ObjectInsertMode mode);
     void setTouchGestureMode(int mode);
@@ -47,6 +76,18 @@ public:
     void setUndoEnabled(bool enabled);
     void setRedoEnabled(bool enabled);
     void setStraightLineMode(bool enabled);
+    /// Check or uncheck the ruler toggle without emitting rulerToggled().
+    void setRulerChecked(bool visible);
+
+    /// The options shown in the option bar for @p tool, or null (no option bar).
+    SubToolbar* optionsForTool(ToolType tool) const;
+    /// The main-bar button of @p tool (for ObjectSelect: the current insert mode's).
+    QAbstractButton* buttonForTool(ToolType tool) const;
+    /// The dot on a tool's button that shows its colour.
+    void setToolColor(ToolType tool, const QColor &color);
+    /// Show a tool's window (a Qt::Popup) just past the bar on the page side,
+    /// in line with @p anchor (a button of the bar), and inside the screen.
+    void showToolWindow(QWidget *window, QWidget *anchor) const;
 
     // Per-tab state management keyed by unique tab IDs (from TabManager)
     void onTabChanged(int newTabId, int oldTabId);
@@ -58,6 +99,7 @@ public:
     EraserSubToolbar* eraserSubToolbar() const { return m_eraserSubToolbar; }
     HighlighterSubToolbar* highlighterSubToolbar() const { return m_highlighterSubToolbar; }
     OcrSubToolbar* ocrSubToolbar() const { return m_ocrSubToolbar; }
+    ShapeSubToolbar* shapeSubToolbar() const { return m_shapeSubToolbar; }
 
     void setOcrAvailable(bool available);
     // Separate from setOcrAvailable: cached text stays viewable without an
@@ -83,6 +125,15 @@ public:
     static QStringList buttonOrder();
     /// Save the order and the hidden list, and apply them now.
     void setButtonLayout(const QStringList& order, const QStringList& hidden);
+    /// True: three pen icons (fountain, ball, brush), no pen window. False: one
+    /// pen icon, and the pen bar has a button for the pen window. Applies now; the caller
+    /// saves "toolbar/threePenIcons".
+    void setThreePenIcons(bool three);
+    /// True (default): a tap on the tool in use hides its option bar, another
+    /// tap shows it again; hidden stays hidden across tools until then (not
+    /// saved). False: that tap opens the tool's window. Applies now; the
+    /// caller saves "toolbar/tapHidesOptions".
+    void setTapHidesOptions(bool on);
 
     /// Show the "leave full screen" button at the end of the bar.
     void setExitFullscreenVisible(bool visible) { m_exitFullscreenButton->setVisible(visible); }
@@ -90,8 +141,14 @@ public:
 signals:
     void exitFullscreenClicked();
     void toolSelected(ToolType tool);
+    /// A second tap on the button of the tool already in use, when that tap
+    /// does not hide the options (setTapHidesOptions(false)): opens its window.
+    void toolWindowRequested(ToolType tool);
+    /// The floating bar moved or changed size (the action bar may need to move).
+    void placementChanged();
     void objectInsertModeSelected(DocumentViewport::ObjectInsertMode mode);
     void straightLineToggled(bool enabled);
+    void rulerToggled(bool visible);
     void undoClicked();
     void redoClicked();
     void touchGestureModeChanged(int mode);
@@ -108,22 +165,31 @@ private slots:
 private:
     void setupUi();
     void connectSignals();
-    void expandToolButton(ToolType tool);
-    void collapseAllToolButtons();
-
-    ExpandableToolButton* expandableForTool(ToolType tool) const;
+    /// Make @p tool the current one and show its options.
+    void selectTool(ToolType tool);
+    /// Show the current tool's options (or hide the option bar), then re-measure.
+    void updateOptionBar(bool animate);
+    /// updateOptionBar(), then size and place the bar for it at once.
+    void relayoutOptions(bool animate);
+    /// Hide or show the option bar (a tap on the tool in use).
+    void toggleOptions();
+    bool isVertical() const { return m_floating && (m_edge == Edge::Left || m_edge == Edge::Right); }
+    void updateGripIcon();
+    void updateFloatingMask();
+    bool handleGripEvent(QEvent *event);
 
     QWidget* createGapWidget(int width);
 
-    int groupWidth(const QVector<QWidget*>& widgets) const;
+    int groupLength(const QVector<QWidget*>& widgets) const;
 
     /**
-     * @brief Width the button row wants right now, ignoring page visibility.
+     * @brief Length the button row wants right now, along its axis, ignoring
+     * page visibility.
      *
-     * Measured from size hints, so an expanded subtoolbar counts: picking a
-     * tool with a wide preset strip can be what tips the row into paging.
+     * Measured from size hints, so a docked option bar counts: picking a tool
+     * with a wide option bar can be what tips the row into paging.
      */
-    int naturalContentWidth() const;
+    int naturalLength() const;
 
     /**
      * @brief Enter or leave paged mode based on the current width.
@@ -142,11 +208,26 @@ private:
 
     void installSwipeFilter(QWidget* root);
 
-    // Expandable tool buttons (own subtoolbar content)
-    ExpandableToolButton *m_penExpandable;
-    ExpandableToolButton *m_markerExpandable;
-    ExpandableToolButton *m_eraserExpandable;
-    ExpandableToolButton *m_textExpandable;
+    // Layout: m_outer holds the row, and the option bar when floating.
+    QBoxLayout *m_outer = nullptr;
+    QWidget *m_row = nullptr;
+    QBoxLayout *m_rowLayout = nullptr;
+    QWidget *m_optionBar = nullptr;
+    QBoxLayout *m_optionLayout = nullptr;
+    QLabel *m_grip = nullptr;
+
+    // Tool buttons with options in the option bar
+    ToolButton *m_penButton;
+    ToolButton *m_penTypeButtons[3] = {};   ///< Fountain, ball, brush (StrokeStyle pen types)
+    bool m_threePenIcons = true;            ///< "toolbar/threePenIcons"
+    bool m_tapHidesOptions = true;          ///< "toolbar/tapHidesOptions"
+    bool m_optionsHidden = false;           ///< The user tapped the tool in use: no option bar
+    ToolButton *m_markerButton;
+    ToolButton *m_eraserButton;
+    ToolButton *m_highlighterButton;
+    ToolButton *m_shapeButton;
+    ToolButton *m_laserButton;
+    // OCR keeps its controls inline (hover to expand)
     ExpandableToolButton *m_ocrExpandable;
 
     // Plain tool buttons (no subtoolbar)
@@ -158,8 +239,9 @@ private:
     ToolButton *m_objectTextButton;
     ToolButton *m_panButton;
 
-    // Non-exclusive toggle
+    // Non-exclusive toggles
     ToggleButton *m_straightLineButton;
+    ToggleButton *m_rulerButton;
 
     // Action buttons
     ActionButton *m_undoButton;
@@ -177,17 +259,37 @@ private:
     QVector<QWidget*> m_allPage1Widgets;  ///< Every button of page 1, hidden or not
     QVector<QWidget*> m_allPage2Widgets;
     QVector<QPair<QString, QWidget*>> customizableButtons() const;
-    void applyButtonLayout(const QStringList& order, const QStringList& hidden);
+    /// @p order with each id it lacks inserted after its built-in predecessor.
+    QStringList completeOrder(const QStringList& order) const;
+    /// The pen button ids the current pen mode does not use.
+    QStringList penModeHidden() const;
+    void applyButtonLayout(const QStringList& order, const QStringList& userHidden);
 
     // Tool group for exclusive selection
     QButtonGroup *m_toolGroup;
 
-    // Subtoolbar instances (owned by this Toolbar, embedded in ExpandableToolButtons)
+    // Subtoolbar instances (owned by this Toolbar; all but OCR live in the option bar)
     PenSubToolbar *m_penSubToolbar;
     MarkerSubToolbar *m_markerSubToolbar;
     EraserSubToolbar *m_eraserSubToolbar;
     HighlighterSubToolbar *m_highlighterSubToolbar;
     OcrSubToolbar *m_ocrSubToolbar;
+    ShapeSubToolbar *m_shapeSubToolbar;
+    LaserSubToolbar *m_laserSubToolbar;
+    QVector<SubToolbar*> m_optionSets;  ///< Every set the option bar can show
+
+    // Placement
+    Edge m_edge = Edge::Top;
+    bool m_floating = false;
+    bool m_animations = true;           ///< "toolbar/animations", read in setPlacement()
+    int m_floatMargin = FLOAT_MARGIN;   ///< "toolbar/edgeGap", read in setPlacement(): the same on every edge
+    bool m_optionWanted = false;        ///< The current tool has options to show
+    QRect m_area;                       ///< Last area given to placeFloating()
+    QRect m_lastTarget;
+    int m_availableLength = 0;          ///< Floating: room along the row's axis
+    QPropertyAnimation *m_posAnimation = nullptr;
+    bool m_dragging = false;
+    QPoint m_dragOffset;
 
     // State
     bool m_darkMode = false;

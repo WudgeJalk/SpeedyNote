@@ -143,9 +143,11 @@ public:
     bool scrollBarsPinned() const;
     void setScrollBarsPinned(bool pinned);
     Toolbar* toolbar() const { return m_toolbar; }  ///< For the settings dialog (buttons to hide)
-    /// "top", "bottom" or "hidden". Saved in "toolbar/position".
+    /// "top", "bottom", "left", "right" or "hidden". Saved in "toolbar/position".
+    /// Also re-reads "toolbar/floating" and "toolbar/animations".
     void setToolbarPosition(const QString &position);
     void applyToolbarPosition();
+    void placeToolbar();   ///< Sizes and places a floating toolbar on the page area
     bool scrollBarsHidden() const;
     void setScrollBarsHidden(bool hidden);
 
@@ -299,6 +301,12 @@ public:
     void addNewEdgelessTab();
 
     /**
+     * @brief New paged or edgeless tab, saved at once as bundlePath (a .snb in a
+     * library section), so the note exists where the user made it.
+     */
+    void addNewTabAt(const QString& bundlePath, bool edgeless);
+
+    /**
      * TEMPORARY: Load edgeless document from .snb bundle directory.
      * Uses QFileDialog::getExistingDirectory() to select the .snb folder.
      * 
@@ -335,6 +343,11 @@ public:
      */
     void bringToFront();
 
+    /// close() that asks about unsaved notes now and says if the window closed.
+    /// For a caller that reads the answer and is not inside a Windows title-bar
+    /// message (on Windows a plain close() is refused and done later: closeEvent).
+    bool closeWithAnswer();
+
     // Phase 3.1: sharedLauncher disconnected - will be re-linked later
     // static LauncherWindow *sharedLauncher;
 
@@ -361,6 +374,7 @@ protected:
     void hideQtTitleBarDrawing();                    // Hides what Qt paints in the title row
     void applyFullscreenChrome(bool fullscreen);     // Full screen shows the page, not the bars
     bool m_tabsShownBeforeFullscreen = false;
+    bool m_fullscreenChromeOn = false;               // applyFullscreenChrome(true) is in force
     ActionButton *m_exitFullscreenButton = nullptr;  // Floats on the page in full screen
     void changeEvent(QEvent *event) override;        // Sync nav bar fullscreen button when window state changes (e.g. macOS green button)
     // REMOVED: tabletEvent removed - tablet event handling deleted
@@ -373,6 +387,9 @@ protected:
 #  endif
 #endif
     void closeEvent(QCloseEvent *event) override;
+    bool m_closeFromEventLoop = false;  ///< closeEvent: answer this close now (closeWithAnswer)
+    bool m_closeQueued = false;         ///< Windows: a refused close waits for the event loop
+    bool m_closeRunning = false;        ///< closeEvent is asking about unsaved notes
 
 #if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
     void dragEnterEvent(QDragEnterEvent *event) override;
@@ -795,7 +812,9 @@ private:
     // CR-2B: Tool/mode signal connections (for keyboard shortcut sync)
     QMetaObject::Connection m_toolChangedConn;
     QMetaObject::Connection m_straightLineModeConn;
-    
+    QMetaObject::Connection m_rulerVisibleConn;   ///< Viewport's ruler -> toolbar toggle
+    QMetaObject::Connection m_rulerOptionsConn;   ///< Ruler menu "Options..." -> settings
+
     // Phase D: Auto-highlight sync connection (subtoolbar ↔ viewport)
     QMetaObject::Connection m_autoHighlightConn;
 
@@ -873,6 +892,8 @@ private:
     // Action Bar setup and positioning
     void setupActionBars();            // Create and connect action bars
     void updateActionBarPosition();    // Update position on viewport resize
+    /// The selection panels' "Edit points" and corner rounding follow @p vp's selection.
+    void updateShapeEditButtons(DocumentViewport* vp);
     void setupPagePanelActionBar();    // Page Panel: Task 5.3: Create and connect PagePanelActionBar
     void updatePagePanelActionBarVisibility();  // Page Panel: Task 5.4: Update visibility based on tab and document
     

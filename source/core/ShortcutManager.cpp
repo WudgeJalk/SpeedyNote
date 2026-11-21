@@ -144,6 +144,9 @@ void ShortcutManager::registerDefaults()
     registerAction("tool.highlighter", "T", tr("Text Highlighter Tool"), tr("Tools"));
     registerAction("tool.marker", "M", tr("Marker Tool"), tr("Tools"));
     registerAction("tool.object_select", "V", tr("Object Select Tool"), tr("Tools"));
+    registerAction("tool.shape", "S", tr("Shape Tool"), tr("Tools"));
+    registerAction("tool.laser", "K", tr("Laser Pointer"), tr("Tools"));
+    registerAction("tool.straight_line", "/", tr("Straight Line Mode"), tr("Tools"));
     registerAction("tool.pan", "H", tr("Pan Tool (Hold)"), tr("Tools"));
     // Cycle the active tool's color / thickness presets (single-key, remappable).
     // Color applies to Pen/Marker/Highlighter; thickness to Pen/Marker/Eraser.
@@ -207,6 +210,7 @@ void ShortcutManager::registerDefaults()
     registerAction("view.debug_overlay", "F12", tr("Toggle Debug Overlay"), tr("View"));
     registerAction("view.perf_hud", "F10", tr("Toggle Performance HUD"), tr("View"));
     registerAction("view.quick_bar", "Q", tr("Quick Bar (tools and colors at the pointer)"), tr("View"));
+    registerAction("view.ruler", "R", tr("Show or Hide the Ruler"), tr("View"));
     registerAction("view.auto_layout", "Ctrl+Shift+2", tr("Toggle Auto Layout"), tr("View"));
     registerAction("view.left_sidebar", "Ctrl+Shift+L", tr("Toggle Left Sidebar"), tr("View"));
     registerAction("view.right_sidebar", "Ctrl+Shift+M", tr("Toggle Right Sidebar"), tr("View"));

@@ -9,6 +9,9 @@
 // ============================================================================
 
 #include "PenBindings.h"
+#include "PenHaptics.h"
+#include "DrawingSettings.h"
+#include "../strokes/StrokeStyle.h"
 
 #include <cstdio>
 
@@ -135,12 +138,57 @@ inline bool runAllTests()
         ok &= !PenBindings::toolFor(QStringLiteral("hold:nope"), QLatin1String("hold:"), &tool);
         ok &= !PenBindings::toolFor(QString(), QLatin1String("hold:"), &tool);
         for (ToolType t : { ToolType::Pen, ToolType::Marker, ToolType::Eraser, ToolType::Highlighter,
-                            ToolType::Lasso, ToolType::ObjectSelect, ToolType::Pan }) {
+                            ToolType::Lasso, ToolType::ObjectSelect, ToolType::Pan, ToolType::Shape,
+                            ToolType::Laser }) {
             ToolType back = ToolType::Pen;
             ok &= PenBindings::toolFor(QStringLiteral("hold:") + PenBindings::toolName(t),
                                        QLatin1String("hold:"), &back) && back == t;
         }
         check(ok, "binding strings parse, and every tool name round-trips");
+    }
+    {   // Pen vibration: the paper feel follows the tool and the pen type
+        using PenHaptics::Wave;
+        const DrawingSettings s;   // Defaults: all three on
+        const auto feel = [&s](ToolType t, int type = StrokeStyle::Fountain) {
+            return PenHaptics::decide(PenHaptics::Writing, s, t, type).wave;
+        };
+        bool ok = feel(ToolType::Pen) == Wave::Ink;
+        ok &= feel(ToolType::Pen, StrokeStyle::Ball) == Wave::Ink;
+        ok &= feel(ToolType::Pen, StrokeStyle::Brush) == Wave::Brush;
+        ok &= feel(ToolType::Pen, StrokeStyle::Marker) == Wave::Marker;
+        ok &= feel(ToolType::Marker) == Wave::Marker;
+        ok &= feel(ToolType::Eraser) == Wave::Eraser;
+        ok &= feel(ToolType::Shape) == Wave::Ink;
+        for (ToolType t : { ToolType::Lasso, ToolType::ObjectSelect, ToolType::Pan,
+                            ToolType::Highlighter, ToolType::Laser }) {
+            ok &= feel(t) == Wave::None;   // Nothing is written with these
+        }
+        check(ok, "vibration: the writing feel follows the tool and the pen type");
+    }
+    {   // Pen vibration: switches and strengths
+        using PenHaptics::Wave;
+        DrawingSettings s;
+        const auto decide = [&s](PenHaptics::Kind k) { return PenHaptics::decide(k, s); };
+        bool ok = decide(PenHaptics::Snap).wave == Wave::Click && decide(PenHaptics::Snap).intensity == 1.0;
+        ok &= decide(PenHaptics::ToolChange).wave == Wave::Click && decide(PenHaptics::ToolChange).intensity == 0.6;
+        s.hapticSnap = false;
+        ok &= decide(PenHaptics::Snap).wave == Wave::None;
+        ok &= decide(PenHaptics::ToolChange).wave == Wave::Click;   // The others stay on
+        s.hapticTool = false;
+        ok &= decide(PenHaptics::ToolChange).wave == Wave::None;
+        s.hapticWriting = false;
+        ok &= decide(PenHaptics::Writing).wave == Wave::None;
+        s.hapticWriting = true;
+        s.hapticWritingStrength = 40;
+        ok &= decide(PenHaptics::Writing).wave == Wave::Ink && decide(PenHaptics::Writing).intensity == 0.4;
+        s.hapticWritingStrength = 0;   // 0 % is off
+        ok &= decide(PenHaptics::Writing).wave == Wave::None;
+        // Without a pen, every call is harmless and does nothing.
+        PenHaptics::click(PenHaptics::Snap);
+        PenHaptics::startContinuous(ToolType::Pen, 0);
+        PenHaptics::stop();
+        PenHaptics::penUp();
+        check(ok, "vibration: each switch turns its own feel off, strength 0 too");
     }
 
     std::printf("\n=== Results: %d failed ===\n", g_failed);

@@ -54,6 +54,9 @@ void ObjectSelectActionBar::setupButtons()
     addButton(m_ocrConvertButton);
     connect(m_ocrConvertButton, &ActionBarButton::clicked,
             this, &ObjectSelectActionBar::ocrConvertToTextBoxRequested);
+
+    // A selected shape: move its corners, round them.
+    addShapeEditButtons();
     
     // === Clipboard operations ===
     

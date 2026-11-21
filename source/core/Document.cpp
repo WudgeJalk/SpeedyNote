@@ -2147,6 +2147,29 @@ QJsonObject Document::regeneratePageIds(const QJsonObject& pageJson,
         }
         objects[i] = obj;
     }
+    // Connectors name the shapes their ends are attached to: follow the new
+    // ids, and free an end whose shape did not come along.
+    for (int i = 0; i < objects.size(); ++i) {
+        QJsonObject obj = objects[i].toObject();
+        if (obj.value("type").toString() != QLatin1String("connector")) {
+            continue;
+        }
+        for (const char* end : {"start", "end"}) {
+            const QString prefix = QString::fromLatin1(end);
+            const QString idKey = prefix + QStringLiteral("Id");
+            const QString oldId = obj.value(idKey).toString();
+            if (oldId.isEmpty()) {
+                continue;
+            }
+            if (objMap.contains(oldId)) {
+                obj[idKey] = objMap.value(oldId);
+            } else {
+                obj.remove(idKey);
+                obj.remove(prefix + QStringLiteral("Side"));
+            }
+        }
+        objects[i] = obj;
+    }
     out["objects"] = objects;
 
     return out;

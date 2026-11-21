@@ -451,6 +451,8 @@ QString DebugOverlay::toolName() const
             return QString("Object[%1/%2]").arg(insertMode, actionMode);
         }
         case ToolType::Pan:         return "Pan";
+        case ToolType::Shape:       return "Shape";
+        case ToolType::Laser:       return "Laser";
         default:                    return "Unknown";
     }
 }

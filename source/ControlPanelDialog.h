@@ -16,6 +16,7 @@
 
 // Forward declarations
 class MainWindow;
+class QVBoxLayout;
 
 /**
  * @brief Control Panel dialog for application settings.
@@ -42,6 +43,11 @@ public:
      * Used by keyboard shortcut Ctrl+Alt+Shift+K.
      */
     void switchToKeyboardShortcutsTab();
+
+    /// Switch to the Stylus tab (pen buttons). Used by the pen window.
+    void switchToStylusTab() { tabWidget->setCurrentWidget(stylusTab); }
+    /// Switch to the Drawing tab. Used by the ruler's "Options...".
+    void switchToDrawingTab() { tabWidget->setCurrentWidget(drawingTabPage); }
 
 protected:
     /**
@@ -90,6 +96,44 @@ private:
     QCheckBox *ocrCjkGridModeCheck = nullptr;
     QComboBox *eraserUndoGroupingCombo = nullptr;
     void createToolsTab();
+
+    // === Drawing tab (ControlPanelDrawingTab.cpp) ===
+    QDoubleSpinBox *dashLengthSpin = nullptr;
+    QDoubleSpinBox *dashGapSpin = nullptr;
+    QDoubleSpinBox *dotGapSpin = nullptr;
+    QCheckBox *eraserPenCheck = nullptr;
+    QCheckBox *eraserMarkerCheck = nullptr;
+    QCheckBox *eraserAutoDeselectCheck = nullptr;
+    QSpinBox *stabilisationSpin = nullptr;
+    QCheckBox *drawAndHoldCheck = nullptr;
+    QSpinBox *holdMsSpin = nullptr;
+    QSpinBox *holdStillSpin = nullptr;      // LengthSpinBox
+    QSpinBox *holdMinLengthSpin = nullptr;  // LengthSpinBox
+    QSpinBox *cornerAngleSpin = nullptr;
+    QSpinBox *closePercentSpin = nullptr;
+    QSpinBox *snapPxSpin = nullptr;         // LengthSpinBox
+    QSpinBox *roughPercentSpin = nullptr;
+    QSpinBox *equalPercentSpin = nullptr;
+    QSpinBox *angleSnapSpin = nullptr;
+    QSpinBox *levelAngleSpin = nullptr;
+    QCheckBox *handArrowsCheck = nullptr;
+    QComboBox *handArrowHeadCombo = nullptr;
+    QSpinBox *laserHoldSpin = nullptr;
+    QSpinBox *laserFadeSpin = nullptr;
+    QPushButton *laserColorButton = nullptr;
+    QColor laserColorChoice;
+    QSpinBox *rulerSnapSpin = nullptr;      // LengthSpinBox
+    QComboBox *rulerAngleUnitCombo = nullptr;
+    QCheckBox *fingerTapCheck = nullptr;
+    QSpinBox *tapMsSpin = nullptr;
+    QSpinBox *tapSlopSpin = nullptr;        // LengthSpinBox
+    QSpinBox *tapReachSpin = nullptr;       // LengthSpinBox
+    QWidget *drawingTabPage = nullptr;
+    void createDrawingTab();
+    /// Save the Drawing tab, reload DrawingSettings and repaint if needed.
+    void applyDrawingTab();
+    /// "Pen Vibration" of the Stylus tab (PenHaptics); applies at once, like that tab.
+    void addPenVibrationGroup(QVBoxLayout *layout, QWidget *parent);
 
     // === Theme tab ===
     QWidget *themeTab;

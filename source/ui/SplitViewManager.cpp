@@ -1413,7 +1413,12 @@ void SplitViewManager::setScrollBarHorizontalEdge(ViewportScrollBar::DockEdge ed
 
 int SplitViewManager::viewportTopReserve() const
 {
-    if (m_hEdge != ViewportScrollBar::DockEdge::Top) {
+    return viewportEdgeReserve(ViewportScrollBar::DockEdge::Top);
+}
+
+int SplitViewManager::viewportEdgeReserve(ViewportScrollBar::DockEdge edge) const
+{
+    if (m_hEdge != edge && m_vEdge != edge) {
         return 0;
     }
     // Mirrors the top-docked geometry in repositionScrollBars: the bar starts one

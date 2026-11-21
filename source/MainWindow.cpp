@@ -17,6 +17,9 @@
 #include "ui/subtoolbars/MarkerSubToolbar.h"
 #include "ui/subtoolbars/HighlighterSubToolbar.h"
 #include "ui/subtoolbars/EraserSubToolbar.h"
+#include "ui/subtoolbars/ShapeSubToolbar.h"
+#include "ui/EraserOptionsPopup.h"
+#include "ui/PenSettingsPopup.h"
 #include "ui/actionbars/ActionBarContainer.h"
 #include "ui/QuickBar.h"
 #include <QCursor>
@@ -85,9 +88,11 @@
 #include <QSet>
 #include <QWheelEvent>
 #include <QTimer>
+#include <QScopeGuard>
 #include <QSplitter>
 #include <QShortcut>  // Phase doc-1: Application-wide keyboard shortcuts
 #include "core/ShortcutManager.h"  // Keyboard shortcut hub
+#include "core/PenHaptics.h"       // A click of a haptic pen on a tool change
 #include "compat/qt_compat.h"  // Qt5/Qt6 input device shims
 #include <QColorDialog>  // Phase 3.1.8: For custom color picker
 #include <QProcess>
@@ -502,7 +507,9 @@ MainWindow::MainWindow(QWidget *parent)
     }
     connect(m_splitViewManager, &SplitViewManager::totalTabCountChanged, this, [this](int total) {
         if (QWidget* tbc = m_splitViewManager ? m_splitViewManager->tabBarContainer() : nullptr) {
-            tbc->setVisible(total >= 2);
+            // Full screen shows no tab bar: the rule applies when it ends.
+            if (m_fullscreenChromeOn) m_tabsShownBeforeFullscreen = total >= 2;
+            else tbc->setVisible(total >= 2);
         }
     });
 
@@ -1214,8 +1221,9 @@ void MainWindow::setupUi() {
     connect(m_navigationBar, &NavigationBar::menuRequested, this, [this]() {
         // Show overflow menu at menu button position
         if (overflowMenu && m_navigationBar) {
-            overflowMenu->popup(m_navigationBar->mapToGlobal(
-                QPoint(m_navigationBar->width() - 10, m_navigationBar->height())));
+            // Right edge of the menu under the right edge of its button, so it stays in the window.
+            const QPoint anchor = m_navigationBar->menuAnchor();
+            overflowMenu->popup(QPoint(anchor.x() - overflowMenu->sizeHint().width(), anchor.y()));
         }
     });
     // ------------------ End of NavigationBar signal connections ------------------
@@ -1233,6 +1241,7 @@ void MainWindow::setupUi() {
     
     // Connect Toolbar signals
     connect(m_toolbar, &Toolbar::toolSelected, this, [this](ToolType tool) {
+        PenHaptics::click(PenHaptics::ToolChange);
         if (m_panHoldActive) m_panHoldActive = false;
         if (DocumentViewport* vp = currentViewport()) {
             if (m_toolOverrideViewport == vp)
@@ -1247,12 +1256,18 @@ void MainWindow::setupUi() {
         }
     });
     connect(m_toolbar, &Toolbar::exitFullscreenClicked, this, &MainWindow::toggleFullscreen);
+    // A floating bar on the left edge pushes the action bar to its right.
+    connect(m_toolbar, &Toolbar::placementChanged, this, &MainWindow::updateActionBarPosition);
     connect(m_toolbar, &Toolbar::straightLineToggled, this, [this](bool enabled) {
         // Straight line mode toggle
         if (DocumentViewport* vp = currentViewport()) {
             vp->setStraightLineMode(enabled);
         }
         // qDebug() << "Toolbar: Straight line mode" << (enabled ? "enabled" : "disabled");
+    });
+    connect(m_toolbar, &Toolbar::rulerToggled, this, [this](bool visible) {
+        if (DocumentViewport* vp = currentViewport()) vp->setRulerVisible(visible);
+        else m_toolbar->setRulerChecked(false);
     });
     connect(m_toolbar, &Toolbar::undoClicked, this, [this]() {
         if (DocumentViewport* vp = currentViewport()) {
@@ -1848,6 +1863,13 @@ void MainWindow::wireQActionDispatchers()
             || qobject_cast<QPlainTextEdit*>(f)) return;
         w->showQuickBar();
     });
+    wire("view.ruler",         [](MainWindow* w){
+        // "R" is a letter: it must still type an R in a text box.
+        QWidget* f = QApplication::focusWidget();
+        if (qobject_cast<QLineEdit*>(f) || qobject_cast<QTextEdit*>(f)
+            || qobject_cast<QPlainTextEdit*>(f)) return;
+        if (DocumentViewport* vp = w->currentViewport()) vp->setRulerVisible(!vp->rulerVisible());
+    });
 
     // ----- OCR (MAC.6) -----
     // Each handler delegates to OcrSubToolbar's keyboard-shortcut entry points
@@ -1922,6 +1944,7 @@ void MainWindow::wireQActionDispatchers()
     auto wireToolKey = [&wire, isTextFocused](const QString& id, ToolType tool) {
         wire(id, [tool, isTextFocused](MainWindow* w) {
             if (isTextFocused()) return;
+            PenHaptics::click(PenHaptics::ToolChange);   // Keys, the quick bar and pen button commands
             if (w->m_panHoldActive) w->m_panHoldActive = false;
             if (auto* vp = w->currentViewport()) {
                 if (w->m_toolOverrideViewport == vp)
@@ -1936,6 +1959,8 @@ void MainWindow::wireQActionDispatchers()
     wireToolKey("tool.eraser",        ToolType::Eraser);
     wireToolKey("tool.lasso",         ToolType::Lasso);
     wireToolKey("tool.object_select", ToolType::ObjectSelect);
+    wireToolKey("tool.shape",         ToolType::Shape);
+    wireToolKey("tool.laser",         ToolType::Laser);
     // tool.pan (H) is intentionally NOT wired — it is hold-to-activate via
     // the existing event-filter path (m_panHoldKey / changeEvent / eventFilter).
     // Its registry shortcut is read once in setupManagedShortcuts() to seed
@@ -1975,6 +2000,9 @@ void MainWindow::wireQActionDispatchers()
             case ToolType::Highlighter:
                 if (auto* st = w->m_toolbar->highlighterSubToolbar()) st->cycleColor();
                 break;
+            case ToolType::Shape:
+                if (auto* st = w->m_toolbar->shapeSubToolbar()) st->cycleColor();
+                break;
             default: break;  // tool has no color presets
         }
     });
@@ -1994,6 +2022,17 @@ void MainWindow::wireQActionDispatchers()
                 break;
             default: break;  // tool has no thickness presets
         }
+    });
+    // Straight lines with no hold delay, from a key or a pen button.
+    wire("tool.straight_line", [isTextFocused](MainWindow* w){
+        if (isTextFocused()) return;
+        DocumentViewport* vp = w->currentViewport();
+        if (!vp) return;
+        // Straight lines only exist for the pen and the marker (as in the quick bar).
+        if (vp->currentTool() != ToolType::Pen && vp->currentTool() != ToolType::Marker) {
+            vp->setCurrentTool(ToolType::Pen);
+        }
+        vp->setStraightLineMode(!vp->straightLineMode());
     });
 
     // ----- Highlighter Style (MAC.7) -----
@@ -2198,6 +2237,8 @@ void MainWindow::setupManagedShortcuts()
     bindAction("view.fullscreen");
     bindAction("view.debug_overlay");
     bindAction("view.perf_hud");
+    bindAction("view.ruler");
+    bindAction("view.quick_bar");
     // MAC.6: ocr.* + tab navigation bindings
     bindAction("ocr.scan_page");
     bindAction("ocr.scan_all");
@@ -2213,6 +2254,9 @@ void MainWindow::setupManagedShortcuts()
     bindAction("tool.eraser");
     bindAction("tool.lasso");
     bindAction("tool.object_select");
+    bindAction("tool.shape");
+    bindAction("tool.laser");
+    bindAction("tool.straight_line");
     bindAction("tool.cycle_color");
     bindAction("tool.cycle_thickness");
     bindAction("highlighter.style_none");
@@ -2360,7 +2404,9 @@ MainWindow::~MainWindow() {
     // CR-2B: Cleanup tool/mode signal connections
     if (m_toolChangedConn) disconnect(m_toolChangedConn);
     if (m_straightLineModeConn) disconnect(m_straightLineModeConn);
-    
+    if (m_rulerVisibleConn) disconnect(m_rulerVisibleConn);
+    if (m_rulerOptionsConn) disconnect(m_rulerOptionsConn);
+
     // Phase 5.1: Clean up LayerPanel page connection
     if (m_layerPanelPageConn) disconnect(m_layerPanelPageConn);
     if (m_connectedViewport) {
@@ -2423,6 +2469,8 @@ void MainWindow::connectViewportScrollSignals(DocumentViewport* viewport) {
         disconnect(m_straightLineModeConn);
         m_straightLineModeConn = {};
     }
+    disconnect(m_rulerVisibleConn);
+    disconnect(m_rulerOptionsConn);
     // Phase D: Disconnect auto-highlight sync connection
     if (m_autoHighlightConn) {
         disconnect(m_autoHighlightConn);
@@ -2619,7 +2667,16 @@ void MainWindow::connectViewportScrollSignals(DocumentViewport* viewport) {
     // Also sync the current straight line mode to the toolbar
     if (m_toolbar) {
         m_toolbar->setStraightLineMode(viewport->straightLineMode());
+        m_toolbar->setRulerChecked(viewport->rulerVisible());
+        m_rulerVisibleConn = connect(viewport, &DocumentViewport::rulerVisibleChanged,
+                                     m_toolbar, &Toolbar::setRulerChecked);
     }
+    // Queued: the ruler's menu has closed before the dialog opens.
+    m_rulerOptionsConn = connect(viewport, &DocumentViewport::rulerOptionsRequested, this, [this]() {
+        ControlPanelDialog dialog(this, this);
+        dialog.switchToDrawingTab();
+        dialog.exec();
+    }, Qt::QueuedConnection);
     
     // Phase D: Connect auto-highlight style sync (viewport → subtoolbar)
     // When Ctrl+H or a tab switch changes the style, update the dropdown to match.
@@ -2698,9 +2755,13 @@ void MainWindow::connectViewportScrollSignals(DocumentViewport* viewport) {
     // Action Bar: Connect selection state signals to ActionBarContainer
     // =========================================================================
     
-    // Lasso selection changed (shows/hides LassoActionBar)
+    // Lasso selection changed (shows/hides LassoActionBar). The shape buttons
+    // first, so the bar is sized with them.
     m_lassoSelectionConn = connect(viewport, &DocumentViewport::lassoSelectionChanged,
-                                   m_actionBarContainer, &ActionBarContainer::onLassoSelectionChanged);
+                                   this, [this, viewport](bool hasSelection) {
+        updateShapeEditButtons(viewport);
+        if (m_actionBarContainer) m_actionBarContainer->onLassoSelectionChanged(hasSelection);
+    });
 
     // Sync the recolor swatch on the LassoActionBar to the current pen color
     // every time a fresh selection appears, so the "default" target color
@@ -2740,12 +2801,18 @@ void MainWindow::connectViewportScrollSignals(DocumentViewport* viewport) {
             m_objectSelectActionBar->updateLinkSelection(
                 sel.size() == 1 && sel.first()->type() == QLatin1String("link"));
         }
+        updateShapeEditButtons(viewport);
         if (m_actionBarContainer) {
             bool hasSelection = !viewport->selectedObjects().isEmpty();
             m_actionBarContainer->onObjectSelectionChanged(hasSelection);
         }
     });
     
+    // The selection moved, or the view scrolled or zoomed: the menu follows it.
+    // Queued: it comes from the viewport's paint. Unique: this runs per viewport switch.
+    connect(viewport, &DocumentViewport::selectionMenuAnchorChanged, this, &MainWindow::updateActionBarPosition,
+            static_cast<Qt::ConnectionType>(Qt::QueuedConnection | Qt::UniqueConnection));
+
     // Text selection changed (brings up ObjectSelectActionBar with just Copy)
     m_textSelectionConn = connect(viewport, &DocumentViewport::textSelectionChanged,
                                   m_actionBarContainer, &ActionBarContainer::onTextSelectionChanged);
@@ -2796,6 +2863,7 @@ void MainWindow::connectViewportScrollSignals(DocumentViewport* viewport) {
         m_actionBarContainer->onToolChanged(viewport->currentTool());
         
         // Sync all selection/clipboard states
+        updateShapeEditButtons(viewport);
         m_actionBarContainer->onLassoSelectionChanged(viewport->hasLassoSelection());
 
         // Sync image/OCR-specific state before object selection so button count is correct
@@ -3101,15 +3169,16 @@ void MainWindow::connectViewportScrollSignals(DocumentViewport* viewport) {
         }
     }
     
+    // The floating toolbar clears the banner too, and the search bar the toolbar.
     m_pdfBannerReserveConn = connect(viewport, &DocumentViewport::topBannerReserveChanged,
-            this, &MainWindow::updatePdfSearchBarPosition);
+            this, &MainWindow::updateScrollbarPositions);
     updatePdfSourceUi(viewport);
 
     // Unconditionally, because the reserve can change without any viewport
     // emitting: arriving at a clean document from a warned one leaves this
     // viewport's own state untouched, so nothing above would fire and the
     // search bar would stay pushed down by the banner that is no longer there.
-    updatePdfSearchBarPosition();
+    updateScrollbarPositions();
 }
 
 void MainWindow::applySubToolbarValuesToViewport(ToolType tool)
@@ -3132,6 +3201,11 @@ void MainWindow::applySubToolbarValuesToViewport(ToolType tool)
         case ToolType::Highlighter:
             if (m_toolbar->highlighterSubToolbar()) {
                 m_toolbar->highlighterSubToolbar()->emitCurrentValues();
+            }
+            break;
+        case ToolType::Shape:
+            if (m_toolbar->shapeSubToolbar()) {
+                m_toolbar->shapeSubToolbar()->emitCurrentValues();
             }
             break;
         default:
@@ -3181,6 +3255,7 @@ void MainWindow::applyAllSubToolbarValuesToViewport(DocumentViewport* viewport)
         viewport->setPenColor(m_toolbar->penSubToolbar()->currentColor());
         viewport->setPenThickness(m_toolbar->penSubToolbar()->currentThickness());
         viewport->setPenMinStrokeWidth(m_toolbar->penSubToolbar()->currentMinStrokeWidth());
+        viewport->setPenStyle(m_toolbar->penSubToolbar()->currentStyle());
     }
     
     // Apply marker settings
@@ -3194,6 +3269,13 @@ void MainWindow::applyAllSubToolbarValuesToViewport(DocumentViewport* viewport)
     // but the Highlighter tool uses a separate color variable in DocumentViewport
     applyHighlighterSettingsToViewport(viewport);
     
+    // Apply the shape bar
+    if (auto* shapeST = m_toolbar->shapeSubToolbar()) {
+        viewport->setShapeKind(shapeST->currentKind());
+        viewport->setShapeColor(shapeST->currentColor());
+        viewport->setShapeStroke(shapeST->currentThickness(), shapeST->currentStyle());
+    }
+
     // Apply eraser size and mode
     if (m_toolbar->eraserSubToolbar()) {
         viewport->setEraserSize(m_toolbar->eraserSubToolbar()->currentSize());
@@ -4958,6 +5040,29 @@ void MainWindow::addNewEdgelessTab()
     // REMOVED MW7.2: updateDialDisplay removed - dial functionality deleted
 }
 
+void MainWindow::addNewTabAt(const QString& bundlePath, bool edgeless)
+{
+    if (edgeless) {
+        addNewEdgelessTab();
+    } else {
+        addNewTab();
+    }
+    DocumentViewport* viewport = tabManager() ? tabManager()->currentViewport() : nullptr;
+    Document* doc = viewport ? viewport->document() : nullptr;
+    if (!doc || !m_documentManager) return;
+
+    doc->name = QFileInfo(bundlePath).completeBaseName();
+    if (!m_documentManager->saveDocumentAs(doc, bundlePath)) {
+        QMessageBox::critical(this, tr("Save Error"),
+            tr("Failed to save document to:\n%1").arg(bundlePath));
+        return;
+    }
+    NotebookLibrary::instance()->addToRecent(bundlePath);
+    const int index = tabManager()->currentIndex();
+    tabManager()->setTabTitle(index, doc->name);
+    tabManager()->markTabModified(index, false);
+}
+
 void MainWindow::loadFolderDocument()
 {
     // ==========================================================================
@@ -5770,7 +5875,7 @@ void MainWindow::showQuickBar()
     QList<QColor> colors;
     int selected = -1;
     if (auto* st = m_toolbar->penSubToolbar()) {
-        for (int i = 0; i < 3; ++i) colors << st->presetColor(i);
+        colors = st->colors();  // The bar shows the first ten
         selected = st->selectedColorPreset();
     }
 
@@ -5847,8 +5952,34 @@ void MainWindow::updateScrollbarPositions() {
     // remaining floating overlays that share the canvas container: the action
     // bar and the PDF search bar. The name is kept for its existing callers
     // (canvasContainer resize + initial layout).
+    placeToolbar();  // First: the action bar and search bar then go above it
     updateActionBarPosition();
     updatePdfSearchBarPosition();
+}
+
+void MainWindow::placeToolbar()
+{
+    if (m_toolbar && m_canvasContainer && m_toolbar->isFloating()
+        && m_toolbar->parentWidget() == m_canvasContainer) {
+        // The gap is measured from the edge of the page area, the same on all
+        // four sides. Only what stays on an edge for good moves it in: scroll
+        // bars pinned on screen, and on the top the missing-PDF banner. Scroll
+        // bars that fade in and out, or are turned off, claim nothing.
+        QMargins reserve;
+        if (m_splitViewManager) {
+            using Dock = ViewportScrollBar::DockEdge;
+            const bool barsStay = m_splitViewManager->scrollBarsPinned()
+                                  && !m_splitViewManager->scrollBarsHidden();
+            const auto bar = [this, barsStay](Dock edge) {
+                return barsStay ? m_splitViewManager->viewportEdgeReserve(edge) : 0;
+            };
+            const DocumentViewport* vp = currentViewport();
+            reserve = QMargins(bar(Dock::Left), qMax(bar(Dock::Top), vp ? vp->topBannerReserve() : 0),
+                               bar(Dock::Right), bar(Dock::Bottom));
+        }
+        m_toolbar->placeFloating(m_canvasContainer->rect().marginsRemoved(reserve));
+        m_toolbar->raise();
+    }
 }
 
 // =========================================================================
@@ -5857,7 +5988,7 @@ void MainWindow::updateScrollbarPositions() {
 
 void MainWindow::connectSubToolbarSignals()
 {
-    // Subtoolbars are now owned by the Toolbar (via ExpandableToolButtons).
+    // Subtoolbars are owned by the Toolbar (shown in its option bar).
     // This method connects subtoolbar signals to viewport actions.
 
     auto* penST = m_toolbar->penSubToolbar();
@@ -5866,7 +5997,11 @@ void MainWindow::connectSubToolbarSignals()
     auto* eraserST = m_toolbar->eraserSubToolbar();
 
     // Pen
+    // The pen and marker buttons show their colour as a dot on the tip.
+    m_toolbar->setToolColor(ToolType::Pen, penST->currentColor());
+    m_toolbar->setToolColor(ToolType::Marker, markerST->currentColor());
     connect(penST, &PenSubToolbar::penColorChanged, this, [this](const QColor& color) {
+        m_toolbar->setToolColor(ToolType::Pen, color);
         if (DocumentViewport* vp = currentViewport()) vp->setPenColor(color);
         // Also keep the lasso recolor swatch in sync. Cheap setter; safe to
         // call even when the lasso action bar is hidden.
@@ -5878,9 +6013,13 @@ void MainWindow::connectSubToolbarSignals()
     connect(penST, &PenSubToolbar::penMinStrokeWidthChanged, this, [this](qreal minWidth) {
         if (DocumentViewport* vp = currentViewport()) vp->setPenMinStrokeWidth(minWidth);
     });
+    connect(penST, &PenSubToolbar::penStyleChanged, this, [this](const StrokeStyle::Style& style) {
+        if (DocumentViewport* vp = currentViewport()) vp->setPenStyle(style);
+    });
 
     // Marker
     connect(markerST, &MarkerSubToolbar::markerColorChanged, this, [this](const QColor& color) {
+        m_toolbar->setToolColor(ToolType::Marker, color);
         if (DocumentViewport* vp = currentViewport()) vp->setMarkerColor(color);
     });
     connect(markerST, &MarkerSubToolbar::markerThicknessChanged, this, [this](qreal thickness) {
@@ -5910,6 +6049,30 @@ void MainWindow::connectSubToolbarSignals()
         }
     });
 
+    // Shapes. A change also restyles the shape selected with the shape tool.
+    auto* shapeST = m_toolbar->shapeSubToolbar();
+    m_toolbar->setToolColor(ToolType::Shape, shapeST->currentColor());
+    connect(shapeST, &ShapeSubToolbar::shapeKindChanged, this, [this](int kind) {
+        if (DocumentViewport* vp = currentViewport()) {
+            vp->setShapeKind(kind);
+            vp->restyleSelectedShape();
+        }
+    });
+    connect(shapeST, &ShapeSubToolbar::shapeColorChanged, this, [this](const QColor& color) {
+        m_toolbar->setToolColor(ToolType::Shape, color);
+        if (DocumentViewport* vp = currentViewport()) {
+            vp->setShapeColor(color);
+            vp->restyleSelectedShape();
+        }
+    });
+    connect(shapeST, &ShapeSubToolbar::shapeStrokeChanged, this,
+            [this](qreal width, const StrokeStyle::Style& style) {
+        if (DocumentViewport* vp = currentViewport()) {
+            vp->setShapeStroke(width, style);
+            vp->restyleSelectedShape();
+        }
+    });
+
     // LinkObject controls live in a viewport-owned LinkObjectBar, which the
     // viewport wires to its own handlers. Nothing to connect here.
 
@@ -5920,6 +6083,34 @@ void MainWindow::connectSubToolbarSignals()
     connect(eraserST, &EraserSubToolbar::eraserModeChanged, this, [this](int mode) {
         if (DocumentViewport* vp = currentViewport())
             vp->setEraserMode(static_cast<DocumentViewport::EraserMode>(mode));
+    });
+    // The eraser window: its options button, or a second tap on the eraser
+    // when that tap does not hide the eraser bar.
+    const auto openEraserWindow = [this]() {
+        auto* popup = new EraserOptionsPopup(this);
+        connect(popup, &EraserOptionsPopup::clearPageRequested, this, [this]() {
+            if (DocumentViewport* vp = currentViewport()) vp->clearCurrentPage();
+        });
+        m_toolbar->showToolWindow(popup, m_toolbar->buttonForTool(ToolType::Eraser));
+    };
+    connect(eraserST, &EraserSubToolbar::optionsRequested, this, openEraserWindow);
+    // The pen window: its button in the pen bar (one pen icon only), or a
+    // second tap on the pen when that tap does not hide the pen bar.
+    const auto openPenWindow = [this, penST]() {
+        auto* popup = new PenSettingsPopup(penST->currentStyle().penType, this);
+        connect(popup, &PenSettingsPopup::penTypeChosen, penST, &PenSubToolbar::setPenType);
+        // Queued: the dialog opens after the window has closed.
+        connect(popup, &PenSettingsPopup::penButtonSettingsRequested, this, [this]() {
+            ControlPanelDialog dialog(this, this);
+            dialog.switchToStylusTab();
+            dialog.exec();
+        }, Qt::QueuedConnection);
+        m_toolbar->showToolWindow(popup, m_toolbar->buttonForTool(ToolType::Pen));
+    };
+    connect(penST, &PenSubToolbar::windowRequested, this, openPenWindow);
+    connect(m_toolbar, &Toolbar::toolWindowRequested, this, [openEraserWindow, openPenWindow](ToolType tool) {
+        if (tool == ToolType::Eraser) openEraserWindow();
+        else if (tool == ToolType::Pen) openPenWindow();
     });
 
     // Tab changes: per-tab state management via Toolbar (keyed by unique tab IDs).
@@ -6143,6 +6334,22 @@ void MainWindow::setupActionBars()
         }
     });
     
+    // "Edit points" and the corner rounding of a selected shape, in both panels.
+    for (ActionBar* bar : {static_cast<ActionBar*>(m_lassoActionBar), static_cast<ActionBar*>(m_objectSelectActionBar)}) {
+        connect(bar, &ActionBar::editPointsToggled, this, [this](bool on) {
+            if (DocumentViewport* vp = currentViewport()) {
+                vp->setEditPoints(on);
+                updateShapeEditButtons(vp);
+            }
+        });
+        connect(bar, &ActionBar::cornerStepChosen, this, [this](int step) {
+            if (DocumentViewport* vp = currentViewport()) {
+                vp->setCornerStep(step);
+                updateShapeEditButtons(vp);
+            }
+        });
+    }
+
     // Connect ObjectSelectActionBar signals to viewport
     connect(m_objectSelectActionBar, &ObjectSelectActionBar::actionModeChanged,
             this, [this](DocumentViewport::ObjectActionMode mode) {
@@ -6238,6 +6445,16 @@ void MainWindow::setupActionBars()
 #endif
 }
 
+void MainWindow::updateShapeEditButtons(DocumentViewport* vp)
+{
+    const bool can = vp && vp->canEditPoints();
+    const int step = can ? vp->cornerStep() : -1;
+    for (ActionBar* bar : {static_cast<ActionBar*>(m_lassoActionBar), static_cast<ActionBar*>(m_objectSelectActionBar)}) {
+        if (bar) bar->setShapeEdit(can, can && vp->editPoints(), step);
+    }
+    updateActionBarPosition();
+}
+
 void MainWindow::updateActionBarPosition()
 {
     if (!m_actionBarContainer || !m_canvasContainer) {
@@ -6249,7 +6466,32 @@ void MainWindow::updateActionBarPosition()
     // are relative to canvasContainer. The sidebars are siblings of
     // canvasContainer in the layout, so we should NOT add sidebar offset here.
     QRect viewportRect = m_canvasContainer->rect();
-    
+    // Beside a floating toolbar on the left edge, not under it.
+    if (m_toolbar && !m_toolbar->isHidden() && m_toolbar->isFloating()
+        && m_toolbar->edge() == Toolbar::Edge::Left) {
+        viewportRect.setLeft(m_toolbar->geometry().right() + 1);
+    }
+
+    // The selection menu sits next to the selection, inside its view and off
+    // the floating toolbar.
+    QRect anchor, area;
+    if (DocumentViewport* vp = currentViewport()) {
+        const QPoint origin = m_canvasContainer->mapFromGlobal(vp->mapToGlobal(QPoint(0, 0)));
+        area = QRect(origin, vp->size()).intersected(m_canvasContainer->rect());
+        if (m_toolbar && !m_toolbar->isHidden() && m_toolbar->isFloating()) {
+            const QRect bar = m_toolbar->geometry();
+            switch (m_toolbar->edge()) {
+            case Toolbar::Edge::Top:    area.setTop(qMax(area.top(), bar.bottom() + 1)); break;
+            case Toolbar::Edge::Bottom: area.setBottom(qMin(area.bottom(), bar.top() - 1)); break;
+            case Toolbar::Edge::Left:   area.setLeft(qMax(area.left(), bar.right() + 1)); break;
+            case Toolbar::Edge::Right:  area.setRight(qMin(area.right(), bar.left() - 1)); break;
+            }
+        }
+        const QRect selection = vp->selectionMenuAnchor();
+        if (!selection.isNull()) anchor = selection.translated(origin);
+    }
+    m_actionBarContainer->setAnchor(anchor, area);
+
     // Update action bar container position
     m_actionBarContainer->updatePosition(viewportRect);
     
@@ -6386,9 +6628,21 @@ void MainWindow::updatePdfSearchBarPosition()
     DocumentViewport* vp = currentViewport();
     const int bannerReserve = vp ? vp->topBannerReserve() : 0;
 
-    m_pdfSearchBar->setGeometry(paneRect.right() + 1 - width - margin,
-                                paneRect.top() + qMax(scrollBarReserve, bannerReserve) + margin,
-                                width, m_pdfSearchBar->height());
+    QRect bar(paneRect.right() + 1 - width - margin,
+              paneRect.top() + qMax(scrollBarReserve, bannerReserve) + margin,
+              width, m_pdfSearchBar->height());
+    // The floating toolbar keeps its place; Find moves beside it, never over it.
+    if (m_toolbar && m_toolbar->isVisible() && m_toolbar->isFloating()
+        && m_toolbar->parentWidget() == m_canvasContainer) {
+        const QRect tools = m_toolbar->geometry();
+        if (tools.intersects(bar)) {
+            if (m_toolbar->edge() == Toolbar::Edge::Right)
+                bar.moveRight(tools.left() - margin);
+            else
+                bar.moveTop(tools.bottom() + 1 + margin);
+        }
+    }
+    m_pdfSearchBar->setGeometry(bar);
 
     // Ensure it's raised above viewport content
     m_pdfSearchBar->raise();
@@ -6477,6 +6731,7 @@ void MainWindow::setScrollBarVerticalOnRight(bool onRight)
     if (!m_splitViewManager) return;
     m_splitViewManager->setScrollBarVerticalEdge(onRight ? ViewportScrollBar::DockEdge::Right
                                                          : ViewportScrollBar::DockEdge::Left);
+    updateScrollbarPositions();  // A floating toolbar clears the bar's new edge
 }
 
 bool MainWindow::scrollBarHorizontalOnBottom() const
@@ -6490,8 +6745,8 @@ void MainWindow::setScrollBarHorizontalOnBottom(bool onBottom)
     if (!m_splitViewManager) return;
     m_splitViewManager->setScrollBarHorizontalEdge(onBottom ? ViewportScrollBar::DockEdge::Bottom
                                                             : ViewportScrollBar::DockEdge::Top);
-    // The top strip the search bar has to clear grows or vanishes with the edge.
-    updatePdfSearchBarPosition();
+    // The top strip the search bar and a floating toolbar clear moves with the edge.
+    updateScrollbarPositions();
 }
 
 bool MainWindow::scrollBarsPinned() const
@@ -6520,14 +6775,18 @@ void MainWindow::applyFullscreenChrome(bool fullscreen)
     // Full screen is for the page: no title row, no tab bar. The toolbar
     // stays (unless the user hid it), and a small button leaves full screen.
     if (m_navigationBar) m_navigationBar->setVisible(!fullscreen);
+    // Only on the way in and out: this runs on every window state change. A
+    // maximise after full screen used to bring back a tab bar that had gone
+    // with the second tab, and a second call in full screen lost it for good.
     if (QWidget *tabs = m_splitViewManager ? m_splitViewManager->tabBarContainer() : nullptr) {
-        if (fullscreen) {
+        if (fullscreen && !m_fullscreenChromeOn) {
             m_tabsShownBeforeFullscreen = tabs->isVisible();
             tabs->hide();
-        } else if (m_tabsShownBeforeFullscreen) {
-            tabs->show();
+        } else if (!fullscreen && m_fullscreenChromeOn) {
+            tabs->setVisible(m_tabsShownBeforeFullscreen);
         }
     }
+    m_fullscreenChromeOn = fullscreen;
     // The way out sits at the end of the toolbar, with the other controls.
     // Only when the user hid the toolbar does it float on the page corner.
     const bool inToolbar = m_toolbar && m_toolbar->isVisible();
@@ -6559,18 +6818,35 @@ void MainWindow::setToolbarPosition(const QString &position)
 void MainWindow::applyToolbarPosition()
 {
     auto *mainLayout = centralWidget() ? qobject_cast<QVBoxLayout*>(centralWidget()->layout()) : nullptr;
-    if (!mainLayout || !m_toolbar || !m_splitViewManager) return;
+    if (!mainLayout || !m_toolbar || !m_splitViewManager || !m_canvasContainer) return;
 
-    // "top" (default), "bottom" or "hidden". A hidden toolbar leaves the tools
-    // on their keys, the pen buttons and the quick bar.
-    const QString position = QSettings("SpeedyNote", "App").value("toolbar/position", "top").toString();
+    // "top" (default), "bottom", "left", "right" or "hidden". A hidden toolbar
+    // leaves the tools on their keys, the pen buttons and the quick bar.
+    // Floating (the default) puts it above the page; docked, it is a row of the
+    // window, and left or right fall back to the top.
+    QSettings settings("SpeedyNote", "App");
+    const QString position = settings.value("toolbar/position", "top").toString();
+    const bool floating = settings.value("toolbar/floating", true).toBool();
     mainLayout->removeWidget(m_toolbar);
-    if (position == QLatin1String("bottom")) {
-        mainLayout->addWidget(m_toolbar);  // After the content
+    if (position == QLatin1String("hidden")) {
+        m_toolbar->hide();
+    } else if (floating) {
+        if (m_toolbar->parentWidget() != m_canvasContainer)
+            m_toolbar->setParent(m_canvasContainer);  // Not in its layout: it floats
+        m_toolbar->setPlacement(Toolbar::edgeFromName(position), true);
+        m_toolbar->show();
+        placeToolbar();
     } else {
-        mainLayout->insertWidget(mainLayout->indexOf(m_splitViewManager->tabBarContainer()) + 1, m_toolbar);
+        m_toolbar->setPlacement(Toolbar::edgeFromName(position), false);
+        if (position == QLatin1String("bottom")) {
+            mainLayout->addWidget(m_toolbar);  // After the content
+        } else {
+            mainLayout->insertWidget(mainLayout->indexOf(m_splitViewManager->tabBarContainer()) + 1, m_toolbar);
+        }
+        m_toolbar->show();
     }
-    m_toolbar->setVisible(position != QLatin1String("hidden"));
+    updateActionBarPosition();
+    updatePdfSearchBarPosition();  // Back above a bar that was just raised
 }
 
 bool MainWindow::scrollBarsHidden() const
@@ -6581,12 +6857,14 @@ bool MainWindow::scrollBarsHidden() const
 void MainWindow::setScrollBarsHidden(bool hidden)
 {
     if (m_splitViewManager) m_splitViewManager->setScrollBarsHidden(hidden);
+    updateScrollbarPositions();  // A floating toolbar clears pinned bars only
 }
 
 void MainWindow::setScrollBarsPinned(bool pinned)
 {
     if (!m_splitViewManager) return;
     m_splitViewManager->setScrollBarsPinned(pinned);
+    updateScrollbarPositions();
 }
 
 void MainWindow::onSearchNext(const QString& text, bool caseSensitive, bool wholeWord)
@@ -9352,6 +9630,18 @@ bool MainWindow::nativeEvent(const QByteArray &eventType, void *message, long *r
                     *result = HTCLIENT;
                     return true;
                 }
+                // Qt's minimise zone is a little wider than our minimise button, and
+                // reached over the menu button next to it: a tap on the three dots
+                // minimised the window. A point on one of our own buttons is ours.
+                if (m_navigationBar) {
+                    POINT pt = { static_cast<short>(LOWORD(msg->lParam)), static_cast<short>(HIWORD(msg->lParam)) };
+                    ScreenToClient(msg->hwnd, &pt);
+                    const QPoint inWindow = QPointF(pt.x, pt.y).toPoint() / devicePixelRatioF();
+                    if (m_navigationBar->hasOwnButtonAt(m_navigationBar->mapFrom(this, inWindow))) {
+                        *result = HTCLIENT;
+                        return true;
+                    }
+                }
                 break;
             case WM_NCCALCSIZE:
                 // In full screen Qt still keeps 8 px of window frame on the
@@ -9513,7 +9803,41 @@ void MainWindow::saveSessionTabs()
     }
 }
 
+bool MainWindow::closeWithAnswer()
+{
+    m_closeFromEventLoop = true;
+    const bool closed = close();
+    m_closeFromEventLoop = false;
+    return closed;
+}
+
 void MainWindow::closeEvent(QCloseEvent *event) {
+    // A close asked while the save box of another one is open: that box decides.
+    if (m_closeRunning) {
+        event->ignore();
+        return;
+    }
+#ifdef Q_OS_WIN
+    // The title bar's X: Qt 6.12 closes the window from inside WM_NCHITTEST
+    // (QWindowsWindow::handleNonClientHitTest), once per hit test while the
+    // button is down. A save box opened there gets no input and the app spins
+    // for ever (the freeze of 2026-11-20). So this close is refused, and done
+    // once, later, from the event loop: the requests that come meanwhile
+    // (more hit tests, the SC_CLOSE after the release) join it.
+    if (!m_closeFromEventLoop) {
+        event->ignore();
+        if (!m_closeQueued) {
+            m_closeQueued = true;
+            QTimer::singleShot(0, this, [this]() {
+                m_closeQueued = false;
+                closeWithAnswer();
+            });
+        }
+        return;
+    }
+#endif
+    m_closeRunning = true;
+    const auto running = qScopeGuard([this]() { m_closeRunning = false; });
     // ========== CHECK FOR UNSAVED DOCUMENTS ==========
     // Per-tab: silently persist ephemeral view state (edgeless last_position /
     // paged lastAccessedPage) via autosavePositionOnlyChange, then prompt only

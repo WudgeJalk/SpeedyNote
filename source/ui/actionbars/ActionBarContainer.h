@@ -143,6 +143,19 @@ public:
      */
     void setPagePanelLocked(bool locked);
 
+    // =========================================================================
+    // Next to the selection (Settings > Tools > "Selection menu")
+    // =========================================================================
+
+    /// The selection's box with its handles (null: none) and the view it must
+    /// stay in, both in parent coordinates. Takes effect at updatePosition().
+    void setAnchor(const QRect& selection, const QRect& area);
+    /// Read "actionBar/nextToSelection" and "actionBar/distance" again.
+    void reloadSettings();
+    /// Where a bar of @p bar size goes: under @p selection at @p gap, above it
+    /// when there is no room below, centred on it and always inside @p area.
+    static QRect placeNear(const QSize& bar, const QRect& selection, const QRect& area, int gap);
+
 public slots:
     /**
      * @brief Handle tool changes from Toolbar.
@@ -236,6 +249,17 @@ private:
      * Centralizes the logic: effective = (panelActive || locked) && documentSupported.
      */
     void updatePagePanelEffectiveVisibility();
+
+    /// The context bar goes next to the selection now.
+    bool nearSelection() const { return m_currentActionBar && m_nextToSelection && !m_anchor.isNull(); }
+    /// Lay out the context bar next to the selection (and the page panel bar at the side).
+    void placeNearSelection(bool pagePanelShown);
+
+    bool m_nextToSelection = true;   ///< "actionBar/nextToSelection"
+    int m_menuGap = 12;              ///< "actionBar/distance": screen px from the selection's box
+    QRect m_anchor;                  ///< See setAnchor()
+    QRect m_anchorArea;
+    bool m_placedNear = false;       ///< The last layout put the bar next to the selection
 
     QHash<QString, ActionBar*> m_actionBars;
     ActionBar* m_currentActionBar = nullptr;

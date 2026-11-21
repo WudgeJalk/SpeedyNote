@@ -4,6 +4,10 @@
 
     <file>resources/icons/pen.png</file>
     <file>resources/icons/pen_reversed.png</file>
+    <file>resources/icons/pen_fountain.png</file>
+    <file>resources/icons/pen_fountain_reversed.png</file>
+    <file>resources/icons/brush.png</file>
+    <file>resources/icons/brush_reversed.png</file>
     <file>resources/icons/marker.png</file>
     <file>resources/icons/marker_reversed.png</file>
     <file>resources/icons/eraser.png</file>
@@ -56,6 +60,18 @@
     <file>resources/icons/win_restore_reversed.png</file>
     <file>resources/icons/exit_fullscreen.png</file>
     <file>resources/icons/exit_fullscreen_reversed.png</file>
+    <file>resources/icons/grip.png</file>
+    <file>resources/icons/grip_reversed.png</file>
+    <file>resources/icons/grip_horizontal.png</file>
+    <file>resources/icons/grip_horizontal_reversed.png</file>
+    <file>resources/icons/laser.png</file>
+    <file>resources/icons/laser_reversed.png</file>
+    <file>resources/icons/ruler.png</file>
+    <file>resources/icons/ruler_reversed.png</file>
+    <file>resources/icons/editpoints.png</file>
+    <file>resources/icons/editpoints_reversed.png</file>
+    <file>resources/icons/corners.png</file>
+    <file>resources/icons/corners_reversed.png</file>
     <file>resources/icons/zoom.png</file>
     <file>resources/icons/zoom_reversed.png</file>
     <file>resources/icons/thickness.png</file>

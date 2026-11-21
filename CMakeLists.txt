@@ -882,13 +882,25 @@ set(CORE_SOURCES
     source/core/Page.cpp
     source/core/Document.cpp
     source/core/DocumentViewport.cpp
+    source/core/DocumentViewportTools.cpp
+    source/core/DocumentViewportShapes.cpp
+    source/core/DocumentViewportLineEnds.cpp
+    source/core/DocumentViewportSelect.cpp
+    source/core/DocumentViewportCorners.cpp
+    source/core/LaserPointer.cpp
+    source/core/Ruler.cpp
     source/core/DocumentManager.cpp
     source/core/NotebookLibrary.cpp
+    source/core/LibraryTree.cpp
     source/core/TouchGestureHandler.cpp
     source/core/MarkdownNote.cpp
     source/core/ShortcutManager.cpp
     source/core/PenBindings.cpp
+    source/core/PenHaptics.cpp
     source/core/DarkModeUtils.cpp
+    source/core/DrawingSettings.cpp
+    source/strokes/StrokeStyleGeometry.cpp
+    source/strokes/ShapeCleaner.cpp
 )
 
 # Inserted objects (images, links, etc.)
@@ -898,6 +910,8 @@ set(OBJECT_SOURCES
     source/objects/LinkObject.cpp
     source/objects/TextBoxObject.cpp
     source/objects/OcrTextObject.cpp
+    source/objects/ShapeObject.cpp
+    source/objects/ConnectorObject.cpp
 )
 
 # OCR engine abstraction and worker
@@ -917,6 +931,9 @@ if(SPEEDYNOTE_ENABLE_WINDOWS_INK_OCR)
     list(APPEND OCR_SOURCES source/ocr/engines/WindowsInkOcrEngine.cpp)
     # C++/WinRT headers require C++20 for coroutine support
     set_source_files_properties(source/ocr/engines/WindowsInkOcrEngine.cpp
+        PROPERTIES COMPILE_OPTIONS "-std=c++20")
+    # Pen vibration uses C++/WinRT too (empty everywhere else).
+    set_source_files_properties(source/core/PenHaptics.cpp
         PROPERTIES COMPILE_OPTIONS "-std=c++20")
 endif()
 if(SPEEDYNOTE_ENABLE_MLKIT_INK_OCR)
@@ -957,6 +974,9 @@ set(UI_SOURCES
     source/ui/NavigationBar.cpp
     source/ui/Toolbar.cpp
     source/ui/QuickBar.cpp
+    source/ui/StrokePresetDialog.cpp
+    source/ui/EraserOptionsPopup.cpp
+    source/ui/PenSettingsPopup.cpp
     source/ui/StyleLoader.cpp
     source/ui/MenuPopup.cpp
     source/ui/TabBar.cpp
@@ -977,6 +997,7 @@ set(UI_SOURCES
     source/ui/sidebars/PagePanelListView.cpp
     # Widgets
     source/ui/widgets/ColorPresetButton.cpp
+    source/ui/widgets/ColorListRow.cpp
     source/ui/widgets/ThicknessPresetButton.cpp
     source/ui/widgets/ToggleButton.cpp
     source/ui/widgets/ModeToggleButton.cpp
@@ -999,6 +1020,8 @@ set(UI_SOURCES
     source/ui/subtoolbars/EraserSubToolbar.cpp
     source/ui/subtoolbars/HighlighterSubToolbar.cpp
     source/ui/subtoolbars/OcrSubToolbar.cpp
+    source/ui/subtoolbars/ShapeSubToolbar.cpp
+    source/ui/subtoolbars/LaserSubToolbar.cpp
     # Panels
     source/ui/panels/InlineTextBoxEditor.cpp
     source/ui/panels/TextBoxFormatBar.cpp
@@ -1029,6 +1052,7 @@ set(UI_SOURCES
     source/ui/launcher/SearchView.cpp
     source/ui/launcher/FloatingActionButton.cpp
     source/ui/launcher/FolderPickerDialog.cpp
+    source/ui/launcher/LibraryView.cpp
 )
 
 # PDF abstraction layer
@@ -1174,6 +1198,7 @@ set(APP_SOURCES
         source/Main.cpp
         source/MainWindow.cpp
     source/ControlPanelDialog.cpp
+    source/ControlPanelDrawingTab.cpp
     source/ui/dialogs/KeyCaptureDialog.cpp
     source/ui/dialogs/PageRangeSelectDialog.cpp
     source/ui/dialogs/PdfSourcesDialog.cpp

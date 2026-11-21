@@ -237,6 +237,72 @@ NotebookExporter::ExportResult NotebookExporter::exportPackage(
     return result;
 }
 
+NotebookExporter::ExportResult NotebookExporter::exportFolderPackage(
+    const QString& folderPath, const QString& destPath, QJsonObject manifest)
+{
+    ExportResult result;
+    const QString root = QDir::cleanPath(folderPath);
+    const QString rootName = QFileInfo(root).fileName();
+    const QString part = destPath + ".part";  // the real name only once the pack is whole
+    QFile::remove(part);
+
+    mz_zip_archive zip;
+    memset(&zip, 0, sizeof(zip));
+    if (!mz_zip_writer_init_file(&zip, part.toUtf8().constData(), 0)) {
+        result.errorMessage = QObject::tr("Could not create the file:\n%1").arg(destPath);
+        return result;
+    }
+    auto fail = [&](const QString& why) {
+        mz_zip_writer_end(&zip);
+        QFile::remove(part);
+        result.errorMessage = why;
+        return result;
+    };
+
+    int files = 0;
+    QDirIterator it(root, QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System,
+                    QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        const QString path = it.next();
+        const QFileInfo info = it.fileInfo();
+        const QByteArray entry = (rootName + "/" + QDir(root).relativeFilePath(path)
+                                  + (info.isDir() ? "/" : "")).toUtf8();
+        QByteArray data;
+        if (!info.isDir()) {
+            QFile file(path);
+            if (!file.open(QIODevice::ReadOnly) || (data = file.readAll()).size() != info.size())
+                return fail(QObject::tr("Could not read this file. It may be open elsewhere or not "
+                                        "fully synced:\n%1").arg(path));
+            ++files;
+        }
+        const QString suffix = info.suffix().toLower();
+        const bool stored = info.isDir() || suffix == "pdf" || suffix == "png" || suffix == "jpg";
+        if (!mz_zip_writer_add_mem(&zip, entry.constData(), data.constData(), size_t(data.size()),
+                                   stored ? MZ_NO_COMPRESSION : MZ_DEFAULT_COMPRESSION))
+            return fail(QObject::tr("Could not add this file to the pack:\n%1").arg(path));
+    }
+
+    manifest["root"] = rootName;
+    manifest["files"] = files;
+    const QByteArray json = QJsonDocument(manifest).toJson();
+    if (!mz_zip_writer_add_mem(&zip, "speedynote-pack.json", json.constData(), size_t(json.size()),
+                               MZ_DEFAULT_COMPRESSION)
+        || !mz_zip_writer_finalize_archive(&zip))
+        return fail(QObject::tr("Could not write the file:\n%1").arg(destPath));
+    mz_zip_writer_end(&zip);
+
+    QFile::remove(destPath);  // the save dialog already asked before replacing it
+    if (!QFile::rename(part, destPath)) {
+        QFile::remove(part);
+        result.errorMessage = QObject::tr("Could not write the file:\n%1").arg(destPath);
+        return result;
+    }
+    result.success = true;
+    result.exportedPath = destPath;
+    result.fileSize = QFileInfo(destPath).size();
+    return result;
+}
+
 qint64 NotebookExporter::estimatePdfSize(Document* doc)
 {
     if (!doc) {

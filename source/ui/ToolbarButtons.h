@@ -1,6 +1,7 @@
 #ifndef TOOLBARBUTTONS_H
 #define TOOLBARBUTTONS_H
 
+#include <QColor>
 #include <QPushButton>
 #include <QString>
 #include <QStyle>
@@ -63,8 +64,13 @@ public:
      */
     bool isDarkMode() const { return m_darkMode; }
 
+    /// The icon in the theme's own colour, never the inverted one of a selected tool.
+    QIcon themedIcon() const;
+
 protected:
     virtual void updateIcon();
+    /// True: show the other theme's icon (the button sits on an inverted pill).
+    virtual bool invertIcon() const { return false; }
     bool event(QEvent *event) override;
     
     QString m_iconBaseName;
@@ -154,6 +160,16 @@ class ToolButton : public ToggleButton {
 
 public:
     explicit ToolButton(QWidget *parent = nullptr);
+
+    /// The tip of the icon is drawn in this colour (the tool's colour). Invalid = none.
+    void setAccentColor(const QColor &color);
+
+protected:
+    void paintEvent(QPaintEvent *event) override;
+    bool invertIcon() const override;
+
+private:
+    QColor m_accentColor;
 };
 
 #endif // TOOLBARBUTTONS_H

@@ -16,6 +16,7 @@ class TimelineModel;
 class TimelineDelegate;
 class TimelineListView;
 class StarredView;
+class LibraryView;
 class SearchView;
 class FloatingActionButton;
 class ExportProgressWidget;
@@ -68,6 +69,11 @@ public:
      */
     void importFiles(const QStringList& snbxFiles);
 
+#if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
+    /// Opens the folder that holds path in the system file manager, with path selected.
+    static void showInFileManager(const QString& path);
+#endif
+
 signals:
     /**
      * @brief Emitted when a notebook is selected from the list.
@@ -84,7 +90,13 @@ signals:
      * @brief Emitted when user requests a new paged document.
      */
     void createNewPaged();
-    
+
+    /**
+     * @brief Emitted when the Library page makes a new note in a section.
+     * @param bundlePath Where the new .snb must be saved.
+     */
+    void createNewNoteAt(const QString& bundlePath, bool edgeless);
+
     /**
      * @brief Emitted when user wants to open a PDF for annotation.
      */
@@ -135,9 +147,6 @@ private:
     void toggleNotebookStar(const QString& bundlePath);
     void renameNotebook(const QString& bundlePath);
     void duplicateNotebook(const QString& bundlePath);
-#if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
-    void showInFileManager(const QString& bundlePath);
-#endif
 #if defined(Q_OS_ANDROID) || defined(Q_OS_IOS) || defined(Q_OS_HARMONY)
     QStringList survivingNotebookBundles(const QStringList& bundlesBeingDeleted);
 #endif
@@ -169,6 +178,7 @@ private:
     // === View Management ===
     enum class View {
         Timeline,
+        Library,
         Starred,
         Search
     };
@@ -182,6 +192,7 @@ private:
     QWidget* m_navSidebar = nullptr;
     LauncherNavButton* m_returnBtn = nullptr;
     LauncherNavButton* m_timelineBtn = nullptr;
+    LauncherNavButton* m_libraryBtn = nullptr;
     LauncherNavButton* m_starredBtn = nullptr;
     LauncherNavButton* m_searchBtn = nullptr;
     
@@ -197,6 +208,9 @@ private:
     QPushButton* m_timelineBackButton = nullptr;
     QPushButton* m_timelineOverflowMenuButton = nullptr;
     
+    // Library view (notebooks | sections | notes)
+    LibraryView* m_libraryView = nullptr;
+
     // Starred view
     StarredView* m_starredView = nullptr;
     

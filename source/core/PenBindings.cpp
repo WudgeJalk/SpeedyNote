@@ -1,4 +1,5 @@
 #include "PenBindings.h"
+#include "PenHaptics.h"
 
 #include <QSettings>
 
@@ -66,6 +67,8 @@ const ToolName kTools[] = {
     { ToolType::Lasso,        QLatin1String("lasso") },
     { ToolType::ObjectSelect, QLatin1String("object_select") },
     { ToolType::Pan,          QLatin1String("pan") },
+    { ToolType::Shape,        QLatin1String("shape") },
+    { ToolType::Laser,        QLatin1String("laser") },
 };
 
 #ifdef SN_PEN_NATIVE_HOOK
@@ -80,13 +83,24 @@ public:
         case WM_POINTERUP:
         case WM_POINTERENTER:
         case WM_POINTERLEAVE: {
-            // Speed: without an "in the air" binding nobody reads this state,
-            // so the two system calls below are skipped for every pen message.
-            if (!s_airBound) break;
+            // Speed: moves only need the pen's state for an "in the air"
+            // binding; without one they skip the system calls below.
+            const bool move = msg->message == WM_POINTERUPDATE;
+            if (move && !s_airBound) break;
             const UINT32 id = GET_POINTERID_WPARAM(msg->wParam);
             POINTER_INPUT_TYPE type = PT_POINTER;
+            if (!GetPointerType(id, &type) || type != PT_PEN) break;
+            // Pen vibration: once per approach, touch, lift or leave, never per move.
+            switch (msg->message) {
+            case WM_POINTERENTER: PenHaptics::setPointerId(id); break;
+            case WM_POINTERDOWN:  PenHaptics::penDown(id); break;
+            case WM_POINTERUP:    PenHaptics::penUp(); break;
+            case WM_POINTERLEAVE: PenHaptics::penLeft(); break;
+            default: break;
+            }
+            if (!s_airBound) break;
             POINTER_PEN_INFO info;
-            if (GetPointerType(id, &type) && type == PT_PEN && GetPointerPenInfo(id, &info)) {
+            if (GetPointerPenInfo(id, &info)) {
                 s_nativeSideDown = msg->message != WM_POINTERLEAVE
                                    && (info.penFlags & PEN_FLAG_BARREL) != 0;
             }

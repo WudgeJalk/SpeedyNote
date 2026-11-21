@@ -3,6 +3,8 @@
 #include <QFile>
 #include <QTextStream>
 #include <QEvent>
+#include <QPainter>
+#include <QPainterPath>
 
 // ============================================================================
 // ButtonStyles
@@ -69,12 +71,19 @@ void ToolbarButton::updateIcon()
         return;
     }
     
-    QString path = m_darkMode
+    QString path = (m_darkMode != invertIcon())
         ? QString(":/resources/icons/%1_reversed.png").arg(m_iconBaseName)
         : QString(":/resources/icons/%1.png").arg(m_iconBaseName);
-    
+
     setIcon(QIcon(path));
     setIconSize(QSize(24, 24)); // Icon slightly smaller than button for padding
+}
+
+QIcon ToolbarButton::themedIcon() const
+{
+    if (m_iconBaseName.isEmpty()) return icon();
+    return QIcon(QString(":/resources/icons/%1%2.png")
+                     .arg(m_iconBaseName, m_darkMode ? QStringLiteral("_reversed") : QString()));
 }
 
 bool ToolbarButton::event(QEvent *event)
@@ -202,5 +211,59 @@ ToolButton::ToolButton(QWidget *parent)
 {
     // Set object name for QSS styling (override ToggleButton's)
     setObjectName("ToolButton");
+    connect(this, &QAbstractButton::toggled, this, [this]() { updateIcon(); });
+}
+
+bool ToolButton::invertIcon() const
+{
+    // The current tool sits on a pill of the other theme's colour (buttons*.qss).
+    return isChecked() && !property("inExpandable").toBool();
+}
+
+void ToolButton::setAccentColor(const QColor &color)
+{
+    if (m_accentColor == color) return;
+    m_accentColor = color;
+    update();
+}
+
+void ToolButton::paintEvent(QPaintEvent *event)
+{
+    ToggleButton::paintEvent(event);
+    if (!m_accentColor.isValid()) return;
+
+    // The pen and highlighter icons have their tip at the bottom-left: that
+    // part of the icon itself is drawn in the tool's colour.
+    const QSize size = iconSize();
+    const qreal dpr = devicePixelRatioF();
+    QPixmap tinted = icon().pixmap(size * dpr);
+    if (tinted.isNull()) return;
+    QColor fill = m_accentColor;
+    fill.setAlpha(255);
+    // A colour as dark (or as light) as what is behind it would make the tip vanish.
+    const bool darkBehind = m_darkMode != invertIcon();
+    if (darkBehind && fill.lightness() < 90) {
+        fill.setHsl(fill.hslHue(), fill.hslSaturation(), 90);
+    } else if (!darkBehind && fill.lightness() > 185) {
+        fill.setHsl(fill.hslHue(), fill.hslSaturation(), 185);
+    }
+    {
+        QPainter p(&tinted);
+        p.setCompositionMode(QPainter::CompositionMode_SourceIn);
+        p.fillRect(tinted.rect(), fill);
+    }
+    tinted.setDevicePixelRatio(dpr);
+    const QRectF r((width() - size.width()) / 2.0, (height() - size.height()) / 2.0,
+                   size.width(), size.height());
+    QPainterPath tip;
+    tip.moveTo(r.left(), r.bottom());
+    tip.lineTo(r.left(), r.top() + r.height() * 0.4);
+    tip.lineTo(r.left() + r.width() * 0.6, r.bottom());
+    tip.closeSubpath();
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+    painter.setClipPath(tip);
+    painter.drawPixmap(r, tinted, QRectF(tinted.rect()));
 }
 

@@ -68,7 +68,18 @@ public:
      * @return Unique folder name (may be same as baseName if no conflict)
      */
     static QString resolveNameConflict(const QString& baseName, const QString& destDir);
-    
+
+    /**
+     * @brief Unpack a file made by NotebookExporter::exportFolderPackage().
+     *
+     * Checks the manifest @p format, keeps every entry inside its folder, checks
+     * each file (CRC) and the file count, and unpacks into a hidden folder first,
+     * so a damaged pack leaves nothing behind. The folder lands in @p parentDir
+     * ("Name (2)" on a clash); its path is returned in extractedSnbPath.
+     */
+    static ImportResult importFolderPackage(const QString& packPath, const QString& parentDir,
+                                            const QString& format);
+
 signals:
     /**
      * @brief Emitted during import to report progress.

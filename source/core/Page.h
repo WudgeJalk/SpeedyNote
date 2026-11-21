@@ -92,7 +92,12 @@ public:
      * Call rebuildAffinityMap() after bulk operations or loading from JSON.
      */
     std::map<int, std::vector<InsertedObject*>> objectsByAffinity;
-    
+
+    /// The page holds a connector, so rendering re-anchors them
+    /// (ConnectorObject::resolve). Kept by addObject, removeObject,
+    /// extractObject and rebuildAffinityMap: a page without one pays nothing.
+    bool hasConnectors = false;
+
     // ===== OCR Data (Phase 1A - derived cache) =====
     QVector<OcrTextBlock> ocrTextBlocks;    ///< Recognized text blocks (derived from strokes)
     QSet<QString> suppressedStrokeIds;      ///< Strokes user explicitly excluded from OCR

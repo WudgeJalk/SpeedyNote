@@ -295,6 +295,89 @@ NotebookImporter::ImportResult NotebookImporter::importPackage(
     return result;
 }
 
+NotebookImporter::ImportResult NotebookImporter::importFolderPackage(
+    const QString& packPath, const QString& parentDir, const QString& format)
+{
+    ImportResult result;
+    const QString packName = QFileInfo(packPath).fileName();
+    mz_zip_archive zip;
+    memset(&zip, 0, sizeof(zip));
+    if (!mz_zip_reader_init_file(&zip, packPath.toUtf8().constData(), 0)) {
+        result.errorMessage = QObject::tr("Could not open \"%1\". The file is damaged or incomplete.")
+                                  .arg(packName);
+        return result;
+    }
+    QString tmp;
+    auto fail = [&](const QString& why) {
+        mz_zip_reader_end(&zip);
+        if (!tmp.isEmpty()) QDir(tmp).removeRecursively();
+        result.errorMessage = why;
+        return result;
+    };
+
+    size_t size = 0;
+    void* raw = mz_zip_reader_extract_file_to_heap(&zip, "speedynote-pack.json", &size, 0);
+    const QJsonObject manifest = raw
+        ? QJsonDocument::fromJson(QByteArray(static_cast<const char*>(raw), int(size))).object()
+        : QJsonObject();
+    mz_free(raw);
+    const QString root = manifest.value("root").toString();
+    if (manifest.value("format").toString() != format || root.isEmpty() || root == "."
+        || root == ".." || root.contains('/') || root.contains('\\') || root.contains(':'))
+        return fail(QObject::tr("\"%1\" is not a packed SpeedyNote notebook.").arg(packName));
+
+    tmp = parentDir + "/." + root + ".unpacking";
+    QDir(tmp).removeRecursively();  // left by an earlier unpack that was cut short
+    if (!QDir().mkpath(tmp))
+        return fail(QObject::tr("Could not create a folder in:\n%1").arg(parentDir));
+
+    int files = 0;
+    const int count = int(mz_zip_reader_get_num_files(&zip));
+    for (int i = 0; i < count; ++i) {
+        mz_zip_archive_file_stat stat;
+        if (!mz_zip_reader_file_stat(&zip, mz_uint(i), &stat))
+            return fail(QObject::tr("\"%1\" is damaged.").arg(packName));
+        const QString name = QString::fromUtf8(stat.m_filename);
+        if (name == "speedynote-pack.json") continue;
+        const QString rel = name.mid(root.size() + 1);
+        // Nothing may land outside the new folder.
+        if (!name.startsWith(root + "/") || rel.contains('\\') || rel.contains(':')
+            || rel.startsWith('/') || rel.split('/').contains(".."))
+            return fail(QObject::tr("\"%1\" is damaged (%2).").arg(packName, name));
+        const QString out = tmp + "/" + rel;
+        if (stat.m_is_directory) {
+            if (!QDir().mkpath(out)) return fail(QObject::tr("Could not create:\n%1").arg(out));
+            continue;
+        }
+        size_t length = 0;
+        void* data = QDir().mkpath(QFileInfo(out).absolutePath())
+            ? mz_zip_reader_extract_to_heap(&zip, mz_uint(i), &length, 0)  // checks the CRC
+            : nullptr;
+        QFile file(out);
+        const bool ok = data && file.open(QIODevice::WriteOnly)
+            && file.write(static_cast<const char*>(data), qint64(length)) == qint64(length);
+        mz_free(data);
+        file.close();
+        if (!ok) return fail(QObject::tr("\"%1\" is damaged: %2 could not be unpacked.").arg(packName, rel));
+        ++files;
+    }
+    if (files != manifest.value("files").toInt(-1))
+        return fail(QObject::tr("\"%1\" is incomplete: %2 of %3 files.")
+                        .arg(packName).arg(files).arg(manifest.value("files").toInt()));
+    mz_zip_reader_end(&zip);
+
+    QString target = parentDir + "/" + root;
+    for (int n = 2; QFileInfo::exists(target); ++n) target = QStringLiteral("%1/%2 (%3)").arg(parentDir, root).arg(n);
+    if (!QDir().rename(tmp, target)) {
+        QDir(tmp).removeRecursively();
+        result.errorMessage = QObject::tr("Could not create:\n%1").arg(target);
+        return result;
+    }
+    result.success = true;
+    result.extractedSnbPath = target;
+    return result;
+}
+
 QString NotebookImporter::resolveNameConflict(const QString& baseName, const QString& destDir)
 {
     QDir dir(destDir);

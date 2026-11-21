@@ -9,6 +9,7 @@
 // ============================================================================
 
 #include "../strokes/VectorStroke.h"
+#include "../strokes/StrokeStyleGeometry.h"
 
 #include <QString>
 #include <QVector>
@@ -257,18 +258,11 @@ public:
      * @brief Result of building a stroke polygon.
      * 
      * Contains the filled polygon representing the stroke outline, plus
-     * information about round end caps if needed. This is used by both
-     * QPainter rendering and PDF export.
+     * information about round end caps if needed, and the dashes, dots and
+     * arrow heads of a styled stroke. This is used by both QPainter rendering
+     * and PDF export. Defined in StrokeStyleGeometry.h.
      */
-    struct StrokePolygonResult {
-        QPolygonF polygon;              ///< The filled polygon outline
-        bool isSinglePoint = false;     ///< True if stroke is just a dot
-        bool hasRoundCaps = false;      ///< True if round end caps should be drawn
-        QPointF startCapCenter;         ///< Center of start cap ellipse
-        qreal startCapRadius = 0;       ///< Radius of start cap
-        QPointF endCapCenter;           ///< Center of end cap ellipse
-        qreal endCapRadius = 0;         ///< Radius of end cap
-    };
+    using StrokePolygonResult = ::StrokePolygonResult;
     
     /**
      * @brief Build the filled polygon for a stroke (reusable for rendering and export).
@@ -300,7 +294,7 @@ public:
                 // Minimum stroke width is now enforced at capture time in
                 // DocumentViewport (per pen preset), so the stored per-point
                 // pressure already embeds the floor.  No qMax() needed here.
-                qreal width = stroke.baseThickness * stroke.points[0].pressure;
+                qreal width = stroke.widthAt(stroke.points[0].pressure);
                 result.startCapRadius = width / 2.0;
             }
             return result;
@@ -319,7 +313,7 @@ public:
         for (int i = 0; i < n; ++i) {
             // See comment above: minimum-width floor is applied in
             // DocumentViewport at capture time, not here.
-            qreal width = stroke.baseThickness * pts[i].pressure;
+            qreal width = stroke.widthAt(pts[i].pressure);
             halfWidths[i] = width / 2.0;
         }
         
@@ -380,8 +374,32 @@ public:
         result.startCapRadius = halfWidths[0];
         result.endCapCenter = pts.last().pos;
         result.endCapRadius = halfWidths[n - 1];
-        
+
+        // Dashes, dots and arrow heads. A plain solid stroke skips this.
+        if (StrokeStyleGeometry::isStyled(stroke)) {
+            StrokeStyleGeometry::addStyle(stroke, pts, leftEdge, rightEdge, halfWidths, result);
+        }
+
         return result;
+    }
+
+    /**
+     * @brief Fill every shape of a stroke outline with the painter's brush.
+     */
+    static void fillStrokeShapes(QPainter& painter, const StrokePolygonResult& poly) {
+        if (!poly.polygon.isEmpty()) {
+            painter.drawPolygon(poly.polygon, Qt::WindingFill);
+        }
+        if (poly.hasRoundCaps) {
+            painter.drawEllipse(poly.startCapCenter, poly.startCapRadius, poly.startCapRadius);
+            painter.drawEllipse(poly.endCapCenter, poly.endCapRadius, poly.endCapRadius);
+        }
+        for (const QPolygonF& piece : poly.pieces) {
+            painter.drawPolygon(piece, Qt::WindingFill);
+        }
+        for (int i = 0; i < poly.discCenters.size(); ++i) {
+            painter.drawEllipse(poly.discCenters[i], poly.discRadii[i], poly.discRadii[i]);
+        }
     }
     
     /**
@@ -420,8 +438,11 @@ public:
      * where the caps overlap the stroke body.
      */
     static void renderStroke(QPainter& painter, const VectorStroke& stroke) {
-        StrokePolygonResult poly = buildStrokePolygon(stroke);
-        
+        renderStroke(painter, stroke, buildStrokePolygon(stroke));
+    }
+
+    /// The same with an outline built before (buildStrokePolygon), for callers that cache it.
+    static void renderStroke(QPainter& painter, const VectorStroke& stroke, const StrokePolygonResult& poly) {
         if (poly.isSinglePoint) {
             // Single point - draw a dot (no alpha compounding issue)
             painter.setPen(Qt::NoPen);
@@ -430,20 +451,21 @@ public:
             return;
         }
         
-        if (poly.polygon.isEmpty()) {
+        const bool hasStyleShapes = !poly.pieces.isEmpty() || !poly.discCenters.isEmpty();
+        if (poly.polygon.isEmpty() && !hasStyleShapes) {
             return;
         }
-        
+
         // Check if we need special handling for semi-transparent strokes with round caps
         // The issue: polygon body + cap ellipses overlap, causing alpha compounding
         // The fix: render everything to temp buffer at full opacity, then blit with alpha
         int strokeAlpha = stroke.color.alpha();
-        bool needsAlphaCompositing = (strokeAlpha < 255) && poly.hasRoundCaps;
+        bool needsAlphaCompositing = (strokeAlpha < 255) && (poly.hasRoundCaps || hasStyleShapes);
         
         if (needsAlphaCompositing) {
             // Calculate bounding rect for the temp buffer
             QRectF bounds = stroke.boundingBox;
-            if (bounds.isEmpty() || !bounds.isValid()) {
+            if ((bounds.isEmpty() || !bounds.isValid()) && !poly.polygon.isEmpty()) {
                 bounds = poly.polygon.boundingRect();
             }
             qreal maxRadius = qMax(poly.startCapRadius, poly.endCapRadius);
@@ -463,9 +485,7 @@ public:
             if (bufW <= 0 || bufH <= 0 || bufW > 10000 || bufH > 10000) {
                 painter.setPen(Qt::NoPen);
                 painter.setBrush(stroke.color);
-                painter.drawPolygon(poly.polygon, Qt::WindingFill);
-                painter.drawEllipse(poly.startCapCenter, poly.startCapRadius, poly.startCapRadius);
-                painter.drawEllipse(poly.endCapCenter, poly.endCapRadius, poly.endCapRadius);
+                fillStrokeShapes(painter, poly);
                 return;
             }
             
@@ -484,10 +504,8 @@ public:
             opaqueColor.setAlpha(255);
             tempPainter.setPen(Qt::NoPen);
             tempPainter.setBrush(opaqueColor);
-            
-            tempPainter.drawPolygon(poly.polygon, Qt::WindingFill);
-            tempPainter.drawEllipse(poly.startCapCenter, poly.startCapRadius, poly.startCapRadius);
-            tempPainter.drawEllipse(poly.endCapCenter, poly.endCapRadius, poly.endCapRadius);
+
+            fillStrokeShapes(tempPainter, poly);
             tempPainter.end();
             
             // Blit in device logical coordinates (bypass the input→output transform)
@@ -500,15 +518,10 @@ public:
             // Standard rendering for opaque strokes (no alpha compounding issue)
             painter.setPen(Qt::NoPen);
             painter.setBrush(stroke.color);
-            
-            // Draw filled polygon with WindingFill to handle self-intersections
-            painter.drawPolygon(poly.polygon, Qt::WindingFill);
-            
-            // Draw round end caps
-            if (poly.hasRoundCaps) {
-                painter.drawEllipse(poly.startCapCenter, poly.startCapRadius, poly.startCapRadius);
-                painter.drawEllipse(poly.endCapCenter, poly.endCapRadius, poly.endCapRadius);
-            }
+
+            // Filled polygon (WindingFill handles self-intersections), round
+            // end caps, and any dashes, dots and arrow heads.
+            fillStrokeShapes(painter, poly);
         }
     }
     
@@ -599,7 +612,11 @@ public:
     void ensureStrokeCacheValid(const QSizeF& size, qreal zoom, qreal dpr) {
         int divisor = computeCacheDivisor(size, zoom, dpr);
         QSize physicalSize = cappedPhysicalSize(size, zoom, dpr, divisor);
-        
+        // The dash and dot spacing setting changed since the cache was drawn.
+        if (m_cacheStyleGen != StrokeStyle::generation()) {
+            m_strokeCacheDirty = true;
+        }
+
         // Fast path: cache is valid and has pending strokes to append
         if (m_pendingStrokeStart >= 0 && !m_strokeCacheDirty &&
             m_strokeCache.size() == physicalSize &&
@@ -752,6 +769,7 @@ public:
         const bool sameKey =
             qFuzzyCompare(m_focusZoom, zoom) &&
             qFuzzyCompare(m_focusDpr,  dpr)  &&
+            m_focusStyleGen == StrokeStyle::generation() &&
             m_focusRect == focusRect &&
             !m_focusCache.isNull() &&
             m_focusCache.size() == physicalSize;
@@ -1098,6 +1116,8 @@ private:
     mutable qreal m_cacheZoom = 1.0;        ///< Zoom level cache was built at
     mutable qreal m_cacheDpr = 1.0;         ///< DPI ratio cache was built at
     mutable int m_cacheDivisor = 1;         ///< Integer divisor applied for resolution cap
+    mutable int m_cacheStyleGen = -1;       ///< StrokeStyle::generation() the cache was drawn with
+    mutable int m_focusStyleGen = -1;       ///< Same, for the focus cache
 
     // Viewport-clipped focus cache (high-zoom path). When the capped cache
     // would have to apply a divisor > 1 (effective scale * pageMaxDim >
@@ -1330,6 +1350,7 @@ private:
         m_focusDpr  = dpr;
         m_focusRect = focusRect;
         m_focusCacheDirty = false;
+        m_focusStyleGen = StrokeStyle::generation();
 
         if (m_strokes.isEmpty()) return;
 
@@ -1379,7 +1400,8 @@ private:
         m_strokeCache = QPixmap(physicalSize);
         m_strokeCache.setDevicePixelRatio(cacheDpr);
         m_strokeCache.fill(Qt::transparent);
-        
+        m_cacheStyleGen = StrokeStyle::generation();
+
         if (m_strokes.isEmpty()) {
             m_strokeCacheDirty = false;
             m_cacheZoom = zoom;

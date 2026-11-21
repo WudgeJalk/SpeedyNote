@@ -182,6 +182,8 @@ public:
      * every time the bar floats in and out.
      */
     int viewportTopReserve() const;
+    /// The same strip for any edge: a scroll bar docked on @p edge, else 0.
+    int viewportEdgeReserve(ViewportScrollBar::DockEdge edge) const;
 
     /**
      * @brief Recompute the SB2 document map (per-source accents + link markers)

@@ -5,7 +5,7 @@
 #include <QColor>
 #include <QHash>
 
-class ColorPresetButton;
+class ColorListRow;
 class ModeToggleButton;
 class QToolButton;
 class QMenu;
@@ -15,7 +15,7 @@ class QAction;
  * @brief Subtoolbar for the Highlighter (text selection) tool.
  *
  * Layout:
- * - 3 color preset buttons (SHARED with Marker)
+ * - The colours, any number (the list is SHARED with Marker)
  * - Separator
  * - Highlight-on-release toggle (select text only vs highlight)
  * - Auto-highlight style dropdown (Cover / Underline / Dotted underline)
@@ -80,21 +80,9 @@ public:
     void clearTabState(int tabIndex) override;
     void setDarkMode(bool darkMode) override;
     
-    /**
-     * @brief Sync shared state from QSettings (overrides SubToolbar::syncSharedState).
-     * 
-     * Reloads shared colors from QSettings to sync with Marker edits.
-     */
+    /// Reload the shared colour list (the Marker may have changed it).
     void syncSharedState() override;
-    
-    /**
-     * @brief Reload shared colors from QSettings.
-     * 
-     * Called when switching from Marker to Highlighter to sync shared color presets.
-     * This only reloads colors (not selection), preserving per-tab state.
-     */
-    void syncSharedColorsFromSettings();
-    
+
     /**
      * @brief Set the auto-highlight style from outside.
      * @param style The new style.
@@ -216,8 +204,7 @@ signals:
     void selectionSourceChanged(SelectionSource src);
 
 private slots:
-    void onColorPresetClicked(int index);
-    void onColorEditRequested(int index);
+    void onColorSelected();
     void onAutoHighlightStyleTriggered(QAction* action);
     void onHighlightOnReleaseToggled(int mode);
     void onSelectionSourceToggled(int mode);
@@ -226,16 +213,12 @@ private:
     void createWidgets();
     void setupConnections();
     void loadFromSettings();
-    void saveColorsToSettings();
     void saveAutoHighlightToSettings();
     void saveHighlightOnReleaseToSettings();
     void saveSelectionSourceToSettings();
-    /// Write ONLY the selected-color index key under the highlighter group.
-    /// Used by the click handler so spam-clicks don't trigger
-    /// saveAutoHighlightToSettings() (which would re-write the auto-highlight
-    /// style key as a no-op side effect on every click).
+    /// Write ONLY the selected-color index key under the highlighter group,
+    /// and only when it changed.
     void saveSelectionToSettings();
-    void selectColorPreset(int index);
 
     /// Cheap refresh: updates the trigger-button icon and per-action check state
     /// to match @ref m_autoHighlightStyle. Called on every style change.
@@ -248,7 +231,7 @@ private:
     void applyAutoHighlightStyling();
 
     // Widgets
-    ColorPresetButton* m_colorButtons[3] = {nullptr, nullptr, nullptr};
+    ColorListRow*      m_colors = nullptr;
     ModeToggleButton*  m_highlightModeToggle = nullptr;
     QToolButton*       m_autoHighlightButton = nullptr;
     QMenu*             m_autoHighlightMenu   = nullptr;
@@ -258,7 +241,7 @@ private:
     ModeToggleButton*  m_selectionSourceToggle = nullptr;
 
     // Current state
-    int m_selectedColorIndex = 0;  // Default: first color
+    int m_savedColorIndex = -1;  // Last selected-colour index written to QSettings
     HighlightStyle m_autoHighlightStyle = HighlightStyle::Cover;
     bool m_highlightOnRelease = true;
     SelectionSource m_selectionSource = SelectionSource::Pdf;
@@ -268,16 +251,11 @@ private:
     // stored here - they are global tool settings in QSettings, and MainWindow
     // pushes them into every viewport.
     struct TabState {
-        QColor colors[3];
-        int selectedColorIndex;
+        int colorIndex = 0;
         bool initialized = false;
     };
     QHash<int, TabState> m_tabStates;
-    
-    // Default values
-    static constexpr int NUM_PRESETS = 3;
-    static const QColor DEFAULT_COLORS[NUM_PRESETS];  // Same as Marker
-    
+
     // Marker opacity (50% = 128/255) - shared with Marker tool
     // This is applied when emitting highlighterColorChanged to maintain consistency
     static constexpr int MARKER_OPACITY = 128;
@@ -286,7 +264,6 @@ private:
     // NOTE: Color keys are SHARED with Marker
     static const QString SETTINGS_GROUP_SHARED_COLORS;
     static const QString SETTINGS_GROUP_HIGHLIGHTER;
-    static const QString KEY_COLOR_PREFIX;
     static const QString KEY_SELECTED_COLOR;
     static const QString KEY_AUTO_HIGHLIGHT;
     static const QString KEY_HIGHLIGHT_ON_RELEASE;

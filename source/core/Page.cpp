@@ -340,7 +340,8 @@ void Page::addObject(std::unique_ptr<InsertedObject> obj)
         
         objects.push_back(std::move(obj));
         objectsByAffinity[affinity].push_back(ptr);
-        
+        hasConnectors = hasConnectors || ptr->type() == QLatin1String("connector");
+
         modified = true;
     }
 }
@@ -369,6 +370,7 @@ bool Page::removeObject(const QString& id)
             // Remove from objects vector
             objects.erase(objects.begin() + i);
             modified = true;
+            if (hasConnectors) rebuildAffinityMap();  // Recounts the connectors
             return true;
         }
     }
@@ -399,6 +401,7 @@ std::unique_ptr<InsertedObject> Page::extractObject(const QString& id)
             std::unique_ptr<InsertedObject> extracted = std::move(objects[i]);
             objects.erase(objects.begin() + i);
             modified = true;
+            if (hasConnectors) rebuildAffinityMap();  // Recounts the connectors
             return extracted;
         }
     }
@@ -462,12 +465,14 @@ void Page::rebuildAffinityMap()
 {
     // Clear existing map
     objectsByAffinity.clear();
-    
+    hasConnectors = false;
+
     // Group objects by their layerAffinity value
     for (auto& obj : objects) {
         if (obj) {
             int affinity = obj->getLayerAffinity();
             objectsByAffinity[affinity].push_back(obj.get());
+            hasConnectors = hasConnectors || obj->type() == QLatin1String("connector");
         }
     }
 }

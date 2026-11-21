@@ -7,6 +7,8 @@
 #include "DocumentViewport.h"
 #include "ShortcutManager.h"  // Pen buttons can run any registered command
 #include "DarkModeUtils.h"
+#include "DrawingSettings.h"        // Eraser filter
+#include "PenHaptics.h"             // Paper feel and clicks of a haptic pen
 #include "ObjectConstraints.h"      // Page containment for inserted objects
 #include "TouchGestureHandler.h"
 // Note: ShortcutManager.h no longer needed here - all shortcuts handled by MainWindow
@@ -18,6 +20,7 @@
 #include "../objects/LinkObject.h"
 #include "../objects/OcrTextObject.h"  // Phase 1D: OCR text object deletion
 #include "../objects/TextBoxObject.h"
+#include "../objects/ConnectorObject.h"
 #include "../ui/banners/MissingPdfBanner.h"  // Phase R.3: Missing PDF notification
 #include "../ui/panels/InlineTextBoxEditor.h"
 #include "../ui/panels/LinkObjectBar.h"
@@ -27,6 +30,7 @@
 
 #include <QPainter>
 #include <QPaintEvent>
+#include <QScopedValueRollback>
 #include <QRegion>
 #include <QResizeEvent>
 #include <QMouseEvent>
@@ -876,6 +880,7 @@ void DocumentViewport::setCurrentTool(ToolType tool)
     if (m_currentTool == tool) {
         return;
     }
+    m_fingerTapSwitched = false;   // A tool picked on purpose is not given back
 
     commitInlineTextEdit();
     // Adjust lives inside the Highlighter, so leaving that tool ends the
@@ -889,7 +894,8 @@ void DocumentViewport::setCurrentTool(ToolType tool)
 
     ToolType previousTool = m_currentTool;
     m_currentTool = tool;
-    
+    if (tool == ToolType::Eraser) m_toolBeforeEraser = previousTool;  // For auto deselect
+
     // CR-2B-1: Disable straight line mode when switching to Eraser or Lasso
     // (straight lines only work with Pen and Marker)
     if ((tool == ToolType::Eraser || tool == ToolType::Lasso) && m_straightLineMode) {
@@ -914,7 +920,9 @@ void DocumentViewport::setCurrentTool(ToolType tool)
         && !m_enteringAdjustMode) {
         clearObjectSelection();
     }
-    
+    if (previousTool == ToolType::Shape && tool != ToolType::Shape) leaveShapeTool();
+    if (previousTool == ToolType::Laser) clearLaser();
+
     // Cancel any in-progress eraser lasso when switching away from Eraser
     if (previousTool == ToolType::Eraser && tool != ToolType::Eraser) {
         // Whatever the eraser already removed must still be undoable even if
@@ -1008,11 +1016,32 @@ qreal DocumentViewport::applyPenPressureFloor(qreal rawPressure) const
         return qBound(0.1, rawPressure, 1.0);
     }
 
+    // The floor is a width; the pen type says which pressure gives it.
     const qreal base = m_currentStroke.baseThickness;
     const qreal minP = (base > 0.0)
-        ? qBound(0.1, m_penMinStrokeWidth / base, 1.0)
+        ? qBound(0.1, StrokeStyle::pressureForFactor(m_currentStroke.penType, m_penMinStrokeWidth / base), 1.0)
         : 0.1;
     return qBound(minP, rawPressure, 1.0);
+}
+
+void DocumentViewport::applyStyle(VectorStroke& stroke) const
+{
+    if (m_currentTool == ToolType::Shape) {   // The free shape: the shape bar's line
+        stroke.lineStyle = m_shapeStyle.lineStyle;
+        stroke.arrowStart = m_shapeStyle.arrowStart;
+        stroke.arrowEnd = m_shapeStyle.arrowEnd;
+        return;
+    }
+    if (m_currentTool == ToolType::Marker) {
+        stroke.penType = StrokeStyle::Marker;
+        stroke.lineStyle = StrokeStyle::Solid;
+        stroke.arrowStart = stroke.arrowEnd = StrokeStyle::None;
+        return;
+    }
+    stroke.penType = m_penStyle.penType;
+    stroke.lineStyle = m_penStyle.lineStyle;
+    stroke.arrowStart = m_penStyle.arrowStart;
+    stroke.arrowEnd = m_penStyle.arrowEnd;
 }
 
 void DocumentViewport::setEraserSize(qreal size)
@@ -1166,7 +1195,9 @@ void DocumentViewport::cancelObjectPointerGesture()
 
     if (m_isResizingObject && !m_selectedObjects.isEmpty()) {
         if (InsertedObject* obj = m_selectedObjects.first()) {
-            if (m_hasResizeTextBoxState
+            if (!m_lineEndBefore.isEmpty()) {
+                obj->loadFromJson(m_lineEndBefore);   // A connector end drag
+            } else if (m_hasResizeTextBoxState
                 && obj->type() == QLatin1String("textbox")) {
                 static_cast<TextBoxObject*>(obj)->applyState(
                     m_resizeOriginalTextBoxState);
@@ -1181,6 +1212,7 @@ void DocumentViewport::cancelObjectPointerGesture()
     m_isDraggingObjects = false;
     m_isCreatingTextBox = false;
     m_isResizingObject = false;
+    m_lineEndBefore = QJsonObject();
     m_objectResizeHandle = HandleHit::None;
     m_resizeObjectPageIndex = -1;
     m_hasResizeTextBoxState = false;
@@ -2547,6 +2579,18 @@ DocumentViewport::HandleHit DocumentViewport::objectHandleAtPoint(const QPointF&
     if (obj->type() == QLatin1String("link")) {
         return HandleHit::None;
     }
+    // A connector has a handle on each end and no box.
+    QPointF lineA, lineB;
+    if (connectorEnds(obj, &lineA, &lineB)) {
+        return lineHandleAt(viewportPos, lineA, lineB);
+    }
+    // Edit points: a handle on each corner, no box.
+    if (m_editPoints) {
+        const QVector<QPointF> corners = objectCornersInViewport(obj);
+        if (!corners.isEmpty()) {
+            return cornerIndexAt(corners, viewportPos) >= 0 ? HandleHit::Corner : HandleHit::None;
+        }
+    }
 
     // Get unrotated object bounds in viewport coordinates
     QRectF objRect = objectBoundsInViewport(obj);
@@ -2637,9 +2681,17 @@ void DocumentViewport::updateObjectResize(const QPointF& currentViewport)
     if (obj->type() == "link") {
         return;
     }
-    
+
     // Convert positions to document coordinates
     QPointF currentDoc = viewportToDocument(currentViewport);
+    if (m_objectResizeHandle == HandleHit::LineStart || m_objectResizeHandle == HandleHit::LineEnd) {
+        dragConnectorEnd(obj, currentDoc);
+        return;
+    }
+    if (m_objectResizeHandle == HandleHit::Corner) {
+        dragShapeCorner(obj, currentDoc);
+        return;
+    }
     
         // -----------------------------------------------------------------
         // Rotation (Phase O3.1.8.1): Rotate object around its center
@@ -3079,7 +3131,8 @@ void DocumentViewport::paintEvent(QPaintEvent* event)
     // means the early returns in the fast paths below are all measured.
     ViewportPerfMonitor::FrameSampler perfSample(m_perf, event->rect(), size(),
                                                  devicePixelRatioF());
-    
+    trackSelectionMenuAnchor();   // Two flag tests when nothing is selected
+
     QPainter painter(this);
     // Note: Antialiasing is deferred until after gesture fast paths.
     // Gesture paths only blit cached pixmaps and don't need it.
@@ -3155,7 +3208,8 @@ void DocumentViewport::paintEvent(QPaintEvent* event)
             // backing store.
             painter.fillRect(rect(), m_backgroundColor);
         }
-        
+        renderRuler(painter, rect());   // Whole, over the moved frame and its uncovered edge
+
         // Skip normal rendering during gesture
         return;
     }
@@ -3181,7 +3235,8 @@ void DocumentViewport::paintEvent(QPaintEvent* event)
         
         // Draw eraser cursor if needed
         drawEraserCursor(painter);
-        
+        renderRuler(painter, event->rect());   // Not in the snapshot: drawn as it is now
+
         // Skip normal rendering during transform
         return;
     }
@@ -3205,7 +3260,8 @@ void DocumentViewport::paintEvent(QPaintEvent* event)
         
         // Render only the selected objects at their current positions
         renderSelectedObjectsOnly(painter);
-        
+        renderRuler(painter, event->rect());   // Not in the snapshot: drawn as it is now
+
         // Skip normal rendering during drag/resize
         return;
     }
@@ -3222,6 +3278,9 @@ void DocumentViewport::paintEvent(QPaintEvent* event)
     // Fill background - only the dirty region for partial updates
     if (isPartialUpdate) {
         painter.fillRect(dirtyRect, m_backgroundColor);
+        // Qt clips to it anyway; set explicitly, painter.clipBoundingRect() lets
+        // shapes and connectors skip their outline when it misses this area.
+        painter.setClipRect(dirtyRect);
     } else {
         painter.fillRect(rect(), m_backgroundColor);
     }
@@ -3330,7 +3389,10 @@ void DocumentViewport::paintEvent(QPaintEvent* event)
         
         painter.restore();
     }
-    
+    renderShapePreview(painter);
+    renderLaser(painter, dirtyRect);
+    renderRuler(painter, dirtyRect);
+
     // Task 2.10: Draw lasso selection path while drawing (regular lasso or eraser lasso)
     // P1: Use incremental rendering for O(1) per frame instead of O(n)
     if ((m_isDrawingLasso || m_isDrawingEraserLasso) && m_lassoPath.size() > 1) {
@@ -4708,6 +4770,7 @@ void DocumentViewport::runPenGesture(PenGestures::Fired fired)
             }
         }
     } else if (PenBindings::toolFor(binding, QLatin1String("toggle:"), &tool)) {
+        PenHaptics::click(PenHaptics::ToolChange);
         if (m_currentTool != tool) {
             m_penToggleReturnTool = m_currentTool;
             setCurrentTool(tool);
@@ -4743,6 +4806,7 @@ void DocumentViewport::applyPenBindings(PointerEvent& pe)
             }
             m_penHoldTool = tool;
             setCurrentTool(tool);
+            PenHaptics::click(PenHaptics::ToolChange);
         }
     }
 
@@ -5319,7 +5383,14 @@ bool DocumentViewport::event(QEvent* event)
             return QWidget::event(event);
         }
         
+        if (fingerOnHandle(touchEvent)) {
+            m_fingerTap = false;
+            return true;
+        }
+        const bool tapped = fingerTapEnded(touchEvent);
         if (m_touchHandler && m_touchHandler->handleTouchEvent(touchEvent)) {
+            // Only while fingers pan: with touch gestures off a finger is a pointer.
+            if (tapped) selectByFingerTap(m_fingerTapPos);
             return true;
         }
     }
@@ -6213,7 +6284,13 @@ void DocumentViewport::handlePointerPress(const PointerEvent& pe)
     // Track hardware eraser state for entire stroke
     // Initialize from the press event's eraser state
     m_hardwareEraserActive = pe.isEraser;
-    
+    if (rulerPress(pe)) return;   // The ruler lies on top of the page, for every tool
+    // A finger tap picked a line or shape: the pen writes again as soon as it
+    // presses somewhere else.
+    if (m_fingerTapSwitched && pe.source != PointerEvent::Touch && !pressOnSelection(pe.viewportPos)) {
+        returnFromFingerTap();
+    }
+
     // Determine which page to draw on
     if (pe.pageHit.valid()) {
         m_activeDrawingPage = pe.pageHit.pageIndex;
@@ -6250,7 +6327,11 @@ void DocumentViewport::handlePointerPress(const PointerEvent& pe)
     // Handle tool-specific actions
     // Hardware eraser (stylus eraser end) always erases, regardless of selected tool
     bool isErasing = m_hardwareEraserActive || m_currentTool == ToolType::Eraser;
-    
+    if (pe.source == PointerEvent::Stylus) {
+        // One call per contact; the pen lifting stops it (PenBindings' native hook).
+        PenHaptics::startContinuous(isErasing ? ToolType::Eraser : m_currentTool, m_penStyle.penType);
+    }
+
     if (isErasing) {
         if (eraserModeIsLasso(m_eraserMode)) {
             // Lasso eraser: start drawing a freeform region
@@ -6317,6 +6398,10 @@ void DocumentViewport::handlePointerPress(const PointerEvent& pe)
         handlePointerPress_Highlighter(pe);
     } else if (m_currentTool == ToolType::Pan) {
         handlePointerPress_Pan(pe);
+    } else if (m_currentTool == ToolType::Shape) {
+        if (!shapePress(pe)) startStroke(pe);   // Free shape: drawn like the pen
+    } else if (m_currentTool == ToolType::Laser) {
+        laserPress(pe);
     }
 }
 
@@ -6329,7 +6414,8 @@ void DocumentViewport::handlePointerMove(const PointerEvent& pe)
     
     // Update last pointer position for cursor tracking
     m_lastPointerPos = pe.viewportPos;
-    
+    if (rulerMove(pe)) return;
+
     // Off-page pan runs ahead of every tool branch, the eraser included: a
     // hardware eraser press sets m_hardwareEraserActive before dispatch, so
     // checking this later would pan and erase at the same time.
@@ -6477,13 +6563,17 @@ void DocumentViewport::handlePointerMove(const PointerEvent& pe)
         handlePointerMove_Pan(pe);
         return;
     }
-    
+
+    if (m_currentTool == ToolType::Shape && shapeMove(pe)) return;
+    if (m_currentTool == ToolType::Laser) { laserMove(pe); return; }   // Anywhere, on a page or not
+
     // For stroke drawing, require an active drawing page
     if (m_activeDrawingPage < 0) {
         return;
     }
     
-    if (m_isDrawing && (m_currentTool == ToolType::Pen || m_currentTool == ToolType::Marker)) {
+    if (m_isDrawing && (m_currentTool == ToolType::Pen || m_currentTool == ToolType::Marker
+                        || m_currentTool == ToolType::Shape)) {
         continueStroke(pe);
     }
 }
@@ -6495,7 +6585,8 @@ void DocumentViewport::handlePointerRelease(const PointerEvent& pe)
     // Close the eraser's undo batch before any branch can return: the release
     // itself never erases, so this is the end of the pass.
     commitEraserGesture();
-    
+    if (rulerRelease(pe)) return;
+
     // Off-page pan: either finish the pan, or treat a press that never moved as
     // the tap that used to clear the selection.
     if (m_offPagePanArmed) {
@@ -6516,7 +6607,11 @@ void DocumentViewport::handlePointerRelease(const PointerEvent& pe)
         update();
         return;
     }
-    
+
+    // The eraser tool (not the pen's back end) lifts: auto deselect may apply.
+    const bool eraserToolLifted = m_pointerActive && !m_hardwareEraserActive
+                                  && m_currentTool == ToolType::Eraser;
+
     // Eraser lasso: finalize and delete strokes inside the region
     if (m_isDrawingEraserLasso) {
         if (m_lassoPath.size() >= 2) {
@@ -6530,12 +6625,13 @@ void DocumentViewport::handlePointerRelease(const PointerEvent& pe)
         m_pointerActive = false;
         m_activeSource = PointerEvent::Unknown;
         m_hardwareEraserActive = false;
-        
+
         update();
         preloadStrokeCaches();
+        if (eraserToolLifted) returnFromEraser();
         return;
     }
-    
+
     // Task 2.9: Straight line mode - create the actual stroke
     if (m_isDrawingStraightLine) {
         // Get final end point
@@ -6593,8 +6689,9 @@ void DocumentViewport::handlePointerRelease(const PointerEvent& pe)
         return;
     }
     
-    Q_UNUSED(pe);
-    
+    if (m_currentTool == ToolType::Shape && shapeRelease(pe)) return;
+    if (m_currentTool == ToolType::Laser) laserRelease();
+
     // Finish stroke if we were drawing
     if (m_isDrawing) {
         finishStroke();
@@ -6612,8 +6709,9 @@ void DocumentViewport::handlePointerRelease(const PointerEvent& pe)
     // Pre-load stroke caches after interaction (but NOT PDF cache - it causes thrashing during rapid strokes)
     // PDF cache is preloaded during scroll/zoom, not during drawing
     preloadStrokeCaches();
-    
+
     update();
+    if (eraserToolLifted) returnFromEraser();
 }
 
 // ===== Stroke Drawing (Task 2.2) =====
@@ -6623,10 +6721,12 @@ void DocumentViewport::startStroke(const PointerEvent& pe)
     if (!m_document) return;
     
     // Only drawing tools start strokes (Pen, Marker)
-    if (m_currentTool != ToolType::Pen && m_currentTool != ToolType::Marker) {
+    if (m_currentTool != ToolType::Pen && m_currentTool != ToolType::Marker
+        && m_currentTool != ToolType::Shape) {
         return;
     }
-    
+    beginHold(pe.viewportPos);
+
     // Determine stroke properties based on current tool (Task 2.8: Marker support)
     QColor strokeColor;
     qreal strokeThickness;
@@ -6636,6 +6736,10 @@ void DocumentViewport::startStroke(const PointerEvent& pe)
         strokeColor = m_markerColor;        // Includes alpha for opacity
         strokeThickness = m_markerThickness;
         useFixedPressure = true;            // Fixed thickness, no pressure variation
+    } else if (m_currentTool == ToolType::Shape) {
+        strokeColor = m_shapeColor;         // A clean shape has one width
+        strokeThickness = m_shapeThickness;
+        useFixedPressure = true;
     } else {
         strokeColor = m_penColor;
         strokeThickness = m_penThickness;
@@ -6655,13 +6759,15 @@ void DocumentViewport::startStroke(const PointerEvent& pe)
         m_currentStroke.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
         m_currentStroke.color = strokeColor;
         m_currentStroke.baseThickness = strokeThickness;
-        
+        applyStyle(m_currentStroke);
+
         // Reset incremental rendering cache
         resetCurrentStrokeCache();
         
         // Get document coordinates for the first point
-        QPointF docPt = viewportToDocument(pe.viewportPos);
-        
+        QPointF docPt = beginRulerStroke(pe.viewportPos, QPointF(), viewportToDocument(pe.viewportPos));
+        m_stabilizer.start(docPt, pe.timestamp, m_currentTool == ToolType::Pen ? DrawingSettings::get().stabilisation : 0);
+
         // Store the tile coordinate where stroke starts
         m_edgelessDrawingTile = m_document->tileCoordForPoint(docPt);
         
@@ -6687,28 +6793,32 @@ void DocumentViewport::startStroke(const PointerEvent& pe)
     m_currentStroke.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
     m_currentStroke.color = strokeColor;
     m_currentStroke.baseThickness = strokeThickness;
-    
+    applyStyle(m_currentStroke);
+
     // Reset incremental rendering cache (Task 2.3)
     resetCurrentStrokeCache();
     
     // Add first point (in page-local coordinates)
     // Marker uses fixed pressure (1.0) for consistent thickness
     qreal effectivePressure = useFixedPressure ? 1.0 : pe.pressure;
-    addPointToStroke(pe.pageHit.pagePoint, effectivePressure, pe.timestamp);
+    const QPointF first = beginRulerStroke(pe.viewportPos, pagePosition(m_activeDrawingPage), pe.pageHit.pagePoint);
+    m_stabilizer.start(first, pe.timestamp, m_currentTool == ToolType::Pen ? DrawingSettings::get().stabilisation : 0);
+    addPointToStroke(first, effectivePressure, pe.timestamp);
 }
 
 void DocumentViewport::continueStroke(const PointerEvent& pe)
 {
     if (!m_isDrawing || !m_document) return;
-    
+    if (!trackHold(pe.viewportPos)) return;   // already cleaned: wait for the lift
+
     // Task 2.8: Marker uses fixed pressure (1.0) for consistent thickness.
     // Pen applies the active preset's min-width floor (baked into pressure).
-    bool useFixedPressure = (m_currentTool == ToolType::Marker);
+    bool useFixedPressure = (m_currentTool == ToolType::Marker || m_currentTool == ToolType::Shape);
     qreal effectivePressure = useFixedPressure ? 1.0 : applyPenPressureFloor(pe.pressure);
 
     // For edgeless mode, use document coordinates directly
     if (m_document->isEdgeless()) {
-        QPointF docPt = viewportToDocument(pe.viewportPos);
+        QPointF docPt = rulerSnap(m_stabilizer.apply(viewportToDocument(pe.viewportPos), pe.timestamp));
 
         // Point decimation (same logic as addPointToStroke but for document coords)
         // Zoom-aware: threshold is constant in screen pixels, not document space.
@@ -6737,16 +6847,23 @@ void DocumentViewport::continueStroke(const PointerEvent& pe)
         m_currentStroke.points.append(pt);
         
         // Dirty region update for edgeless (document coords → viewport coords)
-        // Use current stroke thickness (may be pen or marker)
-        qreal padding = m_currentStroke.baseThickness * 2 * m_zoomLevel;
+        // Use current stroke thickness (may be pen or marker), or the arrow heads' reach
+        const qreal arrowPad = m_currentStroke.arrowPad();
+        qreal padding = qMax(m_currentStroke.baseThickness * 2, arrowPad) * m_zoomLevel;
         QPointF vpPos = documentToViewport(docPt);
         QRectF dirtyRect(vpPos.x() - padding, vpPos.y() - padding, padding * 2, padding * 2);
-        
+
         if (m_currentStroke.points.size() > 1) {
             const auto& prevPt = m_currentStroke.points[m_currentStroke.points.size() - 2];
             QPointF prevVpPos = documentToViewport(prevPt.pos);
-            dirtyRect = dirtyRect.united(QRectF(prevVpPos.x() - padding, prevVpPos.y() - padding, 
+            dirtyRect = dirtyRect.united(QRectF(prevVpPos.x() - padding, prevVpPos.y() - padding,
                                                  padding * 2, padding * 2));
+        }
+        // The start head still turns while the line is shorter than the head.
+        if (m_currentStroke.arrowStart != StrokeStyle::None
+            && QLineF(m_currentStroke.points.first().pos, docPt).length() <= arrowPad) {
+            const QPointF s = documentToViewport(m_currentStroke.points.first().pos);
+            dirtyRect = dirtyRect.united(QRectF(s.x() - padding, s.y() - padding, padding * 2, padding * 2));
         }
         
         update(dirtyRect.toAlignedRect());
@@ -6770,7 +6887,7 @@ void DocumentViewport::continueStroke(const PointerEvent& pe)
     }
     
     // Use effective pressure (fixed 1.0 for marker, actual pressure for pen)
-    addPointToStroke(pagePos, effectivePressure, pe.timestamp);
+    addPointToStroke(rulerSnap(m_stabilizer.apply(pagePos, pe.timestamp)), effectivePressure, pe.timestamp);
 }
 
 void DocumentViewport::finishStroke()
@@ -6785,9 +6902,18 @@ void DocumentViewport::finishStroke()
         return;
     }
     
+    // The stabiliser lags behind the pen: end the line where the pen lifted.
+    if (!m_strokeCleaned && m_stabilizer.active()
+        && m_currentStroke.points.last().pos != rulerSnap(m_stabilizer.rawPosition())) {
+        StrokePoint end = m_currentStroke.points.last();
+        end.pos = rulerSnap(m_stabilizer.rawPosition());
+        m_currentStroke.points.append(end);
+    }
+    if (liftShapeStroke()) return;   // it was an arrow head, now on the line before it
+
     // Finalize stroke
     m_currentStroke.updateBoundingBox();
-    
+
     // Branch for edgeless mode
     if (m_document && m_document->isEdgeless()) {
         finishStrokeEdgeless();
@@ -6800,15 +6926,17 @@ void DocumentViewport::finishStroke()
         VectorLayer* layer = page->activeLayer();
         if (layer) {
             layer->addStroke(m_currentStroke);
-            
+            rememberShaft(m_activeDrawingPage, {0, 0}, page->activeLayerIndex, m_currentStroke.id);
+
             // Mark page dirty for lazy save (BUG FIX: was missing, causing strokes to not save)
             m_document->markPageDirty(m_activeDrawingPage);
             
             // Push to undo stack
             pushPageStrokeUndo(m_activeDrawingPage, UndoAction::AddStroke, m_currentStroke, page->activeLayerIndex);
+            keepRawInUndo();   // draw and hold: undo gives back the handwriting first
         }
     }
-    
+
     // Clear stroke state
     m_currentStroke = VectorStroke();
     m_isDrawing = false;
@@ -6875,11 +7003,12 @@ void DocumentViewport::finishStrokeEdgeless()
             localPt.pos -= tileOrigin;
             localStroke.points.append(localPt);
         }
+        localStroke.keepStyleAsSlice(m_currentStroke.points, seg.first, seg.points.size());
         localStroke.updateBoundingBox();
-        
+
         // Add to tile's layer (addStroke handles cache update incrementally)
         layer->addStroke(localStroke);
-        
+
         // Mark tile as dirty for persistence (Phase E5)
         m_document->markTileDirty(seg.coord);
         
@@ -6890,7 +7019,10 @@ void DocumentViewport::finishStrokeEdgeless()
                  << "points:" << localStroke.points.size();
 #endif
     }
-    
+    // Hand-drawn arrows need the shaft in one tile.
+    rememberShaft(-1, addedStrokes.value(0).first, m_edgelessActiveLayerIndex,
+                  addedStrokes.size() == 1 ? addedStrokes[0].second.id : QString());
+
     if (!addedStrokes.isEmpty()) {
         UndoAction undoAction;
         undoAction.type = UndoAction::AddStroke;
@@ -6903,6 +7035,7 @@ void DocumentViewport::finishStrokeEdgeless()
             m_ocrDirtyTiles.insert(pair.first);
         }
         pushUndoAction(undoAction);
+        keepRawInUndo();   // draw and hold: undo gives back the handwriting first
         emit strokesChanged();
     }
     
@@ -6971,11 +7104,12 @@ QVector<QPair<Document::TileCoord, VectorStroke>> DocumentViewport::addStrokeToE
             localPt.pos -= tileOrigin;
             localStroke.points.append(localPt);
         }
+        localStroke.keepStyleAsSlice(stroke.points, seg.first, seg.points.size());
         localStroke.updateBoundingBox();
-        
+
         // Add to tile's layer (addStroke handles cache update incrementally)
         layer->addStroke(localStroke);
-        
+
         // Mark tile as dirty for persistence
         m_document->markTileDirty(seg.coord);
         
@@ -6995,7 +7129,8 @@ void DocumentViewport::createStraightLineStroke(const QPointF& start, const QPoi
     if ((start - end).manhattanLength() < 1.0) {
         return;
     }
-    
+    rememberShaft(-1, {0, 0}, 0, QString());   // set again below when the line is one stroke
+
     // Determine color and thickness based on current tool
     QColor strokeColor;
     qreal strokeThickness;
@@ -7012,7 +7147,8 @@ void DocumentViewport::createStraightLineStroke(const QPointF& start, const QPoi
     stroke.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
     stroke.color = strokeColor;
     stroke.baseThickness = strokeThickness;
-    
+    applyStyle(stroke);
+
     // Both points have pressure 1.0 (no pressure variation for straight lines)
     StrokePoint startPt;
     startPt.pos = start;
@@ -7057,6 +7193,7 @@ void DocumentViewport::createStraightLineStroke(const QPointF& start, const QPoi
             
             layer->addStroke(localStroke);
             m_document->markTileDirty(startTile);
+            rememberShaft(-1, startTile, m_edgelessActiveLayerIndex, localStroke.id);
             
             {
                 UndoAction undoAction;
@@ -7110,7 +7247,8 @@ void DocumentViewport::createStraightLineStroke(const QPointF& start, const QPoi
                 localStroke.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
                 localStroke.color = strokeColor;
                 localStroke.baseThickness = strokeThickness;
-                
+                applyStyle(localStroke);
+
                 QPointF tileOrigin(seg.coord.first * Document::EDGELESS_TILE_SIZE,
                                    seg.coord.second * Document::EDGELESS_TILE_SIZE);
                 
@@ -7119,8 +7257,9 @@ void DocumentViewport::createStraightLineStroke(const QPointF& start, const QPoi
                     localPt.pos -= tileOrigin;
                     localStroke.points.append(localPt);
                 }
+                localStroke.keepStyleAsSlice(linePoints, seg.first, seg.points.size());
                 localStroke.updateBoundingBox();
-                
+
                 layer->addStroke(localStroke);
                 m_document->markTileDirty(seg.coord);
                 
@@ -7155,7 +7294,8 @@ void DocumentViewport::createStraightLineStroke(const QPointF& start, const QPoi
         if (!layer) return;
         
         layer->addStroke(stroke);
-        
+        rememberShaft(m_straightLinePageIndex, {0, 0}, page->activeLayerIndex, stroke.id);   // a head may follow
+
         // Mark page dirty for lazy save (BUG FIX: was missing)
         m_document->markPageDirty(m_straightLinePageIndex);
         
@@ -7550,6 +7690,10 @@ void DocumentViewport::handlePointerPress_ObjectSelect(const PointerEvent& pe)
             
             // Phase O4.1: Capture background for fast resize rendering
             captureObjectDragBackground();
+            if (handle == HandleHit::LineStart || handle == HandleHit::LineEnd || handle == HandleHit::Corner) {
+                m_lineEndBefore = obj->toJson();   // For the drag's one undo step
+                m_cornerDrag = cornerIndexAt(objectCornersInViewport(obj), pe.viewportPos);
+            }
             if (m_hasResizeTextBoxState) {
                 // Reflow changes line breaks and height; stretching the old
                 // pixmap would visually scale text and contradict the model.
@@ -7825,12 +7969,16 @@ void DocumentViewport::handlePointerRelease_ObjectSelect(const PointerEvent& pe)
     // Phase O3.1.3: Finalize resize/rotate operation
     if (m_isResizingObject) {
         InsertedObject* obj = m_selectedObjects.isEmpty() ? nullptr : m_selectedObjects.first();
+        const bool lineEnd = !m_lineEndBefore.isEmpty();
+        if (lineEnd) {
+            finishConnectorEndDrag(obj);   // Its own undo step
+        }
         // Check if any transform property changed (position, size, or rotation)
-        bool changed = m_hasResizeTextBoxState
+        bool changed = !lineEnd && (m_hasResizeTextBoxState
             ? m_textBoxResizeChanged
             : obj && (obj->size != m_resizeOriginalSize ||
                       obj->position != m_resizeOriginalPosition ||
-                      obj->rotation != m_resizeOriginalRotation);
+                      obj->rotation != m_resizeOriginalRotation));
         if (m_hasResizeTextBoxState && !changed && obj
             && obj->type() == QLatin1String("textbox")) {
             static_cast<TextBoxObject*>(obj)->applyState(
@@ -8043,6 +8191,7 @@ void DocumentViewport::clearObjectSelection()
     bool hadSelection = !m_selectedObjects.isEmpty();
     m_selectedObjects.clear();
     m_hoveredObject = nullptr;
+    m_editPoints = false;
     if (hadSelection) {
         for (int p : m_pendingThumbnailPages)
             emit pageModified(p);
@@ -8234,6 +8383,7 @@ void DocumentViewport::selectObject(InsertedObject* obj, bool addToSelection)
     }
     
     if (changed) {
+        m_editPoints = false;   // Another shape starts with its box
         closeTextBoxFormatPopups(true);
         finishTextBoxFormatInteraction(true);
         emit objectSelectionChanged();
@@ -8301,6 +8451,7 @@ void DocumentViewport::deselectAllObjects()
     closeLinkObjectBarPopups(true);
     finishTextBoxFormatInteraction(true);
     m_selectedObjects.clear();
+    m_editPoints = false;
     for (int p : m_pendingThumbnailPages)
         emit pageModified(p);
     m_pendingThumbnailPages.clear();
@@ -9517,7 +9668,9 @@ void DocumentViewport::pasteObjects()
         
         // Assign new UUID (critical for uniqueness)
         obj->id = QUuid::createUuid().toString(QUuid::WithoutBraces);
-        
+        // A pasted connector stays where it is put, not on the original's shapes.
+        if (auto* line = dynamic_cast<ConnectorObject*>(obj.get())) { line->startId.clear(); line->endId.clear(); }
+
         // Set position to paste location (cursor or fallback)
         obj->position = pastePagePos;
         
@@ -12515,7 +12668,22 @@ void DocumentViewport::renderObjectSelection(QPainter& painter)
         painter.restore();
         return;
     }
-    
+    // A lone connector: a round handle on each end, no box.
+    QPointF lineA, lineB;
+    if (m_selectedObjects.size() == 1 && connectorEnds(m_selectedObjects.first(), &lineA, &lineB)) {
+        drawLineEndHandles(painter, lineA, lineB);
+        painter.restore();
+        return;
+    }
+    // Edit points: a round handle on each corner instead of the box.
+    const QVector<QPointF> shapeCorners = m_selectedObjects.size() == 1 && m_editPoints
+        ? objectCornersInViewport(m_selectedObjects.first()) : QVector<QPointF>();
+    if (!shapeCorners.isEmpty()) {
+        drawRoundHandles(painter, shapeCorners);
+        painter.restore();
+        return;
+    }
+
     // Static dash offset for marching ants effect
     static int dashOffset = 0;
     
@@ -12846,9 +13014,12 @@ void DocumentViewport::captureObjectDragBackground()
     // canvas without its child widgets, so a bar that follows the object during
     // the drag cannot leave a frozen copy at the drag origin.
 
+    // The connectors of dragged shapes follow them: left out of the background too.
+    collectDragFollowers();
+
     // Temporarily disable selected object rendering
     m_skipSelectedObjectRendering = true;
-    
+
     // Capture the viewport (this triggers a paint without selected objects)
     m_objectDragBackgroundSnapshot = grabOpaqueViewport();
     m_objectDragSnapshotDpr = m_objectDragBackgroundSnapshot.devicePixelRatio();
@@ -12866,7 +13037,8 @@ void DocumentViewport::renderSelectedObjectsOnly(QPainter& painter)
     // Phase O4.1.2: Use pre-rendered cache if available (FAST!)
     // BF-Rotation: Fixed to use quadToQuad for proper rotated object rendering
     // (same approach as lasso selection's renderLassoSelection)
-    
+    renderDragFollowers(painter);
+
     if (!m_dragObjectRenderedCache.isNull() && m_selectedObjects.size() == 1) {
         InsertedObject* obj = m_selectedObjects.first();
         if (obj) {
@@ -13061,6 +13233,13 @@ void DocumentViewport::cacheSelectedObjectsForDrag()
         }
     }
     
+    // A shape or connector is drawn again at each step: a stretched picture
+    // would blur it and scale its line, its corners and its dashes.
+    if (obj->type() == QLatin1String("shape") || obj->type() == QLatin1String("connector")) {
+        m_dragObjectRenderedCache = QPixmap();
+        return;
+    }
+
     // Calculate the size of the rendered object at current zoom
     // FIX: Only create cache for the object SIZE, not position + size!
     qreal dpr = devicePixelRatioF();
@@ -13158,9 +13337,13 @@ void DocumentViewport::rebuildSelectionCache()
     // P4: Render each stroke at identity (no selection transform)
     // For semi-transparent strokes, render to a temp buffer with full opacity,
     // then composite with the stroke's alpha. Opaque strokes render directly.
+    const bool lone = m_lassoSelection.selectedStrokes.size() == 1;
     for (const VectorStroke& stroke : m_lassoSelection.selectedStrokes) {
+        if (lone || stroke.arrowPad() > 0.0) {
+            continue;   // Drawn from its points by renderLassoSelection
+        }
         int strokeAlpha = stroke.color.alpha();
-        
+
         if (strokeAlpha < 255) {
             // Semi-transparent stroke: render opaque to temp buffer, then composite
             // This prevents alpha compounding within the stroke's self-intersections
@@ -13295,21 +13478,22 @@ void DocumentViewport::renderLassoSelection(QPainter& painter)
             // P4: Alpha is now baked into the cache per-stroke, no uniform alpha needed
             painter.drawPixmap(vpOrigin, m_selectionStrokeCache);
         }
-    } else {
-        // Fallback: Direct rendering for very large selections
+    }
+    {
+        // Direct rendering: very large selections, and the strokes the cache
+        // leaves out (an arrow, a lone stroke). A stretched picture would scale
+        // a head and a width that the applied transform keeps.
         QTransform transform = buildSelectionTransform();
-        
+        const bool lone = m_lassoSelection.selectedStrokes.size() == 1;
+
         for (const VectorStroke& stroke : m_lassoSelection.selectedStrokes) {
-            VectorStroke transformedStroke;
-            transformedStroke.id = stroke.id;
-            transformedStroke.color = stroke.color;
-            transformedStroke.baseThickness = stroke.baseThickness;
-            
-            for (const StrokePoint& pt : stroke.points) {
-                StrokePoint tPt;
-                tPt.pos = transform.map(pt.pos);
-                tPt.pressure = pt.pressure;
-                transformedStroke.points.append(tPt);
+            if (useCache && !lone && stroke.arrowPad() <= 0.0) {
+                continue;
+            }
+            // Copy the whole stroke so its style survives; only the points move.
+            VectorStroke transformedStroke = stroke;
+            for (StrokePoint& pt : transformedStroke.points) {
+                pt.pos = transform.map(pt.pos);
             }
             transformedStroke.updateBoundingBox();
             
@@ -13341,8 +13525,8 @@ void DocumentViewport::renderLassoSelection(QPainter& painter)
 
 void DocumentViewport::drawSelectionBoundingBox(QPainter& painter)
 {
-    if (!m_lassoSelection.isValid()) {
-        return;
+    if (!m_lassoSelection.isValid() || lassoLineEnds(nullptr, nullptr) || !lassoCornersInViewport().isEmpty()) {
+        return;   // A straight line shows its two end handles instead, a shape in Edit points its corners
     }
     
     QRectF box = m_lassoSelection.boundingBox;
@@ -13420,7 +13604,17 @@ void DocumentViewport::drawSelectionHandles(QPainter& painter)
     if (!m_lassoSelection.isValid()) {
         return;
     }
-    
+    QPointF lineA, lineB;
+    if (lassoLineEnds(&lineA, &lineB)) {
+        drawLineEndHandles(painter, selectionToViewport(lineA), selectionToViewport(lineB));
+        return;
+    }
+    const QVector<QPointF> corners = lassoCornersInViewport();
+    if (!corners.isEmpty()) {
+        drawRoundHandles(painter, corners);
+        return;
+    }
+
     QTransform transform = buildSelectionTransform();
     QVector<QPointF> handlePositions = getHandlePositions();
     
@@ -13480,7 +13674,14 @@ DocumentViewport::HandleHit DocumentViewport::hitTestSelectionHandles(const QPoi
     if (!m_lassoSelection.isValid()) {
         return HandleHit::None;
     }
-    
+    QPointF lineA, lineB;
+    if (lassoLineEnds(&lineA, &lineB)) {
+        return lineHandleAt(viewportPos, selectionToViewport(lineA), selectionToViewport(lineB));
+    }
+    if (m_editPoints && lassoShapeCorners(nullptr)) {
+        return lassoCornerHandleAt(viewportPos);
+    }
+
     QTransform transform = buildSelectionTransform();
     QVector<QPointF> handlePositions = getHandlePositions();
     
@@ -13619,11 +13820,17 @@ void DocumentViewport::startSelectionTransform(HandleHit handle, const QPointF& 
         
         // Reset offset only (rotation and scale remain)
         m_lassoSelection.offset = QPointF(0, 0);
+        m_lassoSelection.baked = true;   // Else a press that does not move would drop this move
         
         // P3: Strokes changed, invalidate cache so it rebuilds with new positions
         invalidateSelectionCache();
     }
-    
+    if (handle == HandleHit::LineStart || handle == HandleHit::LineEnd) {
+        beginLassoLineEnd();   // Bakes the rotation and scale too
+    } else if (handle == HandleHit::Corner) {
+        beginLassoCorner(viewportPos);
+    }
+
     // Store current transform state so we can compute deltas
     m_transformStartBounds = m_lassoSelection.boundingBox;
     m_transformStartRotation = m_lassoSelection.rotation;
@@ -13690,7 +13897,16 @@ void DocumentViewport::updateSelectionTransform(const QPointF& viewportPos)
             // Scale handles
             updateScaleFromHandle(m_transformHandle, viewportPos);
             break;
-            
+
+        case HandleHit::LineStart:
+        case HandleHit::LineEnd:
+            moveLassoLineEnd(currentDocPos);
+            break;
+
+        case HandleHit::Corner:
+            moveLassoCorner(currentDocPos);
+            break;
+
         case HandleHit::None:
             break;
     }
@@ -13831,8 +14047,14 @@ void DocumentViewport::updateScaleFromHandle(HandleHit handle, const QPointF& vi
 
 void DocumentViewport::finalizeSelectionTransform()
 {
+    const bool lineEnd = m_transformHandle == HandleHit::LineStart || m_transformHandle == HandleHit::LineEnd
+                         || m_transformHandle == HandleHit::Corner;
     m_isTransformingSelection = false;
     m_transformHandle = HandleHit::None;
+    if (lineEnd) {
+        commitLassoLine();   // One undo step per end drag
+        return;
+    }
     // Transform is applied visually; actual stroke modification happens on:
     // - Click elsewhere (apply and clear)
     // - Paste (apply to new location)
@@ -14162,6 +14384,7 @@ void DocumentViewport::handleDeleteAction()
             }
             break;
             
+        case ToolType::Shape:
         case ToolType::ObjectSelect:
             if (hasSelectedObjects()) {
                 deleteSelectedObjects();
@@ -14513,6 +14736,9 @@ void DocumentViewport::copyAnnotationText()
 void DocumentViewport::clearLassoSelection()
 {
     bool hadSelection = m_lassoSelection.isValid();
+    if (hadSelection) {
+        m_editPoints = false;   // The next selection starts with its box
+    }
     
     m_lassoSelection.clear();
     m_lassoPath.clear();
@@ -15600,6 +15826,7 @@ bool DocumentViewport::toolClaimsOffPagePress(const PointerEvent& pe) const
             return m_lassoSelection.isValid()
                 && hitTestSelectionHandles(pe.viewportPos) != HandleHit::None;
 
+        case ToolType::Shape:
         case ToolType::ObjectSelect:
             // The rotate handle sits above the object's top edge, so it is
             // off-page by construction for an object at the top of a page.
@@ -15613,6 +15840,9 @@ bool DocumentViewport::toolClaimsOffPagePress(const PointerEvent& pe) const
 
         case ToolType::Highlighter:
             return objectAtPoint(viewportToDocument(pe.viewportPos)) != nullptr;
+
+        case ToolType::Laser:
+            return true;   // The laser points anywhere, beside the pages too
 
         default:
             return false;
@@ -16895,19 +17125,27 @@ void DocumentViewport::addPointToStroke(const QPointF& pagePos, qreal pressure, 
     // Only repaint the small region around the new point instead of the entire widget.
     // This significantly improves performance, especially on lower-end hardware.
     
-    // Use current stroke's thickness (may be pen or marker - marker is typically larger)
-    qreal padding = m_currentStroke.baseThickness * 2 * m_zoomLevel;  // Extra padding for stroke width
-    
+    // Use current stroke's thickness (may be pen or marker - marker is typically larger).
+    // Arrow heads are redrawn at the ends each frame, so cover where they were and are.
+    const qreal arrowPad = m_currentStroke.arrowPad();
+    qreal padding = qMax(m_currentStroke.baseThickness * 2, arrowPad) * m_zoomLevel;
+
     // Convert page position to viewport coordinates
     QPointF vpPos = pageToViewport(m_activeDrawingPage, pagePos);
     QRectF dirtyRect(vpPos.x() - padding, vpPos.y() - padding, padding * 2, padding * 2);
-    
+
     // Include line from previous point if exists
     if (m_currentStroke.points.size() > 1) {
         const auto& prevPt = m_currentStroke.points[m_currentStroke.points.size() - 2];
         QPointF prevVpPos = pageToViewport(m_activeDrawingPage, prevPt.pos);
         QRectF prevRect(prevVpPos.x() - padding, prevVpPos.y() - padding, padding * 2, padding * 2);
         dirtyRect = dirtyRect.united(prevRect);
+    }
+    // The start head still turns while the line is shorter than the head.
+    if (m_currentStroke.arrowStart != StrokeStyle::None
+        && QLineF(m_currentStroke.points.first().pos, pagePos).length() <= arrowPad) {
+        const QPointF s = pageToViewport(m_activeDrawingPage, m_currentStroke.points.first().pos);
+        dirtyRect = dirtyRect.united(QRectF(s.x() - padding, s.y() - padding, padding * 2, padding * 2));
     }
     
     // Update only the dirty region (much faster than full widget repaint)
@@ -16935,7 +17173,8 @@ void DocumentViewport::resetCurrentStrokeCache()
     }
     m_currentStrokeCache.fill(Qt::transparent);
     m_lastRenderedPointIndex = 0;
-    
+    m_currentStrokeArc.clear();
+
     // Track the transform state when cache was created
     m_cacheZoom = m_zoomLevel;
     m_cachePan = m_panOffset;
@@ -16962,8 +17201,8 @@ QRect DocumentViewport::currentStrokeTailRect(int fromIndex, const QTransform& t
     
     // A full thickness of padding: half covers the outline's own half-width at
     // maximum pressure, the rest absorbs the Catmull-Rom curve bowing outside the
-    // control points it was built from.
-    const qreal pad = m_currentStroke.baseThickness + 2.0;
+    // control points it was built from. widthAt(1) is the widest the pen type draws.
+    const qreal pad = m_currentStroke.widthAt(1.0) + 2.0;
     const QRectF bounds(minX - pad, minY - pad,
                         (maxX - minX) + pad * 2.0, (maxY - minY) + pad * 2.0);
     
@@ -16983,7 +17222,7 @@ QVector<QPair<int, int>> DocumentViewport::currentStrokeRangesTouching(
     
     // Same padding the target region was built with, so a segment is only
     // discarded when its outline cannot reach the region.
-    const qreal pad = m_currentStroke.baseThickness + 2.0;
+    const qreal pad = m_currentStroke.widthAt(1.0) + 2.0;
     const QRectF target(cacheRect);
     
     // Testing segments rather than points keeps a long segment that merely
@@ -17116,6 +17355,19 @@ void DocumentViewport::renderCurrentStrokeIncremental(QPainter& painter)
             if (hasSemiTransparency) {
                 segment.color.setAlpha(255);
             }
+            // Dashes keep their place on the whole stroke; the arc array only
+            // grows by the new points. Arrow heads are drawn below, each frame.
+            if (segment.lineStyle != StrokeStyle::Solid) {
+                if (m_currentStrokeArc.isEmpty()) {
+                    m_currentStrokeArc.append(0.0);
+                }
+                for (int i = m_currentStrokeArc.size(); i <= first; ++i) {
+                    m_currentStrokeArc.append(m_currentStrokeArc[i - 1]
+                        + QLineF(m_currentStroke.points[i - 1].pos, m_currentStroke.points[i].pos).length());
+                }
+                segment.dashOffset = m_currentStroke.dashOffset + m_currentStrokeArc[first];
+            }
+            segment.arrowStart = segment.arrowEnd = StrokeStyle::None;
             VectorLayer::renderStroke(cachePainter, segment);
         };
         
@@ -17190,11 +17442,17 @@ void DocumentViewport::renderCurrentStrokeIncremental(QPainter& painter)
             painter.translate(snapOrigin);
         }
         
-        qreal endRadius = qMax(m_currentStroke.baseThickness * m_currentStroke.points[n - 1].pressure, 1.0) / 2.0;
         painter.setPen(Qt::NoPen);
         painter.setBrush(m_currentStroke.color);
-        painter.drawEllipse(m_currentStroke.points[n - 1].pos, endRadius, endRadius);
-        
+        // A dashed or dotted line draws its own ends; a cap here could fill a gap.
+        if (m_currentStroke.lineStyle == StrokeStyle::Solid || n == 1) {
+            qreal endRadius = qMax(m_currentStroke.widthAt(m_currentStroke.points[n - 1].pressure), 1.0) / 2.0;
+            painter.drawEllipse(m_currentStroke.points[n - 1].pos, endRadius, endRadius);
+        }
+        if (m_currentStroke.arrowPad() > 0.0) {
+            VectorLayer::fillStrokeShapes(painter, StrokeStyleGeometry::arrowHeads(m_currentStroke));
+        }
+
         painter.restore();
     }
 }
@@ -17272,19 +17530,23 @@ void DocumentViewport::eraseAt(const PointerEvent& pe)
     QSet<QString> hitIdSet(hitIds.begin(), hitIds.end());
     QVector<VectorStroke> removedStrokes;
     removedStrokes.reserve(hitIds.size());
-    
+    const DrawingSettings& drawing = DrawingSettings::get();
+
     for (const VectorStroke& s : layer->strokes()) {
-        if (hitIdSet.contains(s.id)) {
-            removedStrokes.append(s);
-            if (removedStrokes.size() == hitIds.size()) {
+        if (hitIdSet.remove(s.id)) {
+            if (drawing.eraserMayTouch(s)) {
+                removedStrokes.append(s);
+            }
+            if (hitIdSet.isEmpty()) {
                 break;  // Found all strokes, no need to continue
             }
         }
     }
-    
+    if (removedStrokes.isEmpty()) return;  // Only lines the eraser filter keeps
+
     // Remove strokes
-    for (const QString& id : hitIds) {
-        layer->removeStroke(id);
+    for (const VectorStroke& s : removedStrokes) {
+        layer->removeStroke(s.id);
     }
     
     // Stroke cache is incrementally patched by removeStroke()
@@ -17395,6 +17657,7 @@ void DocumentViewport::erasePartialAt(const PointerEvent& pe)
         // Collect first: cutting mutates the list being iterated.
         QVector<QString> candidates;
         for (const VectorStroke& stroke : layer->strokes()) {
+            if (!DrawingSettings::get().eraserMayTouch(stroke)) continue;
             const bool touched = haveSweep
                 ? stroke.intersectsEraserSweep(localFrom, localPt, radius)
                 : stroke.containsPoint(localPt, radius);
@@ -17597,18 +17860,23 @@ void DocumentViewport::eraseAtEdgeless(QPointF viewportPos)
             }
             if (hitIds.isEmpty()) continue;
 
+            QVector<QString> erased;
             for (const QString& id : hitIds) {
                 for (const VectorStroke& stroke : layer->strokes()) {
                     if (stroke.id == id) {
-                        UndoAction::StrokeSegment seg;
-                        seg.tileCoord = {tx, ty};
-                        seg.stroke = stroke;
-                        undoAction.segments.append(seg);
+                        if (DrawingSettings::get().eraserMayTouch(stroke)) {
+                            UndoAction::StrokeSegment seg;
+                            seg.tileCoord = {tx, ty};
+                            seg.stroke = stroke;
+                            undoAction.segments.append(seg);
+                            erased.append(id);
+                        }
                         break;
                     }
                 }
             }
-            for (const QString& id : hitIds)
+            if (erased.isEmpty()) continue;
+            for (const QString& id : erased)
                 layer->removeStroke(id);
             m_document->markTileDirty({tx, ty});
             m_document->removeTileIfEmpty(tx, ty);
@@ -17644,7 +17912,9 @@ QPixmap DocumentViewport::grabOpaqueViewport()
     if (width() <= 0 || height() <= 0) {
         return QPixmap();
     }
-    
+    // The ruler stays out of the frame: the fast paths draw it live on top.
+    const QScopedValueRollback<bool> noRuler(m_grabbingFrame, true);
+
     // Mirrors what grab() does, differing in the format it renders into and in
     // leaving the child widgets out. Callers all blit this frame translated or
     // scaled while the overlay children stay live at their fixed positions, so
@@ -17801,6 +18071,7 @@ void DocumentViewport::finalizeEraserLasso()
                 // Quick bounding-box rejection before expensive per-point copy + test
                 QRectF docBBox = stroke.boundingBox.translated(tileOrigin);
                 if (!docBBox.intersects(lassoBounds)) continue;
+                if (!DrawingSettings::get().eraserMayTouch(stroke)) continue;
 
                 VectorStroke docStroke = stroke;
                 for (auto& pt : docStroke.points) {
@@ -17853,6 +18124,7 @@ void DocumentViewport::finalizeEraserLasso()
         QSet<QString> idsToRemove;
         for (const VectorStroke& stroke : layer->strokes()) {
             if (!stroke.boundingBox.intersects(lassoBounds)) continue;
+            if (!DrawingSettings::get().eraserMayTouch(stroke)) continue;
             if (strokeIntersectsLasso(stroke, m_lassoPath)) {
                 idsToRemove.insert(stroke.id);
             }
@@ -17921,7 +18193,8 @@ void DocumentViewport::finalizeEraserLassoPartial()
         // Collect first: cutting mutates the list being iterated.
         QVector<QString> candidates;
         for (const VectorStroke& stroke : layer->strokes()) {
-            if (stroke.boundingBox.intersects(localBounds)) {
+            if (stroke.boundingBox.intersects(localBounds)
+                && DrawingSettings::get().eraserMayTouch(stroke)) {
                 candidates.append(stroke.id);
             }
         }
@@ -18453,6 +18726,7 @@ QVector<DocumentViewport::TileSegment> DocumentViewport::splitStrokeIntoTileSegm
             // Start new segment with PREVIOUS point (extends before boundary)
             // Now both tiles have the line segment crossing the boundary
             currentSegment.coord = ptTile;
+            currentSegment.first = i - 1;
             currentSegment.points.clear();
             currentSegment.points.append(prevPt);  // Previous point (in old tile)
             currentSegment.points.append(pt);      // Current point (in new tile)
@@ -18644,6 +18918,7 @@ void DocumentViewport::undo()
     if (m_undoStack.isEmpty() || !m_document) return;
 
     UndoAction action = m_undoStack.pop();
+    if (action.type == UndoAction::ObjectStateChange) { applyObjectStateChange(action, true); return; }
 
     if (action.type == UndoAction::PageDelete) {
         // Restore removed pages in ascending index order (Plan A2).
@@ -19106,6 +19381,7 @@ void DocumentViewport::redo()
     if (m_redoStack.isEmpty() || !m_document) return;
 
     UndoAction action = m_redoStack.pop();
+    if (action.type == UndoAction::ObjectStateChange) { applyObjectStateChange(action, false); return; }
 
     if (action.type == UndoAction::PageDelete) {
         // Re-remove pages in descending index order (Plan A2).
@@ -20072,6 +20348,7 @@ void DocumentViewport::renderPage(QPainter& painter, Page* page, int pageIndex)
         for (InsertedObject* obj : m_selectedObjects) {
             if (obj) objectExcludeIds.insert(obj->id);
         }
+        objectExcludeIds.unite(m_dragFollowerIds);
     }
     const QSet<QString>* objectExcludePtr = objectExcludeIds.isEmpty() ? nullptr : &objectExcludeIds;
     const QString suppressedTextObjectId =
@@ -20081,6 +20358,9 @@ void DocumentViewport::renderPage(QPainter& painter, Page* page, int pageIndex)
             ? m_inlineEditSession.objectId
             : QString();
     
+    // Follow moved shapes. Not while a pointer is down: shapes only move on
+    // release (or undo), and a pen event must not pay for the scan.
+    if (page->hasConnectors && !m_pointerActive) ConnectorObject::resolve(*page);
     page->renderObjectsWithAffinity(
         painter, 1.0, -1, layer0Visible, objectExcludePtr,
         suppressedTextObjectId);
@@ -20343,7 +20623,10 @@ void DocumentViewport::renderEdgelessMode(QPainter& painter, const QRect& dirtyR
         
         painter.restore();
     }
-    
+    renderShapePreview(painter);
+    renderLaser(painter, dirtyRect);
+    renderRuler(painter, dirtyRect);
+
     // Task 2.10: Draw lasso selection path (edgeless mode, regular lasso or eraser lasso)
     // P1: Use incremental rendering for O(1) per frame instead of O(n)
     if ((m_isDrawingLasso || m_isDrawingEraserLasso) && m_lassoPath.size() > 1) {
@@ -20493,6 +20776,7 @@ void DocumentViewport::renderEdgelessObjectsWithAffinity(
     for (const auto& coord : allTiles) {
         Page* tile = m_document->getTile(coord.first, coord.second);
         if (!tile) continue;
+        if (tile->hasConnectors && !m_pointerActive) ConnectorObject::resolve(*tile);   // As in renderPage
         
         // Check if this tile has objects with this affinity
         auto it = tile->objectsByAffinity.find(affinity);
@@ -20515,7 +20799,8 @@ void DocumentViewport::renderEdgelessObjectsWithAffinity(
             if (!obj->visible) continue;
             
             // Phase O4.1: Skip selected objects during background snapshot capture
-            if (m_skipSelectedObjectRendering && m_selectedObjects.contains(obj)) {
+            if (m_skipSelectedObjectRendering
+                && (m_selectedObjects.contains(obj) || m_dragFollowerIds.contains(obj->id))) {
                 continue;
             }
             

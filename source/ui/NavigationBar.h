@@ -68,6 +68,11 @@ public:
      * keeps @p captionReserve px free on the right for minimise / maximise / close.
      */
     void setTitleBarMode(const QIcon &appIcon, int captionReserve);
+    /// True when @p pos (our coordinates) is on one of our buttons that is not
+    /// minimise / maximise / close. Windows must not treat that point as title bar.
+    bool hasOwnButtonAt(const QPoint &pos) const;
+    /// Bottom right corner of the menu button, in screen coordinates.
+    QPoint menuAnchor() const;
     /// Swap the maximise button between "maximise" and "restore".
     void setWindowMaximized(bool maximized);
 

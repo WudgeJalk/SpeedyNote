@@ -1,26 +1,25 @@
 #include "HighlighterSubToolbar.h"
-#include "../widgets/ColorPresetButton.h"
+#include "../widgets/ColorListRow.h"
 #include "../widgets/ModeToggleButton.h"
 
 #include <QAction>
-#include <QColorDialog>
 #include <QIcon>
 #include <QMenu>
 #include <QSettings>
 #include <QToolButton>
 
-// Static member definitions
-// Default colors (same as Marker - shared via QSettings)
-const QColor HighlighterSubToolbar::DEFAULT_COLORS[NUM_PRESETS] = {
+namespace {
+// Default colors (same as Marker - one list shared via "marker/colors")
+const QList<QColor> kColors = {
     QColor(0xFF, 0xAA, 0xAA),  // Light red/pink
     QColor(0xFF, 0xFF, 0x00),  // Yellow
     QColor(0xAA, 0xAA, 0xFF)   // Light blue
 };
+}
 
 // Shared color settings (used by both Marker and Highlighter)
 const QString HighlighterSubToolbar::SETTINGS_GROUP_SHARED_COLORS = "marker";  // Colors stored under "marker" group
 const QString HighlighterSubToolbar::SETTINGS_GROUP_HIGHLIGHTER = "highlighter";
-const QString HighlighterSubToolbar::KEY_COLOR_PREFIX = "color";
 const QString HighlighterSubToolbar::KEY_SELECTED_COLOR = "selectedColor";
 const QString HighlighterSubToolbar::KEY_AUTO_HIGHLIGHT = "autoHighlight";
 const QString HighlighterSubToolbar::KEY_HIGHLIGHT_ON_RELEASE = "highlightOnRelease";
@@ -36,14 +35,9 @@ HighlighterSubToolbar::HighlighterSubToolbar(QWidget* parent)
 
 void HighlighterSubToolbar::createWidgets()
 {
-    // Create color preset buttons
-    for (int i = 0; i < NUM_PRESETS; ++i) {
-        m_colorButtons[i] = new ColorPresetButton(this);
-        m_colorButtons[i]->setColor(DEFAULT_COLORS[i]);
-        m_colorButtons[i]->setToolTip(tr("Color preset %1 (click to select, click again to edit)").arg(i + 1));
-        addWidget(m_colorButtons[i]);
-    }
-    
+    m_colors = new ColorListRow(SETTINGS_GROUP_SHARED_COLORS, kColors, this);
+    addWidget(m_colors);
+
     // Add separator before the highlight controls
     addSeparator();
 
@@ -97,16 +91,9 @@ void HighlighterSubToolbar::createWidgets()
 
 void HighlighterSubToolbar::setupConnections()
 {
-    // Color button connections
-    for (int i = 0; i < NUM_PRESETS; ++i) {
-        connect(m_colorButtons[i], &ColorPresetButton::clicked, this, [this, i]() {
-            onColorPresetClicked(i);
-        });
-        connect(m_colorButtons[i], &ColorPresetButton::editRequested, this, [this, i]() {
-            onColorEditRequested(i);
-        });
-    }
-    
+    connect(m_colors, &ColorListRow::colorSelected, this, &HighlighterSubToolbar::onColorSelected);
+    connect(m_colors, &ColorListRow::listChanged, this, &HighlighterSubToolbar::saveSelectionToSettings);
+
     // Highlight-on-release toggle connection
     connect(m_highlightModeToggle, &ModeToggleButton::modeChanged,
             this, &HighlighterSubToolbar::onHighlightOnReleaseToggled);
@@ -123,21 +110,12 @@ void HighlighterSubToolbar::setupConnections()
 void HighlighterSubToolbar::loadFromSettings()
 {
     QSettings settings;
-    
-    // Load SHARED colors (from marker group, shared with Marker)
-    settings.beginGroup(SETTINGS_GROUP_SHARED_COLORS);
-    for (int i = 0; i < NUM_PRESETS; ++i) {
-        QString key = KEY_COLOR_PREFIX + QString::number(i + 1);
-        QColor color = settings.value(key, DEFAULT_COLORS[i]).value<QColor>();
-        m_colorButtons[i]->setColor(color);
-    }
-    settings.endGroup();
-    
-    // Load highlighter-specific settings
+
+    // Load highlighter-specific settings (the colour list itself is shared with Marker)
     settings.beginGroup(SETTINGS_GROUP_HIGHLIGHTER);
-    
+
     // Load selection
-    m_selectedColorIndex = settings.value(KEY_SELECTED_COLOR, 0).toInt();
+    m_savedColorIndex = settings.value(KEY_SELECTED_COLOR, 0).toInt();
 
     // Load auto-highlight style. Stored as int in [0..kNumStyles-1]. Backward-compat:
     // an older `bool true` value is read via toInt() as 1 => Cover, `false` => 0.
@@ -167,7 +145,8 @@ void HighlighterSubToolbar::loadFromSettings()
     settings.endGroup();
     
     // Apply settings
-    selectColorPreset(m_selectedColorIndex);
+    m_colors->reload();
+    m_colors->setSelectedIndex(m_savedColorIndex, false);
     updateAutoHighlightButtonIcon();
     if (m_highlightModeToggle) {
         m_highlightModeToggle->blockSignals(true);
@@ -179,20 +158,6 @@ void HighlighterSubToolbar::loadFromSettings()
         m_selectionSourceToggle->setCurrentMode(static_cast<int>(m_selectionSource));
         m_selectionSourceToggle->blockSignals(false);
     }
-}
-
-void HighlighterSubToolbar::saveColorsToSettings()
-{
-    // Save SHARED colors (affects Marker too)
-    QSettings settings;
-    settings.beginGroup(SETTINGS_GROUP_SHARED_COLORS);
-    
-    for (int i = 0; i < NUM_PRESETS; ++i) {
-        QString key = KEY_COLOR_PREFIX + QString::number(i + 1);
-        settings.setValue(key, m_colorButtons[i]->color());
-    }
-    
-    settings.endGroup();
 }
 
 void HighlighterSubToolbar::saveAutoHighlightToSettings()
@@ -225,14 +190,15 @@ void HighlighterSubToolbar::saveSelectionSourceToSettings()
 
 void HighlighterSubToolbar::saveSelectionToSettings()
 {
-    // Write ONLY the selected-color index under the highlighter group. Cheap
-    // enough to call on every preset click. We intentionally do NOT reuse
-    // saveAutoHighlightToSettings() here: it also writes KEY_AUTO_HIGHLIGHT,
-    // which is unrelated to the click and would just be a no-op rewrite.
+    // Write ONLY the selected-color index under the highlighter group, and only
+    // when it changed, so spam-clicking a colour does not write QSettings.
+    const int index = m_colors->selectedIndex();
+    if (index == m_savedColorIndex) return;
     QSettings settings;
     settings.beginGroup(SETTINGS_GROUP_HIGHLIGHTER);
-    settings.setValue(KEY_SELECTED_COLOR, m_selectedColorIndex);
+    settings.setValue(KEY_SELECTED_COLOR, index);
     settings.endGroup();
+    m_savedColorIndex = index;
 }
 
 void HighlighterSubToolbar::refreshFromSettings()
@@ -242,43 +208,16 @@ void HighlighterSubToolbar::refreshFromSettings()
 
 void HighlighterSubToolbar::syncSharedState()
 {
-    // Sync shared colors when switching to this subtoolbar
-    syncSharedColorsFromSettings();
-}
-
-void HighlighterSubToolbar::syncSharedColorsFromSettings()
-{
-    // Reload ONLY shared colors from QSettings
-    // This preserves per-tab selection state while syncing with Marker edits
-    QSettings settings;
-    settings.beginGroup(SETTINGS_GROUP_SHARED_COLORS);
-    
-    for (int i = 0; i < NUM_PRESETS; ++i) {
-        QString key = KEY_COLOR_PREFIX + QString::number(i + 1);
-        QColor color = settings.value(key, DEFAULT_COLORS[i]).value<QColor>();
-        m_colorButtons[i]->setColor(color);
-    }
-    
-    settings.endGroup();
+    // Only the shared list (the Marker may have changed it); the per-tab selection stays.
+    m_colors->reload();
 }
 
 void HighlighterSubToolbar::restoreTabState(int tabIndex)
 {
-    if (!m_tabStates.contains(tabIndex) || !m_tabStates[tabIndex].initialized) {
-        // No saved state for this tab - use current (global) values
-        return;
-    }
-    
-    const TabState& state = m_tabStates[tabIndex];
-    
-    // Restore colors
-    for (int i = 0; i < NUM_PRESETS; ++i) {
-        m_colorButtons[i]->setColor(state.colors[i]);
-    }
-    
-    // Restore selection
-    selectColorPreset(state.selectedColorIndex);
-    
+    const TabState state = m_tabStates.value(tabIndex);
+    if (!state.initialized) return;  // No saved state for this tab: keep the global values
+    m_colors->setSelectedIndex(state.colorIndex, false);
+
     // NOTE: Auto-highlight style, highlight-on-release and selection source are
     // NOT per-tab. They are global tool settings backed by QSettings, like the
     // highlighter colour, and MainWindow pushes them into each viewport.
@@ -287,15 +226,8 @@ void HighlighterSubToolbar::restoreTabState(int tabIndex)
 void HighlighterSubToolbar::saveTabState(int tabIndex)
 {
     TabState& state = m_tabStates[tabIndex];
-    
-    // Save colors
-    for (int i = 0; i < NUM_PRESETS; ++i) {
-        state.colors[i] = m_colorButtons[i]->color();
-    }
-    
-    // Save selection
-    state.selectedColorIndex = m_selectedColorIndex;
-    
+    state.colorIndex = m_colors->selectedIndex();
+
     // NOTE: Auto-highlight state is NOT saved here - it is global, not per-tab,
     // and lives in QSettings.
     state.initialized = true;
@@ -308,48 +240,15 @@ void HighlighterSubToolbar::clearTabState(int tabIndex)
 
 void HighlighterSubToolbar::cycleColor()
 {
-    int start = qMax(0, m_selectedColorIndex);
-    onColorPresetClicked((start + 1) % NUM_PRESETS);
+    m_colors->cycle();
 }
 
-void HighlighterSubToolbar::onColorPresetClicked(int index)
+void HighlighterSubToolbar::onColorSelected()
 {
-    if (index < 0 || index >= NUM_PRESETS) return;
-
-    // Always apply the color when clicked - the preset might show as "selected"
-    // but the actual current color could be different (changed via other means)
-    const bool indexChanged = (m_selectedColorIndex != index);
-    selectColorPreset(index);
-
-    // Emit color change with marker opacity applied
-    QColor colorWithOpacity = m_colorButtons[index]->color();
-    colorWithOpacity.setAlpha(MARKER_OPACITY);
-    emit highlighterColorChanged(colorWithOpacity);
-
-    // Persist new active slot so it survives a restart. Guarded on
-    // indexChanged so spam-clicking the same preset does not write QSettings.
-    if (indexChanged) saveSelectionToSettings();
-}
-
-void HighlighterSubToolbar::onColorEditRequested(int index)
-{
-    if (index < 0 || index >= NUM_PRESETS) return;
-    
-    // Open color dialog
-    QColor currentColor = m_colorButtons[index]->color();
-    QColor newColor = QColorDialog::getColor(currentColor, this, tr("Select Highlighter Color"));
-    
-    if (newColor.isValid() && newColor != currentColor) {
-        m_colorButtons[index]->setColor(newColor);
-        saveColorsToSettings();  // Persist change (SHARED with Marker)
-        
-        // If this is the selected preset, emit change with marker opacity
-        if (m_selectedColorIndex == index) {
-            QColor colorWithOpacity = newColor;
-            colorWithOpacity.setAlpha(MARKER_OPACITY);
-            emit highlighterColorChanged(colorWithOpacity);
-        }
-    }
+    // Always applied, with marker opacity: the viewport's colour could have
+    // been changed some other way.
+    emit highlighterColorChanged(currentColor());
+    saveSelectionToSettings();
 }
 
 void HighlighterSubToolbar::onAutoHighlightStyleTriggered(QAction* action)
@@ -498,19 +397,6 @@ void HighlighterSubToolbar::onSelectionSourceToggled(int mode)
     emit selectionSourceChanged(src);
 }
 
-void HighlighterSubToolbar::selectColorPreset(int index)
-{
-    // Allow index = -1 for "no selection"
-    if (index < -1 || index >= NUM_PRESETS) return;
-    
-    // Update selection state
-    for (int i = 0; i < NUM_PRESETS; ++i) {
-        m_colorButtons[i]->setSelected(i == index);
-    }
-    
-    m_selectedColorIndex = index;
-}
-
 void HighlighterSubToolbar::setAutoHighlightStyle(HighlightStyle style)
 {
     if (m_autoHighlightStyle == style) return;
@@ -565,23 +451,14 @@ void HighlighterSubToolbar::setSelectionSourceState(SelectionSource src)
 
 void HighlighterSubToolbar::emitCurrentValues()
 {
-    // Emit the currently selected preset values to sync with viewport
-    if (m_selectedColorIndex >= 0 && m_selectedColorIndex < NUM_PRESETS) {
-        QColor colorWithOpacity = m_colorButtons[m_selectedColorIndex]->color();
-        colorWithOpacity.setAlpha(MARKER_OPACITY);
-        emit highlighterColorChanged(colorWithOpacity);
-    }
+    // Emit the currently selected colour to sync with viewport
+    emit highlighterColorChanged(currentColor());
     // Note: auto-highlight style is synced via setAutoHighlightStyle() separately
 }
 
 QColor HighlighterSubToolbar::currentColor() const
 {
-    QColor color;
-    if (m_selectedColorIndex >= 0 && m_selectedColorIndex < NUM_PRESETS && m_colorButtons[m_selectedColorIndex]) {
-        color = m_colorButtons[m_selectedColorIndex]->color();
-    } else {
-        color = DEFAULT_COLORS[0];  // Fallback to first default
-    }
+    QColor color = m_colors->currentColor();
     color.setAlpha(MARKER_OPACITY);
     return color;
 }

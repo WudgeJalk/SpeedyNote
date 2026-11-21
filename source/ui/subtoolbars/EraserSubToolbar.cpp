@@ -1,9 +1,126 @@
 #include "EraserSubToolbar.h"
 #include "../widgets/ThicknessPresetButton.h"
 #include "../widgets/IconPresetButton.h"
+#include "../../compat/qt_compat.h"
 
+#include <QActionGroup>
+#include <QApplication>
+#include <QBoxLayout>
 #include <QFrame>
+#include <QLabel>
+#include <QMenu>
+#include <QMouseEvent>
+#include <QPainter>
+#include <QPainterPath>
 #include <QSettings>
+#include <QToolButton>
+#include <QWidgetAction>
+
+QPixmap eraserModePicture(int mode, bool dark)
+{
+    // A 44 x 28 drawing: the line in grey, the part this mode removes in red,
+    // and the eraser (a small disc) or the loop as a dashed outline.
+    const QSize size(44, 28);
+    const qreal dpr = qApp ? qApp->devicePixelRatio() : 1.0;
+    QPixmap picture(size * dpr);
+    picture.setDevicePixelRatio(dpr);
+    picture.fill(Qt::transparent);
+
+    QPainter painter(&picture);
+    painter.setRenderHint(QPainter::Antialiasing);
+    const QColor kept = dark ? QColor(175, 175, 175) : QColor(105, 105, 105);
+    const QPen keptPen(kept, 3, Qt::SolidLine, Qt::RoundCap);
+    const QPen gonePen(QColor(220, 60, 50), 3, Qt::SolidLine, Qt::RoundCap);
+
+    QPainterPath line(QPointF(4, 20));
+    line.cubicTo(QPointF(14, 2), QPointF(28, 30), QPointF(40, 8));
+
+    const bool lasso = DocumentViewport::eraserModeIsLasso(
+        static_cast<DocumentViewport::EraserMode>(mode));
+    const bool partial = mode == static_cast<int>(DocumentViewport::EraserMode::Partial)
+                         || mode == static_cast<int>(DocumentViewport::EraserMode::LassoPartial);
+    QPainterPath reach;
+    if (lasso) {
+        reach.addEllipse(QRectF(11, 3, 21, 22));
+    } else {
+        reach.addEllipse(QRectF(16, 10.5, 10, 10));  // On the middle of the line
+    }
+
+    if (partial) {
+        painter.strokePath(line, keptPen);
+        painter.setClipPath(reach);
+        painter.strokePath(line, gonePen);
+        painter.setClipping(false);
+    } else {
+        painter.strokePath(line, gonePen);
+    }
+    painter.setPen(QPen(kept, 1.2, Qt::DashLine));
+    painter.setBrush(Qt::NoBrush);
+    painter.drawPath(reach);
+    return picture;
+}
+
+namespace {
+
+// One entry of the mode list: a picture, the mode in words, one line of help.
+// A plain menu entry has room for one line of text only.
+class ModeRow : public QWidget {
+public:
+    ModeRow(QWidgetAction* action, const QString& help, QWidget* parent)
+        : QWidget(parent), m_action(action)
+    {
+        setAttribute(Qt::WA_Hover);
+        auto* layout = new QHBoxLayout(this);
+        layout->setContentsMargins(8, 6, 14, 6);
+        layout->setSpacing(10);
+        m_picture = new QLabel(this);
+        layout->addWidget(m_picture);
+
+        auto* words = new QVBoxLayout;
+        words->setSpacing(1);
+        auto* title = new QLabel(action->text(), this);
+        QFont bold = title->font();
+        bold.setBold(true);
+        title->setFont(bold);
+        auto* hint = new QLabel(help, this);
+        hint->setStyleSheet(QStringLiteral("color: gray;"));
+        words->addWidget(title);
+        words->addWidget(hint);
+        layout->addLayout(words, 1);
+    }
+
+    void setPicture(const QPixmap& picture) { m_picture->setPixmap(picture); }
+
+protected:
+    void paintEvent(QPaintEvent*) override
+    {
+        const bool checked = m_action->isChecked();
+        if (!checked && !underMouse()) return;
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(Qt::NoPen);
+        QColor fill = palette().color(QPalette::Highlight);
+        fill.setAlpha(checked ? 70 : 35);
+        painter.setBrush(fill);
+        painter.drawRoundedRect(QRectF(rect()).adjusted(3, 1, -3, -1), 6, 6);
+    }
+
+    // The row takes the click itself (a pen tap arrives as a mouse click) and
+    // closes the list, which a widget entry does not do on its own.
+    void mousePressEvent(QMouseEvent* event) override { event->accept(); }
+    void mouseReleaseEvent(QMouseEvent* event) override
+    {
+        if (!rect().contains(SN_MOUSE_POS(event).toPoint())) return;
+        m_action->trigger();
+        if (auto* menu = qobject_cast<QMenu*>(parentWidget())) menu->close();
+    }
+
+private:
+    QWidgetAction* m_action;
+    QLabel* m_picture = nullptr;
+};
+
+} // namespace
 
 // Static member definitions
 const QColor EraserSubToolbar::PREVIEW_COLOR = QColor(0x80, 0x80, 0x80);  // Gray
@@ -26,29 +143,48 @@ EraserSubToolbar::EraserSubToolbar(QWidget* parent)
 
 void EraserSubToolbar::createWidgets()
 {
-    bool dark = isDarkMode();
-
-    // Mode buttons first: four side-by-side choices rather than one button
-    // that cycles. A cycle hides what the alternatives are and where you are in
-    // the list, and getting back to a mode meant clicking through the others.
-    // This is the same "row of presets" the Pen subtoolbar uses.
-    static const char* const kModeIcons[NUM_MODES] = {
-        "eraser", "eraser_partial", "rope", "rope_partial"
+    // One button that names the mode in words, rather than four icons the user
+    // had to tell apart. Its list shows every mode with a picture and one line
+    // of help, so the alternatives stay visible.
+    const QString titles[NUM_MODES] = {
+        tr("The whole line"),
+        tr("Only what I touch"),
+        tr("All lines in a loop"),
+        tr("What I circle")
     };
-    const QString modeTips[NUM_MODES] = {
-        tr("Whole-stroke eraser - touching a stroke removes all of it"),
-        tr("Partial eraser - removes only the part you touch"),
-        tr("Lasso eraser - draw a region to remove every stroke inside it"),
-        tr("Partial lasso eraser - draw a region to cut strokes at its edge")
+    const QString helps[NUM_MODES] = {
+        tr("Touch a line once to erase all of it"),
+        tr("Erase only the part of a line you rub over"),
+        tr("Draw a loop: every line it touches goes"),
+        tr("Draw a loop: lines are cut at its edge")
     };
 
+    m_modeButton = new QToolButton(this);
+    m_modeButton->setPopupMode(QToolButton::InstantPopup);
+    m_modeButton->setAutoRaise(true);
+    m_modeButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    m_modeButton->setIconSize(QSize(33, 21));
+    m_modeButton->setToolTip(tr("Eraser mode"));
+    auto* menu = new QMenu(m_modeButton);
+    auto* group = new QActionGroup(menu);  // Exclusive: one mode is checked
     for (int i = 0; i < NUM_MODES; ++i) {
-        m_modeButtons[i] = new IconPresetButton(this);
-        m_modeButtons[i]->setDarkMode(dark);
-        m_modeButtons[i]->setIconName(QString::fromLatin1(kModeIcons[i]));
-        m_modeButtons[i]->setToolTip(modeTips[i]);
-        addWidget(m_modeButtons[i]);
+        auto* action = new QWidgetAction(menu);
+        action->setText(titles[i]);
+        action->setCheckable(true);
+        group->addAction(action);
+        action->setDefaultWidget(new ModeRow(action, helps[i], menu));
+        menu->addAction(action);
+        m_modeActions[i] = action;
     }
+    m_modeButton->setMenu(menu);
+    addWidget(m_modeButton);
+
+    // The eraser window (filter, auto deselect, clear the page). A second tap
+    // on the eraser hides this bar (or, with that setting off, opens the window).
+    m_optionsButton = new IconPresetButton(this);
+    m_optionsButton->setIconName(QStringLiteral("settings"));
+    m_optionsButton->setToolTip(tr("Eraser options"));
+    addWidget(m_optionsButton);
 
     m_sizeSeparator = addSeparator();
 
@@ -60,36 +196,16 @@ void EraserSubToolbar::createWidgets()
         m_sizeButtons[i]->setToolTip(tr("Eraser size preset %1 (click to select, click again to edit)").arg(i + 1));
         addWidget(m_sizeButtons[i]);
     }
+
+    setDarkMode(isDarkMode());  // Draws the pictures
 }
 
 void EraserSubToolbar::setupConnections()
 {
-    // Mode buttons: picking one selects it and deselects the rest.
     for (int i = 0; i < NUM_MODES; ++i) {
-        connect(m_modeButtons[i], &IconPresetButton::clicked, this, [this, i]() {
-            if (m_eraserModeIndex == i) {
-                return;
-            }
-            // Keep any edits made to the outgoing mode's presets before the
-            // buttons are repurposed for the incoming mode.
-            flushButtonsToActiveSlot();
-            m_eraserModeIndex = i;
-
-            const int slot = activeSizeSlot();
-            if (slot >= 0) {
-                loadSizeSet(slot);
-            }
-            applyModePresentation();
-            saveToSettings();
-
-            emit eraserModeChanged(i);
-            // The disc needs a radius again as soon as a disc-based mode is
-            // back; the viewport may have been left on a lasso cycle.
-            if (slot >= 0) {
-                emit eraserSizeChanged(currentSize());
-            }
-        });
+        connect(m_modeActions[i], &QAction::triggered, this, [this, i]() { pickMode(i); });
     }
+    connect(m_optionsButton, &IconPresetButton::clicked, this, &EraserSubToolbar::optionsRequested);
 
     // Size button connections
     for (int i = 0; i < NUM_PRESETS; ++i) {
@@ -275,13 +391,58 @@ void EraserSubToolbar::setModeState(int mode)
     applyModePresentation();
 }
 
+void EraserSubToolbar::pickMode(int mode)
+{
+    if (m_eraserModeIndex == mode) {
+        return;
+    }
+    // Keep any edits made to the outgoing mode's presets before the
+    // buttons are repurposed for the incoming mode.
+    flushButtonsToActiveSlot();
+    m_eraserModeIndex = mode;
+
+    const int slot = activeSizeSlot();
+    if (slot >= 0) {
+        loadSizeSet(slot);
+    }
+    applyModePresentation();
+    saveToSettings();
+
+    emit eraserModeChanged(mode);
+    // The disc needs a radius again as soon as a disc-based mode is
+    // back; the viewport may have been left on a lasso cycle.
+    if (slot >= 0) {
+        emit eraserSizeChanged(currentSize());
+    }
+}
+
 void EraserSubToolbar::updateModeButtonSelection()
 {
+    QWidgetAction* current = m_modeActions[m_eraserModeIndex];
+    current->setChecked(true);
+    m_modeButton->setText(current->text());
+    m_modeButton->setIcon(QIcon(eraserModePicture(m_eraserModeIndex, m_darkMode)));
+}
+
+void EraserSubToolbar::setDarkMode(bool darkMode)
+{
+    SubToolbar::setDarkMode(darkMode);
+    m_darkMode = darkMode;
+    m_optionsButton->setDarkMode(darkMode);
     for (int i = 0; i < NUM_MODES; ++i) {
-        if (m_modeButtons[i]) {
-            m_modeButtons[i]->setSelected(i == m_eraserModeIndex);
-        }
+        static_cast<ModeRow*>(m_modeActions[i]->defaultWidget())
+            ->setPicture(eraserModePicture(i, darkMode));
     }
+    updateModeButtonSelection();
+}
+
+void EraserSubToolbar::setOrientation(Qt::Orientation orientation)
+{
+    // A vertical bar is 36 px wide: room for the picture only.
+    const bool row = orientation == Qt::Horizontal;
+    m_modeButton->setToolButtonStyle(row ? Qt::ToolButtonTextBesideIcon : Qt::ToolButtonIconOnly);
+    m_modeButton->setIconSize(row ? QSize(33, 21) : QSize(26, 17));
+    SubToolbar::setOrientation(orientation);
 }
 
 void EraserSubToolbar::applyModePresentation()

@@ -172,6 +172,86 @@ inline bool testSerializationRoundTrip()
 }
 
 /**
+ * @brief Stroke style fields (pen type, line style, arrows, dash offset):
+ * old JSON loads with defaults, a default stroke writes only the 4 old keys,
+ * and every field survives a page save and load.
+ */
+inline bool testStrokeStyleFormat()
+{
+    qDebug() << "=== Test: Stroke Style File Format ===";
+    bool success = true;
+    const auto check = [&success](bool ok, const char* what) {
+        if (!ok) {
+            qDebug() << "FAIL:" << what;
+            success = false;
+        }
+    };
+
+    // 1. A stroke from an old file (no style keys), plus unknown values.
+    const QByteArray oldJson = R"({"id":"old-1","color":"#ff112233","thickness":4,
+        "points":[{"x":1,"y":2,"p":0.5},{"x":30,"y":40,"p":0.9}]})";
+    const VectorStroke old = VectorStroke::fromJson(QJsonDocument::fromJson(oldJson).object());
+    check(old.points.size() == 2 && old.baseThickness == 4.0, "old stroke points/thickness");
+    check(old.penType == StrokeStyle::Fountain && old.lineStyle == StrokeStyle::Solid
+              && old.arrowStart == StrokeStyle::None && old.arrowEnd == StrokeStyle::None
+              && old.dashOffset == 0.0,
+          "old stroke reads default style");
+    const QByteArray oddJson = R"({"id":"odd","color":"#ff000000","thickness":2,"points":[],
+        "pen":"pencil","line":"wavy","arrowStart":"star","arrowEnd":7})";
+    const VectorStroke odd = VectorStroke::fromJson(QJsonDocument::fromJson(oddJson).object());
+    check(odd.penType == StrokeStyle::Fountain && odd.lineStyle == StrokeStyle::Solid
+              && odd.arrowStart == StrokeStyle::None && odd.arrowEnd == StrokeStyle::None,
+          "unknown style values read as the default");
+
+    // 2. A default stroke writes exactly the old keys.
+    const QStringList keys = old.toJson().keys();
+    check(keys == QStringList({"color", "id", "points", "thickness"}),
+          "default stroke writes only id, color, thickness, points");
+
+    // 3. Every field round-trips through a page, with the documented key strings.
+    VectorStroke styled = old;
+    styled.id = "styled-1";
+    styled.penType = StrokeStyle::Brush;
+    styled.lineStyle = StrokeStyle::Dashed;
+    styled.arrowStart = StrokeStyle::Open;
+    styled.arrowEnd = StrokeStyle::Filled;
+    styled.dashOffset = 4.25;
+    const QJsonObject sj = styled.toJson();
+    check(sj["pen"].toString() == "brush" && sj["line"].toString() == "dash"
+              && sj["arrowStart"].toString() == "open" && sj["arrowEnd"].toString() == "filled"
+              && sj["dashOffset"].toDouble() == 4.25,
+          "style key strings");
+
+    auto page = Page::createDefault(QSizeF(800, 600));
+    page->layer(0)->addStroke(styled);
+    VectorStroke dotted = old;
+    dotted.id = "dotted-1";
+    dotted.penType = StrokeStyle::Marker;
+    dotted.lineStyle = StrokeStyle::Dotted;
+    page->layer(0)->addStroke(dotted);
+    auto restored = Page::fromJson(page->toJson());
+    const auto& strokes = restored->layer(0)->strokes();
+    check(strokes.size() == 2, "page keeps both strokes");
+    if (strokes.size() == 2) {
+        const VectorStroke& a = strokes[0];
+        check(a.penType == StrokeStyle::Brush && a.lineStyle == StrokeStyle::Dashed
+                  && a.arrowStart == StrokeStyle::Open && a.arrowEnd == StrokeStyle::Filled
+                  && a.dashOffset == 4.25,
+              "styled stroke round-trips");
+        const VectorStroke& b = strokes[1];
+        check(b.penType == StrokeStyle::Marker && b.lineStyle == StrokeStyle::Dotted
+                  && b.arrowStart == StrokeStyle::None && b.arrowEnd == StrokeStyle::None
+                  && b.dashOffset == 0.0,
+              "marker dotted stroke round-trips");
+    }
+
+    if (success) {
+        qDebug() << "PASS: Stroke style file format";
+    }
+    return success;
+}
+
+/**
  * @brief Test layer management operations.
  */
 inline bool testLayerManagement()
@@ -400,6 +480,58 @@ inline bool renderTestPageToPng(const QString& outputPath)
 }
 
 /**
+ * @brief Pen types draw the same points with different widths: fountain keeps
+ * today's look, the outline stays inside the bounding box, and the minimum
+ * width floor finds the right pressure for each type.
+ */
+inline bool testPenTypes()
+{
+    qDebug() << "=== Test: Pen Types ===";
+    bool success = true;
+    const auto check = [&success](bool ok, const char* what) {
+        if (!ok) {
+            qDebug() << "FAIL:" << what;
+            success = false;
+        }
+    };
+    const auto same = [](qreal a, qreal b) { return qAbs(a - b) < 1e-9; };
+
+    VectorStroke s;
+    s.baseThickness = 4.0;
+    check(same(s.widthAt(0.5), 2.0), "fountain width is base x pressure (unchanged)");
+    s.penType = StrokeStyle::Ball;
+    check(same(s.widthAt(0.0), 3.0) && same(s.widthAt(1.0), 4.0), "ball width is 0.75..1 x base");
+    s.penType = StrokeStyle::Brush;
+    check(same(s.widthAt(1.0), 6.0) && s.widthAt(0.3) < 0.3 * 4.0, "brush is wide when pressed, thin when light");
+
+    for (quint8 type : {quint8(StrokeStyle::Fountain), quint8(StrokeStyle::Ball), quint8(StrokeStyle::Brush)}) {
+        const qreal p = StrokeStyle::pressureForFactor(type, 0.8);
+        check(same(StrokeStyle::widthFactor(type, p), 0.8), "pressureForFactor inverts widthFactor");
+    }
+
+    // A full-pressure brush stroke must stay inside its bounding box (the caches clip to it).
+    s.color = Qt::black;
+    for (int i = 0; i <= 10; ++i) {
+        StrokePoint pt;
+        pt.pos = QPointF(10.0 * i, 5.0 * (i % 3));
+        pt.pressure = 1.0;
+        s.points.append(pt);
+    }
+    s.updateBoundingBox();
+    const QRectF outline = VectorLayer::buildStrokePolygon(s).polygon.boundingRect();
+    check(s.boundingBox.contains(outline), "brush outline inside the bounding box");
+    check(same(s.maxHalfWidth(), 3.0), "eraser reach follows the pen type");
+
+    VectorStroke fountain = s;
+    fountain.penType = StrokeStyle::Fountain;
+    check(VectorLayer::buildStrokePolygon(fountain).polygon.boundingRect().height() < outline.height(),
+          "the same points draw a different outline per pen type");
+
+    qDebug() << (success ? "PASS" : "FAIL") << ": pen types";
+    return success;
+}
+
+/**
  * @brief Run all Page tests.
  * @return True if all tests pass.
  */
@@ -413,7 +545,13 @@ inline bool runAllTests()
     
     allPass &= testSerializationRoundTrip();
     qDebug() << "";
-    
+
+    allPass &= testStrokeStyleFormat();
+    qDebug() << "";
+
+    allPass &= testPenTypes();
+    qDebug() << "";
+
     allPass &= testLayerManagement();
     qDebug() << "";
     

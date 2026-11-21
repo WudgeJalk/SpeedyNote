@@ -63,6 +63,10 @@ public:
      */
     virtual void setDarkMode(bool darkMode);
 
+    /// Lay the buttons out in a row (Horizontal) or a column (Vertical, for a
+    /// bar on the left or right edge).
+    virtual void setOrientation(Qt::Orientation orientation);
+
 signals:
     /**
      * @brief Emitted when the subtoolbar's content size changes.

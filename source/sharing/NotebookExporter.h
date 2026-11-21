@@ -15,6 +15,7 @@
 
 #include <QString>
 #include <QObject>
+#include <QJsonObject>
 
 class Document;
 
@@ -80,7 +81,17 @@ public:
      * @return Size of the PDF in bytes, or 0 if no PDF
      */
     static qint64 estimatePdfSize(Document* doc);
-    
+
+    /**
+     * @brief Pack a whole folder tree (a notebook of the library) in one ZIP.
+     *
+     * Entries are "<folder name>/..." plus a root "speedynote-pack.json" made of
+     * @p manifest with "root" and "files" added. Unlike exportPackage(), a file
+     * that cannot be read fails the whole pack and leaves no output file.
+     */
+    static ExportResult exportFolderPackage(const QString& folderPath, const QString& destPath,
+                                            QJsonObject manifest);
+
 signals:
     /**
      * @brief Emitted during export to report progress.

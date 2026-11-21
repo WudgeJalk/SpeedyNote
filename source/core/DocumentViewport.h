@@ -29,6 +29,8 @@ enum class TouchGestureMode {
 #include "Page.h"
 #include "ToolType.h"
 #include "PenBindings.h"
+#include "Ruler.h"
+#include "StrokeStabilizer.h"
 #include "ViewportPerfMonitor.h"
 #include "../objects/HighlightRegion.h"
 #include "../objects/TextBoxObject.h"
@@ -42,6 +44,7 @@ enum class TouchGestureMode {
 
 class QContextMenuEvent;
 class QMenu;
+class QTouchEvent;
 class ActionBarButton;
 class ImageObject;
 class InlineTextBoxEditor;
@@ -89,7 +92,9 @@ struct UndoAction {
         PageDelete,             ///< One or more whole pages removed; undo restores them
 
         // ===== Page-structure types (Plan B) =====
-        PageInsert              ///< One or more whole pages inserted (import); undo removes them
+        PageInsert,             ///< One or more whole pages inserted (import); undo removes them
+
+        ObjectStateChange       ///< An object's saved state swapped (objectData <-> objectNewData), e.g. a shape's kind
     };
 
     /**
@@ -173,6 +178,7 @@ struct UndoAction {
     int objectPageIndex = -1;                      ///< Container page (paged mode)
     Document::TileCoord objectTileCoord = {0, 0};  ///< Container tile (edgeless mode)
     QJsonObject objectData;
+    QJsonObject objectNewData;                     ///< ObjectStateChange: the state after
     QImage objectImageSnapshot;                       ///< Shared full-resolution recovery pixels
     QByteArray objectImageEncodedData;                ///< Original file bytes, when available
     QByteArray objectImageFormat;                     ///< Safe original format/extension
@@ -249,6 +255,7 @@ class QDragLeaveEvent;
 class QDropEvent;
 class TouchGestureHandler;
 class LinkObject;
+class LaserPointer;
 struct LinkSlot;
 
 /**
@@ -377,7 +384,9 @@ public:
         Left, Right,
         BottomLeft, Bottom, BottomRight,
         Rotate,   ///< Rotation handle above top center
-        Inside    ///< Inside bounding box (for move)
+        Inside,   ///< Inside bounding box (for move)
+        LineStart, LineEnd,  ///< An end of a selected straight line or connector
+        Corner               ///< A corner of a selected shape in Edit points (m_cornerDrag)
     };
     
     /**
@@ -692,6 +701,50 @@ public:
     void setPenMinStrokeWidth(qreal minWidth);
 
     /**
+     * @brief Set the pen type, line style and arrows of new pen strokes.
+     * Only strokes started after this call use it. Marker strokes ignore it.
+     */
+    void setPenStyle(const StrokeStyle::Style& style) { m_penStyle = style; }
+    const StrokeStyle::Style& penStyle() const { return m_penStyle; }
+
+    /**
+     * @brief Clean the stroke being drawn (draw and hold, free shape): nearly
+     *        straight parts become straight, curves smooth, corners stay where
+     *        the pen turned. Later pen moves are ignored until the pen lifts.
+     *        The caller repaints. (DocumentViewportShapes.cpp)
+     * @param snap Snap the ends to a nearby line of the active layer.
+     * @return False when there is no stroke to clean.
+     */
+    bool cleanCurrentStroke(bool snap);
+
+    /// Free shape mode: each stroke is cleaned when the pen lifts. The shape tool sets it.
+    void setFreeShapeMode(bool on) { m_freeShapeMode = on; }
+    bool freeShapeMode() const { return m_freeShapeMode; }
+
+    // ===== Shape tool (DocumentViewportShapes.cpp) =====
+    /// The shape bar's kind (ShapeSubToolbar::Kind): 0 free shape, 1 right-angle
+    /// connector, 2 curved connector, 3-7 rectangle, ellipse, triangle, diamond,
+    /// rounded rectangle.
+    void setShapeKind(int kind) { m_shapeKind = kind; }
+    int shapeKind() const { return m_shapeKind; }
+    void setShapeColor(const QColor& color) { m_shapeColor = color; }
+    void setShapeStroke(qreal width, const StrokeStyle::Style& style) { m_shapeThickness = width; m_shapeStyle = style; }
+    /// Give the shape or connector selected with the shape tool the bar's kind,
+    /// colour and line, as one undo step. Nothing when no such object is selected.
+    void restyleSelectedShape();
+
+    // ===== Corners of a selected shape (DocumentViewportCorners.cpp) =====
+    /// One cleaned polygon (lasso) or one fixed shape is selected: its corners can be moved.
+    bool canEditPoints() const;
+    /// "Edit points": a round handle on each corner instead of the box.
+    bool editPoints() const { return m_editPoints && canEditPoints(); }
+    void setEditPoints(bool on);
+    /// Rounding of the selected shape's corners (0 sharp .. 3 large); -1 when it has none to set.
+    int cornerStep() const;
+    /// Rebuild the selected shape with rounding @p step, as one undo step.
+    void setCornerStep(int step);
+
+    /**
      * @brief Get the current pen minimum stroke width.
      */
     qreal penMinStrokeWidth() const { return m_penMinStrokeWidth; }
@@ -774,7 +827,18 @@ public:
      * @brief Check if straight line mode is enabled.
      */
     bool straightLineMode() const { return m_straightLineMode; }
-    
+
+    // ===== Ruler (DocumentViewportTools.cpp) =====
+    // Kept in memory only, never saved in the note. A line started just
+    // outside one of its long edges follows that edge.
+
+    /// Show or hide the ruler. When shown out of view, it comes to the middle of the view.
+    void setRulerVisible(bool visible);
+    bool rulerVisible() const { return m_rulerVisible; }
+    /// Turn the ruler to @p degrees (brought into -89..90).
+    void setRulerAngle(int degrees);
+    const Ruler& ruler() const { return m_ruler; }
+
     // ===== Auto-Highlight Mode (Phase D) =====
 
     /**
@@ -1398,7 +1462,11 @@ public:
      * Action Bar: Used to sync state on tab switch.
      */
     bool hasLassoSelection() const { return m_lassoSelection.isValid(); }
-    
+
+    /// Where the selection menu goes: the selection's box with its handles, in
+    /// viewport coordinates (null: nothing selected). DocumentViewportSelect.cpp
+    QRect selectionMenuAnchor() const;
+
     /**
      * @brief Check if text is currently selected (PDF text).
      * @return True if text is selected.
@@ -1554,7 +1622,14 @@ public:
      * @brief Get the current eraser mode.
      */
     EraserMode eraserMode() const { return m_eraserMode; }
-    
+
+    /**
+     * @brief Erase the lines of the active layer on the current page (edgeless:
+     *        on every tile in view) that the eraser filter lets go. One undo step.
+     *        (DocumentViewportTools.cpp)
+     */
+    void clearCurrentPage();
+
     // ===== Object Resize (Phase O3.1) =====
     
     /**
@@ -2799,7 +2874,12 @@ signals:
      * @param enabled True if straight line mode is now enabled.
      */
     void straightLineModeChanged(bool enabled);
-    
+
+    /// The ruler was shown or hidden (the toolbar toggle follows).
+    void rulerVisibleChanged(bool visible);
+    /// "Options..." in the ruler's menu: open the ruler settings.
+    void rulerOptionsRequested();
+
     /**
      * @brief Emitted when undo availability changes for current page.
      * @param available True if undo is now available.
@@ -2893,7 +2973,10 @@ signals:
      * applicable button.
      */
     void textSelectionChanged(bool hasSelection);
-    
+
+    /// selectionMenuAnchor() changed (the selection moved, the view scrolled or zoomed).
+    void selectionMenuAnchorChanged();
+
     /**
      * @brief Emitted when internal stroke clipboard state changes.
      * @param hasStrokes True if clipboard contains strokes.
@@ -3109,6 +3192,8 @@ private:
     /// TouchBegin carries a position we can hit-test, so the routing decision
     /// has to be remembered for the TouchUpdate and TouchEnd that follow.
     bool m_touchSequenceOnChild = false;
+    /// The touch sequence in flight began on a selection handle: it works the tool (fingerOnHandle).
+    bool m_fingerOnHandle = false;
     
     // =========================================================================
     // CUSTOMIZABLE VALUES
@@ -3143,10 +3228,66 @@ private:
                                       ///< Floored into per-point pressure at stroke capture.  0 = full
                                       ///< pressure sensitivity; equal to m_penThickness = uniform stroke.
                                       ///< MainWindow keeps this in sync with PenSubToolbar.
-    qreal m_eraserSize = 20.0;        ///< Eraser radius in document units. Single source of truth for
+    StrokeStyle::Style m_penStyle;    ///< Style of new pen strokes (see setPenStyle).
+    StrokeStabilizer m_stabilizer;    ///< Smooths the pen's points (pen window, "Stroke stabilisation").
+    // Cleaned strokes (DocumentViewportShapes.cpp)
+    QTimer* m_holdTimer = nullptr;    ///< Draw and hold; created on first use
+    QElapsedTimer m_holdClock;        ///< Since the stroke started
+    QPointF m_holdAnchor;             ///< Viewport position where the pen last moved more than the still radius
+    qint64 m_holdAnchorMs = 0;        ///< m_holdClock time of m_holdAnchor
+    bool m_holdArmed = false;         ///< Draw and hold watches this stroke
+    bool m_strokeCleaned = false;     ///< The stroke being drawn was cleaned: moves adjust it (trackHold)
+    QVector<StrokePoint> m_cleanBase; ///< The cleaned points before any adjustment (empty: none)
+    QPointF m_cleanAnchor;            ///< Fixed point of the adjustment, stroke coordinates
+    QPointF m_cleanHandle;            ///< Where the pen was when the stroke was cleaned, stroke coordinates
+    QPointF m_cleanViewport;          ///< Same moment, viewport coordinates
+    QPointF m_lastHoldViewport;       ///< Last pen position seen by trackHold
+    VectorStroke m_rawStroke;         ///< A cleaned pen stroke as drawn (no points: none), for undo
+    bool m_freeShapeMode = false;     ///< See setFreeShapeMode()
+    // Shape tool (DocumentViewportShapes.cpp)
+    int m_shapeKind = 0;              ///< See setShapeKind()
+    QColor m_shapeColor = Qt::black;
+    qreal m_shapeThickness = 2.0;
+    StrokeStyle::Style m_shapeStyle;
+    /// A fixed shape or connector being dragged out, or a press handed to the object tools.
+    struct ShapeDraft {
+        bool active = false;          ///< Dragging out a new shape or connector
+        bool editing = false;         ///< The press went to a shape's body or handles
+        int pageIndex = -1;           ///< Paged: page of the start (points are page-local); edgeless: -1
+        QPointF start, end;
+        QPointF dirAnchor;            ///< Where the last direction sample was taken
+        int firstDir = -1;            ///< How the drag left the start (a ShapeObject::Side), -1 = not yet
+        int lastDir = -1;             ///< How the drag last moved
+        int attached = 0;             ///< Connector ends attached to a shape (a new one clicks the pen)
+        VectorStroke preview;        ///< The outline as it would be placed (attachment included)
+        QRectF previewArea;           ///< Viewport area the preview was last painted in
+    } m_shapeDraft;
+    /// The last pen stroke committed, which a hand-drawn head can turn into an arrow.
+    struct ShaftRef {
+        QString id;                   ///< Empty: none
+        int pageIndex = -1;
+        Document::TileCoord tile{0, 0};
+        int layerIndex = 0;
+    } m_lastShaft;
+    qreal m_eraserSize = 20.0;       ///< Eraser radius in document units. Single source of truth for
                                       ///< both hit testing and the on-screen cursor circle; see
                                       ///< eraserRadiusDocUnits().
     EraserMode m_eraserMode = EraserMode::Normal;  ///< Current eraser mode
+    ToolType m_toolBeforeEraser = ToolType::Pen;   ///< Where auto deselect goes back to
+    LaserPointer* m_laser = nullptr;  ///< Laser tool marks; created on first use (DocumentViewportTools.cpp)
+    // Ruler (DocumentViewportTools.cpp)
+    Ruler m_ruler;
+    bool m_rulerVisible = false;
+    bool m_rulerPlaced = false;       ///< m_ruler.centre was set once
+    Ruler::Hit m_rulerDrag = Ruler::None;   ///< What the pointer pressed: moves it, turns it, or taps the label
+    QPointF m_rulerDragStart;         ///< Viewport positions of the press and of the last move
+    QPointF m_rulerDragLast;
+    int m_rulerAngleAtTurn = 0;       ///< The angle when the turn started
+    qreal m_rulerTurnFrom = 0;        ///< Direction of the pointer from the centre then (degrees)
+    bool m_rulerTurning = false;      ///< m_rulerTurnFrom is set
+    bool m_rulerFollow = false;       ///< The stroke being drawn follows an edge of the ruler
+    QPointF m_rulerEdgeOrigin;        ///< That edge, in the stroke's coordinates
+    QPointF m_rulerEdgeDir;
     /// Undo granularity for whole-stroke erasing (global; see setEraserUndoGrouping).
     static EraserUndoGrouping s_eraserUndoGrouping;
     bool m_isDrawingEraserLasso = false;            ///< Currently drawing an eraser lasso region
@@ -3176,12 +3317,13 @@ private:
         qreal rotation = 0;                      ///< Current rotation angle
         qreal scaleX = 1.0, scaleY = 1.0;        ///< Current scale factors
         QPointF offset;                          ///< Move offset
+        bool baked = false;                      ///< The stroke copies already carry a move (not yet in the layer)
         
         mutable QSet<QString> m_cachedIds;       ///< Cached stroke IDs for CR-2B-7 exclusion
         
         bool isValid() const { return !selectedStrokes.isEmpty(); }
         bool hasTransform() const {
-            return !qFuzzyIsNull(rotation) || 
+            return baked || !qFuzzyIsNull(rotation) || 
                    !qFuzzyCompare(scaleX, 1.0) || 
                    !qFuzzyCompare(scaleY, 1.0) || 
                    !qFuzzyIsNull(offset.x()) ||
@@ -3210,6 +3352,7 @@ private:
             scaleX = 1.0;
             scaleY = 1.0;
             offset = QPointF();
+            baked = false;
         }
     };
     LassoSelection m_lassoSelection;
@@ -3837,6 +3980,10 @@ private:
     // ===== Incremental Stroke Rendering (Task 2.3) =====
     QPixmap m_currentStrokeCache;             ///< Cache for in-progress stroke segments
     int m_lastRenderedPointIndex = 0;         ///< Index of last point rendered to cache
+    /// Length of the current stroke up to each point, filled lazily for dashed
+    /// and dotted lines so each redrawn range keeps its dashes in place.
+    /// Cleared by resetCurrentStrokeCache().
+    QVector<qreal> m_currentStrokeArc;
     qreal m_cacheZoom = 1.0;                  ///< Zoom level when cache was built
     QPointF m_cachePan;                       ///< Pan offset when cache was built
     
@@ -4840,7 +4987,106 @@ private:
      *         the current preset's minimum width, or `rawPressure` for markers.
      */
     qreal applyPenPressureFloor(qreal rawPressure) const;
-    
+
+    /// Give a new stroke the current tool's style (pen: m_penStyle; marker: Marker, solid).
+    void applyStyle(VectorStroke& stroke) const;
+
+    // ===== Cleaned strokes (DocumentViewportShapes.cpp) =====
+    /// startStroke: arm draw and hold for a pen stroke.
+    void beginHold(const QPointF& viewportPos);
+    /// continueStroke: note a move. False once the stroke is clean: the move turns and
+    /// scales the clean stroke instead of adding a point.
+    bool trackHold(const QPointF& viewportPos);
+    void onHoldTimeout();
+    void adjustCleanedStroke(const QPointF& viewportPos);
+    /// finishStroke: free shape cleaning, then hand-drawn arrows.
+    /// @return True when the stroke was an arrow head and is not kept.
+    bool liftShapeStroke();
+    /// finishStroke: remember the committed pen stroke as a possible arrow shaft.
+    void rememberShaft(int pageIndex, Document::TileCoord tile, int layerIndex, const QString& id);
+    /// The stroke being drawn is a head at an end of m_lastShaft: give the shaft that arrow
+    /// (only say whether it is one when @p apply is false).
+    bool makeHandArrow(bool apply = true);
+    /// finishStroke, after the AddStroke of a cleaned stroke: undo gives back m_rawStroke first.
+    void keepRawInUndo();
+    /// Lines of the active layer near @p a or @p b, in the stroke's coordinates.
+    QVector<QPolygonF> shapeSnapTargets(const QPointF& a, const QPointF& b, qreal dist) const;
+    // Shape tool input. Each returns true when it handled the event.
+    bool shapePress(const PointerEvent& pe);
+    bool shapeMove(const PointerEvent& pe);
+    bool shapeRelease(const PointerEvent& pe);
+    /// The shape or connector of m_shapeDraft (in its coordinates), attached to nearby shapes.
+    std::unique_ptr<InsertedObject> shapeFromDraft() const;
+    void insertShapeDraft();
+    void renderShapePreview(QPainter& painter);
+    void leaveShapeTool();
+    /// @p docPt (document coordinates) is on the drawn line of shape or connector @p obj.
+    bool nearShapeLine(const InsertedObject* obj, const QPointF& docPt) const;
+    /// Undo (@p undo) or redo an ObjectStateChange, and move it to the other stack.
+    void applyObjectStateChange(const UndoAction& action, bool undo);
+    /// The page (paged) or tile (edgeless) that holds @p obj.
+    bool locateObject(const InsertedObject* obj, int& pageIndex, Document::TileCoord& tile) const;
+
+    // ===== End handles of lines and connectors (DocumentViewportLineEnds.cpp) =====
+    /// The lasso selection is one straight line: its ends, transform applied (selection coordinates).
+    bool lassoLineEnds(QPointF* a, QPointF* b) const;
+    QPointF selectionToViewport(const QPointF& p) const;
+    /// LineStart or LineEnd near an end, Inside near the line, else None (viewport coordinates).
+    HandleHit lineHandleAt(const QPointF& viewportPos, const QPointF& a, const QPointF& b) const;
+    static void drawLineEndHandles(QPainter& painter, const QPointF& a, const QPointF& b);
+    /// The round handles of line ends and of corners, at @p at (viewport coordinates).
+    static void drawRoundHandles(QPainter& painter, const QVector<QPointF>& at);
+    /// startSelectionTransform on an end: bake the transform into the line's points.
+    void beginLassoLineEnd();
+    /// The dragged end follows @p p (selection coordinates); the other end stays.
+    void moveLassoLineEnd(const QPointF& p);
+    /// Release of an end: write the line back (one undo step) and keep it selected.
+    void commitLassoLine();
+    /// The ends of connector @p obj in viewport coordinates.
+    bool connectorEnds(const InsertedObject* obj, QPointF* a, QPointF* b) const;
+    /// Drag the end m_objectResizeHandle names to @p docPos, attaching it to a shape there.
+    void dragConnectorEnd(InsertedObject* obj, const QPointF& docPos);
+    /// Release of a connector end: one ObjectStateChange from m_lineEndBefore.
+    void finishConnectorEndDrag(InsertedObject* obj);
+    /// A finger that lands on a selection handle drags the handle instead of the page.
+    bool fingerOnHandle(QTouchEvent* event);
+    /// Connectors attached to the shapes being dragged: drawn live (renderDragFollowers),
+    /// left out of the drag background.
+    void collectDragFollowers();
+    void renderDragFollowers(QPainter& painter);
+    QVector<StrokePoint> m_lineEndBase;   ///< The line's points when its end drag began
+    QPointF m_lineEndFixed;               ///< The end that stays
+    QPointF m_lineEndMoving;              ///< The dragged end at the start of the drag
+    QJsonObject m_lineEndBefore;          ///< A dragged connector or shape before the drag (empty: none)
+    QSet<QString> m_dragFollowerIds;
+    QVector<QPair<Page*, QPointF>> m_dragFollowerPages;   ///< Container and its document origin
+
+    // ===== Corners of a shape (DocumentViewportCorners.cpp) =====
+    /// The lasso selection is one cleaned polygon: its corners, transform applied (selection coordinates).
+    bool lassoShapeCorners(QVector<QPointF>* corners) const;
+    /// The selected fixed shape's corners in viewport coordinates; empty when none.
+    QVector<QPointF> objectCornersInViewport(const InsertedObject* obj) const;
+    /// Index of the corner of @p corners (viewport) under @p viewportPos, or -1.
+    static int cornerIndexAt(const QVector<QPointF>& corners, const QPointF& viewportPos);
+    /// Edit points on the lasso selection: Corner on a corner, Inside within the shape, else None.
+    HandleHit lassoCornerHandleAt(const QPointF& viewportPos) const;
+    /// The lasso selection's corners in viewport coordinates (Edit points); empty when off.
+    QVector<QPointF> lassoCornersInViewport() const;
+    /// A pending move, turn or scale of the lasso selection, written into its points.
+    void bakeLassoTransform();
+    /// startSelectionTransform on a corner: bake the transform, remember the corners.
+    void beginLassoCorner(const QPointF& viewportPos);
+    /// The dragged corner follows @p p (selection coordinates); the others stay.
+    void moveLassoCorner(const QPointF& p);
+    /// Rebuild the selected stroke from @p corners with @p radius (selection coordinates).
+    void rebuildLassoShape(const QVector<QPointF>& corners, qreal radius);
+    /// Drag corner m_cornerDrag of shape @p obj to @p docPos.
+    void dragShapeCorner(InsertedObject* obj, const QPointF& docPos);
+    bool m_editPoints = false;
+    int m_cornerDrag = -1;                ///< The corner being dragged
+    QVector<QPointF> m_cornerBase;        ///< The lasso shape's corners when the drag began
+    qreal m_cornerRadius = 0.0;           ///< Its corner radius, kept during the drag
+
     // ===== Incremental Stroke Rendering (Task 2.3) =====
     
     /**
@@ -5037,6 +5283,77 @@ private:
      */
     void finishEraserCuts(const QVector<EraserTarget>& cutTargets);
 
+    /// After the eraser tool lifts: go back to the last tool when the user
+    /// asked for it (auto deselect). (DocumentViewportTools.cpp)
+    void returnFromEraser();
+
+    // ===== Laser pointer (DocumentViewportTools.cpp) =====
+    // Nothing is saved, nothing goes on the undo stack.
+    void laserPress(const PointerEvent& pe);
+    void laserMove(const PointerEvent& pe);
+    void laserRelease();
+    /// Remove the marks now (leaving the tool).
+    void clearLaser();
+    /// Draw the marks over everything else, in viewport coordinates.
+    void renderLaser(QPainter& painter, const QRect& dirtyRect);
+    /// Repaint a laser area given in document coordinates, with the glow.
+    void updateLaserArea(const QRectF& docRect);
+
+    // ===== Ruler (DocumentViewportTools.cpp) =====
+    /// A press on the ruler moves it, turns it (centre handle) or opens its
+    /// menu (angle label). @return True when the ruler took the press.
+    bool rulerPress(const PointerEvent& pe);
+    bool rulerMove(const PointerEvent& pe);
+    bool rulerRelease(const PointerEvent& pe);
+    /// At the start of a stroke: follow the ruler edge the press is near, if any.
+    /// @param strokeOrigin Document position of the stroke's coordinates (page origin; edgeless: 0,0).
+    /// @return @p firstPoint, on the edge when it follows one.
+    QPointF beginRulerStroke(const QPointF& viewportPos, const QPointF& strokeOrigin,
+                             const QPointF& firstPoint);
+    /// A stroke point, moved onto the followed edge. O(1): it runs on every pen event.
+    QPointF rulerSnap(const QPointF& p) const {
+        return m_rulerFollow
+            ? m_rulerEdgeOrigin + m_rulerEdgeDir * QPointF::dotProduct(p - m_rulerEdgeOrigin, m_rulerEdgeDir)
+            : p;
+    }
+    void renderRuler(QPainter& painter, const QRect& dirtyRect);
+    /// Repaint where the ruler was (@p before, viewport) and where it is now.
+    void updateRulerArea(const QRectF& before);
+    void showRulerMenu(const QPoint& viewportPos);
+    void askRulerAngle();
+    void askRulerPosition();
+    /// Two fingers on the ruler: it follows their middle and turns as they turn.
+    void rulerTwoFingers(const QPointF& a, const QPointF& b);
+    /// grabOpaqueViewport() is rendering: the ruler stays out of cached frames
+    /// and is drawn live on top of them, so it is always whole and current.
+    bool m_grabbingFrame = false;
+    /// Where a viewport point is shown during a pan or pinch (the cached frame moves).
+    QPointF gestureMap(const QPointF& viewportPt) const;
+    bool m_rulerTwoFingers = false;   ///< m_rulerTurnFrom and m_rulerDragLast belong to two fingers
+
+    // ===== Finger tap and the selection menu (DocumentViewportSelect.cpp) =====
+    /// Watches a touch sequence: true at the end of a short one-finger tap (at m_fingerTapPos).
+    bool fingerTapEnded(QTouchEvent* event);
+    /// A finger tap: select the line or shape under it, or let go of the selection.
+    void selectByFingerTap(const QPointF& viewportPos);
+    /// Select the line a tap at @p viewportPos is on (lines, arrows, cleaned closed shapes only).
+    bool selectStrokeByTap(const QPointF& viewportPos, ToolType back);
+    /// Use @p tool for a tapped selection; @p back is where an empty tap or a pen press returns.
+    void switchForFingerTap(ToolType tool, ToolType back);
+    /// Give back the tool (and straight line mode) a finger tap borrowed from.
+    void returnFromFingerTap();
+    bool m_straightBeforeFingerTap = false;
+    /// A press at @p viewportPos works the current selection (a handle or inside it).
+    bool pressOnSelection(const QPointF& viewportPos) const;
+    /// At the top of paintEvent: emit selectionMenuAnchorChanged() when the box moved.
+    void trackSelectionMenuAnchor();
+    bool m_fingerTap = false;            ///< The touch sequence in flight can still be a tap
+    QPointF m_fingerTapPos;
+    QElapsedTimer m_fingerTapClock;
+    bool m_fingerTapSwitched = false;    ///< A finger tap changed the tool (m_toolBeforeFingerTap)
+    ToolType m_toolBeforeFingerTap = ToolType::Pen;
+    QRect m_menuAnchor;                  ///< Last selectionMenuAnchor() announced
+
     /**
      * @brief Turn the buffered eraser actions into undo entries.
      *
@@ -5139,6 +5456,7 @@ private:
     struct TileSegment {
         Document::TileCoord coord;      ///< The tile this segment belongs to
         QVector<StrokePoint> points;    ///< Points in document coordinates
+        int first = 0;                  ///< Index of points[0] in the whole stroke
     };
     
     /**

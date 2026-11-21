@@ -14,6 +14,8 @@
 #include "../layers/VectorLayer.h"
 #include "../objects/ImageObject.h"
 #include "../objects/LinkObject.h"
+#include "../objects/ShapeObject.h"
+#include "../objects/ConnectorObject.h"
 
 #include <mupdf/fitz.h>
 #include <mupdf/pdf.h>
@@ -40,6 +42,22 @@ static void appendLayerStrokesToBuffer(fz_context* ctx, pdf_document* outputDoc,
                                        int& gsIndex, std::map<int, QString>& alphaToGsName,
                                        bool darkenStrokes = false);
 static int getSourcePageRotation(fz_context* ctx, pdf_document* srcPdf, int pageIndex);
+
+// A fixed shape or a connector is a stroke on the page: export its outline
+// the way the page's strokes are exported (same dashes, dots and arrow heads).
+static void appendStrokeObject(fz_context* ctx, pdf_document* outputDoc, fz_buffer* buf,
+                               pdf_obj* resources, const InsertedObject* obj, qreal pageHeightSn,
+                               int& gsIndex, std::map<int, QString>& alphaToGsName, bool darkenStrokes)
+{
+    VectorStroke outline;
+    if (const auto* shape = dynamic_cast<const ShapeObject*>(obj)) outline = shape->outlineStroke();
+    else if (const auto* line = dynamic_cast<const ConnectorObject*>(obj)) outline = line->outlineStroke();
+    if (!obj->visible || outline.points.isEmpty()) return;
+    VectorLayer layer;
+    layer.addStroke(outline);
+    appendLayerStrokesToBuffer(ctx, outputDoc, buf, resources, &layer, pageHeightSn,
+                               gsIndex, alphaToGsName, darkenStrokes);
+}
 static fz_rect getSourcePageBBox(fz_context* ctx, pdf_document* srcPdf, int pageIndex);
 // OUT2: build the exported bookmark tree from Document::aggregatedOutline() so the
 // export matches the on-screen panel exactly (multi-source grouped roots,
@@ -1273,7 +1291,8 @@ bool MuPdfExporter::renderModifiedPage(int pageIndex)
     
     Page* page = m_document->page(pageIndex);
     if (!page) return false;
-    
+    if (page->hasConnectors) ConnectorObject::resolve(*page);   // Ends and routes as on screen
+
     // origPageNum: the ORIGINAL page number stored on the page (used for Document
     // source-aware helpers, which translate to the provider index internally).
     // pdfPageNum: the provider-facing index for direct MuPDF ops against m_sourcePdf
@@ -1484,6 +1503,8 @@ bool MuPdfExporter::renderModifiedPage(int pageIndex)
                         addImageToPage(m_ctx, m_outputDoc, imgObj, combinedContent, resources, imageIndex++, heightPt, m_options);
                     }
                 }
+                appendStrokeObject(m_ctx, m_outputDoc, combinedContent, resources, obj, pageHeightSn, gsIndex,
+                                   alphaToGsName, m_options.darkenStrokes);
             }
         };
         
@@ -1518,6 +1539,8 @@ bool MuPdfExporter::renderModifiedPage(int pageIndex)
                             addImageToPage(m_ctx, m_outputDoc, imgObj, combinedContent, resources, imageIndex++, heightPt, m_options);
                         }
                     }
+                    appendStrokeObject(m_ctx, m_outputDoc, combinedContent, resources, obj, pageHeightSn, gsIndex,
+                                       alphaToGsName, m_options.darkenStrokes);
                 }
             }
         }
@@ -1681,7 +1704,8 @@ bool MuPdfExporter::renderBlankPage(int pageIndex)
     
     Page* page = m_document->page(pageIndex);
     if (!page) return false;
-    
+    if (page->hasConnectors) ConnectorObject::resolve(*page);   // Ends and routes as on screen
+
     QSizeF pageSize = page->size;
     
     // Convert page size from SpeedyNote units (96 DPI) to PDF points (72 DPI)
@@ -1843,6 +1867,8 @@ bool MuPdfExporter::renderBlankPage(int pageIndex)
                             addImageToPage(m_ctx, m_outputDoc, imgObj, finalContent, resources, imageIndex++, heightPt, m_options);
                         }
                     }
+                    appendStrokeObject(m_ctx, m_outputDoc, finalContent, resources, obj, pageHeightSn, gsIndex,
+                                       alphaToGsName, m_options.darkenStrokes);
                 }
             };
             
@@ -1877,6 +1903,8 @@ bool MuPdfExporter::renderBlankPage(int pageIndex)
                                 addImageToPage(m_ctx, m_outputDoc, imgObj, finalContent, resources, imageIndex++, heightPt, m_options);
                             }
                         }
+                        appendStrokeObject(m_ctx, m_outputDoc, finalContent, resources, obj, pageHeightSn, gsIndex,
+                                           alphaToGsName, m_options.darkenStrokes);
                     }
                 }
             }
@@ -2218,14 +2246,24 @@ static void appendLayerStrokesToBuffer(fz_context* ctx, pdf_document* outputDoc,
             appendCircleToBuffer(ctx, buf, polyResult.startCapCenter, 
                                 polyResult.startCapRadius, pageHeightSn);
             fz_append_string(ctx, buf, "f\n");
-        } else if (!polyResult.polygon.isEmpty()) {
+        } else if (!polyResult.polygon.isEmpty() || !polyResult.pieces.isEmpty()
+                   || !polyResult.discCenters.isEmpty()) {
             appendPolygonToBuffer(ctx, buf, polyResult.polygon, pageHeightSn);
-            
+
             if (polyResult.hasRoundCaps) {
                 appendCircleToBuffer(ctx, buf, polyResult.startCapCenter,
                                     polyResult.startCapRadius, pageHeightSn);
                 appendCircleToBuffer(ctx, buf, polyResult.endCapCenter,
                                     polyResult.endCapRadius, pageHeightSn);
+            }
+            // Dashes, dots and arrow heads wind like the polygon, so the
+            // non-zero fill below unites them.
+            for (const QPolygonF& piece : polyResult.pieces) {
+                appendPolygonToBuffer(ctx, buf, piece, pageHeightSn);
+            }
+            for (int i = 0; i < polyResult.discCenters.size(); ++i) {
+                appendCircleToBuffer(ctx, buf, polyResult.discCenters[i],
+                                     polyResult.discRadii[i], pageHeightSn);
             }
             // Single fill for all subpaths (polygon + caps) to prevent
             // double-opacity at cap/body overlap for semi-transparent strokes

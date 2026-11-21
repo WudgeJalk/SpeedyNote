@@ -7,6 +7,7 @@
 #include "../MenuPopup.h"
 #include "NotebookCardDelegate.h"
 #include "StarredView.h"
+#include "LibraryView.h"
 #include "SearchView.h"
 #include "FloatingActionButton.h"
 #include "FolderPickerDialog.h"
@@ -19,6 +20,7 @@
 #include "../widgets/ExportProgressWidget.h"
 #include "../../MainWindow.h"
 #include "../../core/NotebookLibrary.h"
+#include "../../core/LibraryTree.h"
 #include "../../core/SandboxPdfOwnership.h"
 #include "../../core/Document.h"
 #include "../../batch/ExportQueueManager.h"
@@ -251,12 +253,14 @@ void Launcher::setupUi()
     // Add views to stack
     m_timelineView = new QWidget(this);
     m_timelineView->setObjectName("TimelineView");
+    m_libraryView = new LibraryView(this);
     m_starredView = new StarredView(this);
     m_starredView->setObjectName("StarredViewWidget");
     m_searchView = new SearchView(this);
     m_searchView->setObjectName("SearchViewWidget");
     
     m_contentStack->addWidget(m_timelineView);
+    m_contentStack->addWidget(m_libraryView);
     m_contentStack->addWidget(m_starredView);
     m_contentStack->addWidget(m_searchView);
     
@@ -264,6 +268,8 @@ void Launcher::setupUi()
     
     // Setup view content (after views are created)
     setupTimeline();
+    connect(m_libraryView, &LibraryView::noteOpenRequested, this, &Launcher::notebookSelected);
+    connect(m_libraryView, &LibraryView::newNoteRequested, this, &Launcher::createNewNoteAt);
     setupStarred();
     setupSearch();
     
@@ -315,6 +321,13 @@ void Launcher::setupNavigation()
     m_timelineBtn->setText(tr("Timeline"));
     m_timelineBtn->setCheckable(true);
     navLayout->addWidget(m_timelineBtn);
+
+    // Library button (notebooks > sections > notes)
+    m_libraryBtn = new LauncherNavButton(m_navSidebar);
+    m_libraryBtn->setIconName("folder");
+    m_libraryBtn->setText(tr("Library"));
+    m_libraryBtn->setCheckable(true);
+    navLayout->addWidget(m_libraryBtn);
     
     // Starred button
     m_starredBtn = new LauncherNavButton(m_navSidebar);
@@ -351,6 +364,10 @@ void Launcher::setupNavigation()
         switchToView(View::Timeline);
     });
     
+    connect(m_libraryBtn, &LauncherNavButton::clicked, this, [this]() {
+        switchToView(View::Library);
+    });
+
     connect(m_starredBtn, &LauncherNavButton::clicked, this, [this]() {
         switchToView(View::Starred);
     });
@@ -630,6 +647,9 @@ void Launcher::switchToView(View view)
         case View::Timeline:
             m_contentStack->setCurrentWidget(m_timelineView);
             break;
+        case View::Library:
+            m_contentStack->setCurrentWidget(m_libraryView);
+            break;
         case View::Starred:
             m_contentStack->setCurrentWidget(m_starredView);
             break;
@@ -646,6 +666,7 @@ void Launcher::updateNavigationState()
 {
     // Update button checked states
     m_timelineBtn->setChecked(m_currentView == View::Timeline);
+    m_libraryBtn->setChecked(m_currentView == View::Library);
     m_starredBtn->setChecked(m_currentView == View::Starred);
     m_searchBtn->setChecked(m_currentView == View::Search);
 }
@@ -654,6 +675,7 @@ void Launcher::setNavigationCompact(bool compact)
 {
     m_returnBtn->setCompact(compact);
     m_timelineBtn->setCompact(compact);
+    m_libraryBtn->setCompact(compact);
     m_starredBtn->setCompact(compact);
     m_searchBtn->setCompact(compact);
     
@@ -728,7 +750,7 @@ void Launcher::closeEvent(QCloseEvent* event)
         // recorded: if the MainWindow refuses to close below, this window stays open
         // with the MainWindow in front of it, and the next toggle has to know that.
         mw->bringToFront();
-        if (!mw->close()) {
+        if (!mw->closeWithAnswer()) {
             event->ignore();
             return;
         }
@@ -1314,33 +1336,11 @@ void Launcher::renameNotebook(const QString& bundlePath)
         }
     }
     
-    // Rename the directory
-    QDir bundleDir(bundlePath);
-    if (bundleDir.rename(bundlePath, newPath)) {
-        // Update document.json with the new name
-        // This is necessary because NotebookLibrary reads the name from document.json,
-        // and displayName() prioritizes the JSON name over the folder name.
-        QString manifestPath = newPath + "/document.json";
-        QFile manifestFile(manifestPath);
-        if (manifestFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
-            QByteArray data = manifestFile.readAll();
-            manifestFile.close();
-            
-            QJsonParseError parseError;
-            QJsonDocument doc = QJsonDocument::fromJson(data, &parseError);
-            if (parseError.error == QJsonParseError::NoError) {
-                QJsonObject obj = doc.object();
-                obj["name"] = newName;  // Update the name field
-                doc.setObject(obj);
-                
-                // Write back
-                if (manifestFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
-                    manifestFile.write(doc.toJson(QJsonDocument::Indented));
-                    manifestFile.close();
-                }
-            }
-        }
-        
+    // Renames the folder, keeps the note's place in its library section and
+    // updates the name in document.json (NotebookLibrary reads the name there).
+    QString error;
+    newPath = LibraryTree::rename(bundlePath, newName, &error);
+    if (!newPath.isEmpty()) {
         // Update the existing library record in place so launcher-only
         // metadata (including starred state and folder assignment) survives.
         NotebookLibrary* lib = NotebookLibrary::instance();
@@ -1349,8 +1349,7 @@ void Launcher::renameNotebook(const QString& bundlePath)
                        << bundlePath << "to" << newPath;
         }
     } else {
-        QMessageBox::warning(this, tr("Rename Failed"),
-                            tr("Could not rename the notebook."));
+        QMessageBox::warning(this, tr("Rename Failed"), error);
     }
 }
 

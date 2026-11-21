@@ -8,6 +8,8 @@
 #include <QClipboard>
 #include <QMimeData>
 #include <QEasingCurve>
+#include <QRegion>
+#include <QSettings>
 
 ActionBarContainer::ActionBarContainer(QWidget* parent)
     : QWidget(parent)
@@ -17,9 +19,65 @@ ActionBarContainer::ActionBarContainer(QWidget* parent)
     
     // Start hidden until an action bar is shown
     hide();
-    
+
     // Check initial clipboard state
     checkClipboardForImage();
+    reloadSettings();
+}
+
+void ActionBarContainer::reloadSettings()
+{
+    QSettings settings("SpeedyNote", "App");
+    m_nextToSelection = settings.value("actionBar/nextToSelection", true).toBool();
+    m_menuGap = qBound(0, settings.value("actionBar/distance", 12).toInt(), 200);
+}
+
+void ActionBarContainer::setAnchor(const QRect& selection, const QRect& area)
+{
+    m_anchor = selection;
+    m_anchorArea = area;
+}
+
+QRect ActionBarContainer::placeNear(const QSize& bar, const QRect& selection, const QRect& area, int gap)
+{
+    constexpr int margin = 8;   // From the edges of the view
+    const int left = area.left() + margin;
+    const int right = area.right() + 1 - margin - bar.width();
+    const int top = area.top() + margin;
+    const int bottom = area.bottom() + 1 - margin - bar.height();
+    const int x = qBound(left, selection.left() + (selection.width() - bar.width()) / 2, qMax(left, right));
+    int y = selection.bottom() + 1 + gap;   // Under the selection
+    if (y > bottom && selection.top() - gap - bar.height() >= top) {
+        y = selection.top() - gap - bar.height();   // No room under it: over it
+    }
+    return QRect(QPoint(x, qBound(top, y, qMax(top, bottom))), bar);
+}
+
+void ActionBarContainer::placeNearSelection(bool pagePanelShown)
+{
+    const QRect area = m_anchorArea.isEmpty() ? m_viewportRect : m_anchorArea;
+    const QRect bar = placeNear(m_currentActionBar->sizeHint(), m_anchor, area, m_menuGap);
+    QRect all = bar;
+    QRect panel;
+    if (pagePanelShown) {
+        // The page panel bar keeps its place at the side.
+        const QSize size = m_pagePanelBar->sizeHint();
+        const int y = qMax(m_viewportRect.top() + (m_viewportRect.height() - size.height()) / 2,
+                           m_viewportRect.top() + EDGE_OFFSET);
+        panel = QRect(QPoint(m_viewportRect.left() + EDGE_OFFSET, y), size);
+        all |= panel;
+    }
+    setFixedSize(all.size());
+    move(all.topLeft());
+    m_currentActionBar->move(bar.topLeft() - all.topLeft());
+    if (pagePanelShown) {
+        m_pagePanelBar->move(panel.topLeft() - all.topLeft());
+        // Only the two bars take clicks; the page between them stays reachable.
+        setMask(QRegion(bar.translated(-all.topLeft())) + QRegion(panel.translated(-all.topLeft())));
+    } else {
+        clearMask();
+    }
+    m_placedNear = true;
 }
 
 void ActionBarContainer::setActionBar(const QString& type, ActionBar* actionBar)
@@ -159,12 +217,23 @@ void ActionBarContainer::updatePosition(const QRect& viewportRect)
     if (m_isAnimating) {
         return;
     }
-    
+
     // If still no valid rect, can't position
     if (m_viewportRect.isEmpty()) {
         return;
     }
-    
+
+    if (contextBarShown) {
+        m_currentActionBar->setOrientation(nearSelection() ? Qt::Horizontal : Qt::Vertical);
+    }
+    if (nearSelection()) {
+        placeNearSelection(pagePanelShown);
+        return;
+    }
+    m_placedNear = false;
+    clearMask();
+    updateSize();   // The bar may have just turned back to a column
+
     // Calculate heights for vertical centering
     int pagePanelHeight = pagePanelShown ? m_pagePanelBar->sizeHint().height() : 0;
     int contextBarHeight = contextBarShown ? m_currentActionBar->sizeHint().height() : 0;
@@ -438,7 +507,14 @@ void ActionBarContainer::updateVisibility()
                 typeToShow = "objectSelect";
             }
             break;
-            
+
+        case ToolType::Shape:
+            // A placed shape stays selected, so its object actions are near.
+            if (m_hasObjectSelection) {
+                typeToShow = "objectSelect";
+            }
+            break;
+
         default:
             // No action bar for other tools
             break;
@@ -495,7 +571,8 @@ void ActionBarContainer::animateShow()
     bool hasContextBar = m_currentActionBar != nullptr;
     bool hasPagePanel = m_pagePanelBar && m_pagePanelVisible;
     
-    if (!m_animationEnabled || (!hasContextBar && !hasPagePanel)) {
+    // Next to the selection it simply appears: a slide from the side means nothing there.
+    if (!m_animationEnabled || (!hasContextBar && !hasPagePanel) || nearSelection()) {
         show();
         raise();
         return;
@@ -561,7 +638,7 @@ void ActionBarContainer::animateShow()
 
 void ActionBarContainer::animateHide()
 {
-    if (!m_animationEnabled || !isVisible()) {
+    if (!m_animationEnabled || !isVisible() || m_placedNear) {
         if (m_currentActionBar) {
             m_currentActionBar->hide();
         }
@@ -595,14 +672,16 @@ void ActionBarContainer::animateHide()
     
     connect(m_animation, &QPropertyAnimation::finished, this, [this]() {
         m_isAnimating = false;
-        if (m_currentActionBar) {
-            m_currentActionBar->hide();
-        }
-        m_currentActionBar = nullptr;
-        m_currentType.clear();
-        hide();
         m_animation->deleteLater();
         m_animation = nullptr;
+        // A bar shown again while this one slid out (a selection replaced at
+        // once, as after a line's end drag) stays.
+        if (m_currentActionBar) {
+            updatePosition(m_viewportRect);
+            return;
+        }
+        m_currentType.clear();
+        hide();
     });
     
     m_animation->start();

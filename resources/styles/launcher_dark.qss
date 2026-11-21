@@ -266,3 +266,63 @@ QToolTip {
     padding: 6px 10px;
     font-size: 12px;
 }
+
+/* ==========================================================================
+   Library View (notebooks | sections | notes)
+   ========================================================================== */
+
+#LibraryViewWidget {
+    background: #1e1e1e;
+}
+
+#LibraryColumn {
+    background: #252525;
+    border: 1px solid #3a3a3a;
+    border-radius: 10px;
+}
+
+#LibraryColumnTitle {
+    color: #e0e0e0;
+    font-size: 15px;
+    font-weight: bold;
+    padding: 4px;
+}
+
+#LibraryList {
+    background: transparent;
+    border: none;
+    outline: 0;
+    color: #e0e0e0;
+    font-size: 14px;
+}
+
+#LibraryList::item {
+    padding: 8px 6px;
+    border-radius: 6px;
+}
+
+#LibraryList::item:hover {
+    background: rgba(255, 255, 255, 0.06);
+}
+
+#LibraryList::item:selected {
+    background: rgba(138, 180, 248, 0.22);
+    color: #ffffff;
+}
+
+#LibraryAddButton {
+    background: #2d2d2d;
+    border: 1px solid #3a3a3a;
+    border-radius: 18px;
+    color: #e0e0e0;
+    font-size: 18px;
+    font-weight: bold;
+}
+
+#LibraryAddButton:hover {
+    background: #383838;
+}
+
+#LibraryAddButton:pressed {
+    background: #444444;
+}

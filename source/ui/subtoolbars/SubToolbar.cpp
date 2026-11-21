@@ -1,4 +1,5 @@
 #include "SubToolbar.h"
+#include "../widgets/ColorListRow.h"
 
 #include <QFrame>
 #include <QPalette>
@@ -51,6 +52,29 @@ void SubToolbar::addStretch()
     m_layout->addStretch();
 }
 
+void SubToolbar::setOrientation(Qt::Orientation orientation)
+{
+    const bool row = orientation == Qt::Horizontal;
+    m_layout->setDirection(row ? QBoxLayout::LeftToRight : QBoxLayout::TopToBottom);
+    m_layout->setContentsMargins(row ? PADDING_LEFT : 0, row ? 0 : PADDING_LEFT,
+                                 row ? PADDING_RIGHT : 0, row ? 0 : PADDING_RIGHT);
+    m_layout->setAlignment(row ? (Qt::AlignLeft | Qt::AlignVCenter) : (Qt::AlignTop | Qt::AlignHCenter));
+    for (int i = 0; i < m_layout->count(); ++i)
+        m_layout->itemAt(i)->setAlignment(row ? Qt::AlignVCenter : Qt::AlignHCenter);
+
+    setMinimumSize(0, 0);
+    setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+    if (row) setFixedHeight(36); else setFixedWidth(36);
+
+    for (QFrame* frame : findChildren<QFrame*>()) {
+        if (frame->frameShape() == QFrame::VLine)
+            frame->setFixedSize(row ? QSize(2, SEPARATOR_HEIGHT) : QSize(SEPARATOR_HEIGHT, 2));
+    }
+    for (ColorListRow* colors : findChildren<ColorListRow*>())
+        colors->setOrientation(orientation);
+    m_layout->invalidate();
+}
+
 bool SubToolbar::isDarkMode() const
 {
     const QPalette& pal = QApplication::palette();
@@ -75,4 +99,6 @@ void SubToolbar::setDarkMode(bool darkMode)
             }
         }
     }
+    for (ColorListRow* colors : findChildren<ColorListRow*>())
+        colors->setDarkMode(darkMode);
 }
