@@ -29,6 +29,14 @@ public:
     /// Corners: 0 sharp, 1 small (the stroke preset's "Rounded corners"), 2 medium,
     /// 3 large (ShapeCleaner::stepRadius). A rounded rectangle has its own.
     int roundness = 1;
+    /// Corner radius set with the panel's slider (page units); -1 = the step
+    /// above. Saved as "cornerRadius" only when set; "roundness" keeps the
+    /// nearest step, which is what older versions read.
+    qreal cornerRadius = -1.0;
+    /// Set cornerRadius, and roundness to its nearest step.
+    void setCornerRadius(qreal radius);
+    /// The radius the corners are drawn with (not for a rounded rectangle).
+    qreal radius() const;
     /// Corners moved one by one ("Edit points"), as fractions of the box; empty
     /// = the corners of the kind. Never for an ellipse.
     QVector<QPointF> cornerPoints;
@@ -61,7 +69,7 @@ public:
 
 private:
     /// Everything outlineStroke() and its drawing depend on.
-    using OutlineKey = std::tuple<QPointF, QSizeF, qreal, int, QRgb, qreal, quint8, int, QVector<QPointF>, int>;
+    using OutlineKey = std::tuple<QPointF, QSizeF, qreal, int, QRgb, qreal, quint8, int, QVector<QPointF>, int, qreal>;
     /// The corners in the unrotated box.
     QVector<QPointF> localCorners() const;
     OutlineKey outlineKey() const;

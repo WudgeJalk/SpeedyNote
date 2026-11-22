@@ -32,6 +32,8 @@
     <file>resources/icons/cross_reversed.png</file>
     <file>resources/icons/check.png</file>
     <file>resources/icons/check_reversed.png</file>
+    <file>resources/icons/saving.png</file>
+    <file>resources/icons/saving_reversed.png</file>
     <file>resources/icons/warning.png</file>
     <file>resources/icons/warning_reversed.png</file>
     <file>resources/icons/up_arrow.png</file>

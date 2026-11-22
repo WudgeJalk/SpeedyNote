@@ -880,6 +880,7 @@ endif()
 # Core document architecture
 set(CORE_SOURCES
     source/core/Page.cpp
+    source/core/Paper.cpp
     source/core/Document.cpp
     source/core/DocumentViewport.cpp
     source/core/DocumentViewportTools.cpp
@@ -890,8 +891,11 @@ set(CORE_SOURCES
     source/core/LaserPointer.cpp
     source/core/Ruler.cpp
     source/core/DocumentManager.cpp
+    source/core/AutoSaver.cpp
+    source/core/NoteVersions.cpp
     source/core/NotebookLibrary.cpp
     source/core/LibraryTree.cpp
+    source/core/CoverPainter.cpp
     source/core/TouchGestureHandler.cpp
     source/core/MarkdownNote.cpp
     source/core/ShortcutManager.cpp
@@ -1029,6 +1033,7 @@ set(UI_SOURCES
     # Action bars
     source/ui/actionbars/ActionBar.cpp
     source/ui/actionbars/ActionBarContainer.cpp
+    source/ui/actionbars/CornerRadiusSlider.cpp
     source/ui/actionbars/LassoActionBar.cpp
     source/ui/actionbars/ObjectSelectActionBar.cpp
     source/ui/actionbars/PagePanelActionBar.cpp
@@ -1206,6 +1211,11 @@ set(APP_SOURCES
     source/ui/dialogs/BatchExportDialog.cpp
     source/ui/dialogs/ExportResultsDialog.cpp
     source/ui/dialogs/DocumentSettingsDialog.cpp
+    source/ui/dialogs/SaveErrorBox.cpp
+    source/ui/dialogs/VersionsDialog.cpp
+    source/ui/dialogs/NewNoteDialog.cpp
+    source/ui/widgets/LibraryPlacePicker.cpp
+    source/ui/widgets/CoverPicker.cpp
     source/text/MarkdownNoteEntry.cpp
     source/ui/MarkdownNotesSidebar.cpp
         ${CORE_SOURCES}

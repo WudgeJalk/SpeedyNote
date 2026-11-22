@@ -661,6 +661,84 @@ public:
     }
 
     /**
+     * @brief F1: the open hand a mouse shows over the empty space goes when the
+     * pen hovers onto a page (the pen's hover never reaches mouseMoveEvent).
+     */
+    static bool testHandCursorFollowsThePen() {
+        printf("  testHandCursorFollowsThePen... ");
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+        auto fail = [](const char* message) {
+            printf("FAILED: %s\n", message);
+            return false;
+        };
+        const bool savedSetting = DocumentViewport::panOutsidePagesEnabled();
+        DocumentViewport::setPanOutsidePagesEnabled(true);
+        auto doc = Document::createNew("Hand cursor");
+        doc->addPage();
+        DocumentViewport viewport;
+        viewport.resize(1200, 800);
+        viewport.setAttribute(Qt::WA_DontShowOnScreen, true);
+        viewport.show();
+        QApplication::processEvents();
+        viewport.setDocument(doc.get());
+        viewport.setZoomLevel(1.0);
+        viewport.setPanOffset(QPointF(0, 0));
+        viewport.setCurrentTool(ToolType::Pen);
+        const QRectF page0 = viewport.pageRect(0);
+        const QPointF offPage = viewport.documentToViewport(QPointF(page0.left() - 60.0, page0.center().y()));
+        const QPointF onPage = viewport.documentToViewport(page0.center());
+        const QPointingDevice* pen = QPointingDevice::primaryPointingDevice();
+        const auto mouseHover = [&viewport](QPointF p) {
+            QMouseEvent move(QEvent::MouseMove, p, p, Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(&viewport, &move);
+        };
+        const auto penHover = [&viewport, pen](QPointF p) {
+            QTabletEvent move(QEvent::TabletMove, pen, p, p, 0.0, 0, 0, 0.0, 0.0, 0, Qt::NoModifier,
+                              Qt::NoButton, Qt::NoButton);
+            QApplication::sendEvent(&viewport, &move);
+        };
+        bool ok = true;
+        const char* why = "";
+        mouseHover(offPage);
+        if (viewport.cursor().shape() != Qt::OpenHandCursor) {
+            ok = false;
+            why = "a mouse over the empty space must show the open hand";
+        }
+        penHover(onPage);
+        if (ok && viewport.cursor().shape() != Qt::ArrowCursor) {
+            ok = false;
+            why = "the pen hovering onto a page must take the hand away";
+        }
+        penHover(offPage);
+        if (ok && viewport.cursor().shape() != Qt::OpenHandCursor) {
+            ok = false;
+            why = "the pen over the empty space shows the hand like the mouse";
+        }
+        // The mouse leaves while the hand shows: the pen coming back finds the pen's cursor.
+        QEvent leave(QEvent::Leave);
+        QApplication::sendEvent(&viewport, &leave);
+        if (ok && viewport.cursor().shape() != Qt::ArrowCursor) {
+            ok = false;
+            why = "leaving the view must take the hand away";
+        }
+        // After a pan the hand comes back on the next hover over the empty space.
+        mouseHover(offPage);
+        viewport.updateHighlighterCursor();   // what the end of a pan does
+        mouseHover(offPage + QPointF(-5, 0));
+        if (ok && viewport.cursor().shape() != Qt::OpenHandCursor) {
+            ok = false;
+            why = "after a pan the empty space must show the hand again";
+        }
+        viewport.hide();
+        viewport.setDocument(nullptr);
+        DocumentViewport::setPanOutsidePagesEnabled(savedSetting);
+        if (!ok) return fail(why);
+#endif
+        printf("PASSED\n");
+        return true;
+    }
+
+    /**
      * @brief Test left/current and right/alternate ObjectSelect mode resolution.
      */
     static bool testObjectAlternateMouseMode() {
@@ -6525,6 +6603,34 @@ public:
                 return fail("the eraser must remove the shape alone");
         }
 
+        // The marker makes the same arrows; a marker head does not finish a pen line.
+        {
+            auto doc = Document::createNew("Marker arrows");
+            VectorLayer* layer = doc->page(0)->activeLayer();
+            DocumentViewport vp;
+            eraserTestSetupPaged(vp, doc.get(), 1000, 800, 1.0);
+            const QPointF o = vp.pagePosition(0);
+            vp.setCurrentTool(ToolType::Marker);
+            draw(vp, o, wobblyLine, false);
+            draw(vp, o, vee, false);
+            if (layer->strokeCount() != 1 || layer->strokes().last().arrowEnd != StrokeStyle::Open
+                || !layer->strokes().last().isMarker())
+                return fail("a V at the end of a marker line must turn it into a marker arrow");
+            draw(vp, o + QPointF(0, 200), {{100, 300}, {250, 270}, {400, 260}, {378, 252}, {399, 261}, {380, 275}},
+                 false);
+            if (layer->strokeCount() != 2 || layer->strokes().last().arrowEnd != StrokeStyle::Open)
+                return fail("a marker line that draws its own head must become an arrow");
+            // SN_TEST_SHOTS=<folder>: how the marker arrows look.
+            const QString shots = qEnvironmentVariable("SN_TEST_SHOTS");
+            if (!shots.isEmpty()) vp.grab().save(shots + QStringLiteral("/f3_marker_arrows.png"));
+            vp.setCurrentTool(ToolType::Pen);
+            draw(vp, o + QPointF(0, 400), wobblyLine, false);
+            vp.setCurrentTool(ToolType::Marker);
+            draw(vp, o + QPointF(0, 400), vee, false);
+            if (layer->strokeCount() != 4 || layer->strokes()[2].arrowEnd != StrokeStyle::None)
+                return fail("a marker head must not finish a pen line");
+        }
+
         // Edgeless: the shaft is stored in its tile's coordinates, the head in the document's.
         {
             auto doc = Document::createNew("Edgeless arrows", Document::Mode::Edgeless);
@@ -7323,9 +7429,23 @@ public:
         shape.updateBoundingBox();
         layer->addStroke(shape);
 
+        // The panel slider: pressed, moved, released.
+        const auto slide = [&vp](qreal fraction) {
+            vp.beginCornerRadius();
+            vp.previewCornerRadius(fraction);
+            vp.commitCornerRadius();
+        };
+        const auto radiusOf = [](const VectorStroke& s) {
+            QVector<QPointF> pts;
+            for (const StrokePoint& pt : s.points) pts << pt.pos;
+            return ShapeCleaner::cornerRadius(pts, s.cornerJoints, 3.0);
+        };
+
         vp.setCurrentTool(ToolType::Pen);
         vp.selectByFingerTap(vp.documentToViewport(o + QPointF(200, 100)));
-        if (!vp.m_lassoSelection.isValid() || !vp.canEditPoints() || vp.editPoints() || vp.cornerStep() != 1) {
+        // Radius 9 on sides of 200: the slider at sqrt(9 / 100).
+        if (!vp.m_lassoSelection.isValid() || !vp.canEditPoints() || vp.editPoints()
+            || qAbs(vp.cornerFraction() - 0.3) > 0.01) {
             return fail("a tapped cleaned square must offer Edit points, off, with small corners");
         }
         shot("a4_1_box");
@@ -7350,22 +7470,49 @@ public:
         }
         shot("a4_3_corner_dragged");
         undoBefore = vp.m_undoStack.size();
-        vp.setCornerStep(0);
+        slide(0.0);
         const VectorStroke& sharp = layer->strokes().last();
-        QVector<QPointF> pts;
-        for (const StrokePoint& pt : sharp.points) pts << pt.pos;
-        if (vp.m_undoStack.size() != undoBefore + 1 || ShapeCleaner::roundingStep(pts, sharp.cornerJoints, 3.0) != 0
-            || !samePt(cornersOf(sharp)[2], QPointF(350, 320)) || vp.cornerStep() != 0) {
+        if (vp.m_undoStack.size() != undoBefore + 1 || radiusOf(sharp) != 0.0
+            || !samePt(cornersOf(sharp)[2], QPointF(350, 320)) || vp.cornerFraction() != 0.0) {
             return fail("sharp corners must rebuild the shape on its corners, in one undo step");
         }
         shot("a4_4_sharp");
-        vp.setCornerStep(1);
-        if (vp.cornerStep() != 1 || vp.m_undoStack.size() != undoBefore + 2 || layer->strokeCount() != 1) {
+        // Moving redraws the selected shape and adds no undo step; the release adds one.
+        vp.beginCornerRadius();
+        vp.previewCornerRadius(0.8);   // Shortest side 200: radius 0.64 x 100
+        if (vp.m_undoStack.size() != undoBefore + 1
+            || qAbs(radiusOf(vp.m_lassoSelection.selectedStrokes.first()) - 64.0) > 0.5) {
+            return fail("the slider must redraw the shape while it moves, with no undo step");
+        }
+        shot("a4_5_sliding");
+        vp.previewCornerRadius(0.3);
+        vp.commitCornerRadius();
+        if (qAbs(vp.cornerFraction() - 0.3) > 0.01 || vp.m_undoStack.size() != undoBefore + 2
+            || layer->strokeCount() != 1 || qAbs(radiusOf(layer->strokes().last()) - 9.0) > 0.1) {
             return fail("round corners again must be one more undo step");
         }
-        shot("a4_5_round_again");
-        vp.clearLassoSelection();
+        shot("a4_6_round_again");
+        vp.beginCornerRadius();
+        vp.commitCornerRadius();
+        if (vp.m_undoStack.size() != undoBefore + 2) {
+            return fail("a slider let go where it was must add no undo step");
+        }
+        // Moved, then brought back to where it began: no step, nothing pending.
+        const qreal f0 = vp.cornerFraction();
+        vp.beginCornerRadius();
+        vp.previewCornerRadius(0.8);
+        vp.previewCornerRadius(f0);
+        vp.commitCornerRadius();
+        if (vp.m_undoStack.size() != undoBefore + 2 || vp.m_lassoSelection.hasTransform()
+            || qAbs(radiusOf(vp.m_lassoSelection.selectedStrokes.first()) - 9.0) > 0.1) {
+            return fail("a slider moved and brought back must leave no undo step and no pending change");
+        }
+        // Undo with the shape still selected: the selection lets go, so the
+        // rounded shape it held does not float over the shape that comes back.
         vp.undo();
+        if (vp.m_lassoSelection.isValid() || layer->strokeCount() != 1 || radiusOf(layer->strokes().last()) != 0.0) {
+            return fail("undo with the shape selected must let go and give the sharp shape back");
+        }
         vp.undo();
         vp.undo();
         c = cornersOf(layer->strokes().last());
@@ -7381,11 +7528,18 @@ public:
         page->addObject(std::move(owned));
         vp.setCurrentTool(ToolType::ObjectSelect);
         vp.selectObject(tri, false);
-        if (!vp.canEditPoints() || vp.cornerStep() != 1) {
+        const auto halfShortest = [](const QVector<QPointF>& c) {
+            qreal s = 1e9;
+            for (int i = 0; i < c.size(); ++i) s = qMin(s, QLineF(c[i], c[(i + 1) % c.size()]).length());
+            return 0.5 * s;
+        };
+        if (!vp.canEditPoints()
+            || qAbs(vp.cornerFraction()
+                    - std::sqrt(ShapeCleaner::stepRadius(1, tri->lineWidth) / halfShortest(tri->corners()))) > 0.01) {
             return fail("a selected triangle must offer Edit points");
         }
         vp.setEditPoints(true);
-        shot("a4_6_tri_edit_on");
+        shot("a4_7_tri_edit_on");
         const QPointF right = tri->corners()[1];
         if (vp.objectHandleAtPoint(vp.documentToViewport(o + right)) != DocumentViewport::HandleHit::Corner) {
             return fail("a triangle in Edit points must have a handle on its corner");
@@ -7400,15 +7554,24 @@ public:
             || vp.m_undoStack.size() != undoBefore + 1) {
             return fail("dragging a triangle's corner must move it only, in one undo step");
         }
-        shot("a4_7_tri_dragged");
-        vp.setCornerStep(3);
-        shot("a4_8_tri_large");
-        if (tri->roundness != 3 || vp.m_undoStack.size() != undoBefore + 2) {
-            return fail("the rounding of a shape must be one undo step");
+        shot("a4_8_tri_dragged");
+        vp.beginCornerRadius();
+        vp.previewCornerRadius(0.5);
+        if (vp.m_undoStack.size() != undoBefore + 1
+            || qAbs(tri->cornerRadius - 0.25 * halfShortest(tri->corners())) > 0.01) {
+            return fail("the slider must round a shape while it moves, with no undo step");
+        }
+        vp.previewCornerRadius(1.0);
+        vp.commitCornerRadius();
+        shot("a4_9_tri_round");
+        const QJsonObject saved = tri->toJson();
+        if (qAbs(tri->cornerRadius - halfShortest(tri->corners())) > 0.01 || vp.m_undoStack.size() != undoBefore + 2
+            || qAbs(saved["cornerRadius"].toDouble() - tri->cornerRadius) > 1e-9 || saved["roundness"].toInt() != 3) {
+            return fail("the rounding of a shape must be one undo step, saved with its nearest step");
         }
         vp.undo();
         vp.undo();
-        if (tri->roundness != 1 || !samePt(tri->corners()[1], right)) {
+        if (tri->roundness != 1 || tri->cornerRadius >= 0.0 || !samePt(tri->corners()[1], right)) {
             return fail("undo must bring the triangle back");
         }
         printf("PASSED\n");
@@ -8146,6 +8309,7 @@ public:
         runTest(testPdfCache, "testPdfCache");
         runTest(testPointerEvents, "testPointerEvents");
         runTest(testOffPagePanFromEmptySpace, "testOffPagePanFromEmptySpace");
+        runTest(testHandCursorFollowsThePen, "testHandCursorFollowsThePen");
         runTest(testObjectAlternateMouseMode, "testObjectAlternateMouseMode");
         runTest(testObjectGestureCancellation, "testObjectGestureCancellation");
         runTest(testObjectPageContainment, "testObjectPageContainment");

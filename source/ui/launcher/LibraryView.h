@@ -1,6 +1,7 @@
 #ifndef LIBRARYVIEW_H
 #define LIBRARYVIEW_H
 
+#include <QIcon>
 #include <QPointer>
 #include <QTimer>
 #include <QWidget>
@@ -21,8 +22,14 @@ class QTreeWidgetItem;
  * click or a long press (finger, pen or mouse). Drag and drop orders a column,
  * and moves a note or a section into another section.
  *
+ * Notebooks show their cover like books (Step N3, setting library/showCovers);
+ * notes show their cover, else the cached picture of page 1 (Step N4). A note
+ * without a picture gets one on an idle tick, one note at a time, only while
+ * this page is visible.
+ *
  * Settings ("SpeedyNote"/"App"): library/notebooks (the known notebook folders),
- * library/lastNotebook, library/lastSection, library/lastParentDir.
+ * library/lastNotebook, library/lastSection, library/lastParentDir,
+ * library/showCovers (true).
  */
 class LibraryView : public QWidget {
     Q_OBJECT
@@ -33,9 +40,18 @@ public:
     /// Reads the known notebooks and the chosen one again (folder names only).
     void reload();
 
+    /// Moves a note or a section into dir, just before beforeName (also used by
+    /// "Move to a Notebook..." of the start screen, Step N2). Notes in it that
+    /// are open close first (the editor asks to save); the start screen, the
+    /// stars and the remembered choices follow. Returns the new path, or empty
+    /// when cancelled or refused (a box says why).
+    static QString moveNoteInto(QWidget* parent, const QString& path, const QString& dir,
+                                const QString& beforeName = QString());
+
 signals:
     void noteOpenRequested(const QString& bundlePath);
-    void newNoteRequested(const QString& bundlePath, bool edgeless);
+    /// folder: the section the New note window starts in.
+    void newNoteRequested(const QString& folder, bool edgeless);
 
 protected:
     void showEvent(QShowEvent* event) override;
@@ -64,8 +80,10 @@ private:
     void setEntryColor(const QString& path, bool clear);
     void deleteEntry(const QString& path);
     void moveEntry(const QString& path, const QString& dir, const QString& beforeName);
-    bool releaseNotes(const QString& path, QStringList* notes);
-    void followNotes(const QString& oldRoot, const QString& newRoot, const QStringList& notes);
+    void editCover(const QString& path);
+    QIcon notebookIcon(const QString& path) const;
+    QIcon noteIcon(const QString& path);  ///< queues a missing picture
+    void makeNextThumbnail();
 
     QListWidget* m_notebooks = nullptr;
     QTreeWidget* m_sections = nullptr;
@@ -75,6 +93,9 @@ private:
     QTimer m_holdTimer;  ///< long press = right click
     QPointer<QWidget> m_holdTarget;
     QPoint m_holdPos;
+
+    QStringList m_thumbQueue;  ///< notes of the column without a picture yet
+    QTimer m_thumbTimer;
 };
 
 #endif // LIBRARYVIEW_H

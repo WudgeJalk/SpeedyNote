@@ -1,9 +1,15 @@
 #include "DocumentSettingsDialog.h"
 #include "../widgets/LengthSpinBox.h"
+#include "../widgets/PaperCombo.h"
 #include "../../MainWindow.h"
 #include "../../core/Document.h"
 #include "../../core/Page.h"
+#include "../../core/Paper.h"
 
+#include <QDir>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QMessageBox>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -179,6 +185,22 @@ void DocumentSettingsDialog::createPageTab()
     bgStyleCombo->addItem(tr("None"), static_cast<int>(Page::BackgroundType::None));
     bgStyleCombo->addItem(tr("Grid"), static_cast<int>(Page::BackgroundType::Grid));
     bgStyleCombo->addItem(tr("Lines"), static_cast<int>(Page::BackgroundType::Lines));
+    // Then every paper drawn by code; an endless canvas lists only endless ones
+    // and no picture.
+    const bool edgeless = m_doc && m_doc->isEdgeless();
+    PaperCombo::addPapers(bgStyleCombo, edgeless);
+    if (!edgeless) {
+        bgStyleCombo->insertSeparator(bgStyleCombo->count());
+        const QFileInfoList mine = QDir(Paper::userPapersDir())
+            .entryInfoList({QStringLiteral("*.png")}, QDir::Files, QDir::Name);
+        for (const QFileInfo& file : mine) {
+            bgStyleCombo->addItem(tr("My paper: %1").arg(file.completeBaseName()),
+                                  QStringLiteral("file:") + file.absoluteFilePath());
+        }
+        bgStyleCombo->addItem(tr("Add a paper from a PDF or picture..."), QStringLiteral("add:"));
+        connect(bgStyleCombo, QOverload<int>::of(&QComboBox::activated),
+                this, &DocumentSettingsDialog::onPaperActivated);
+    }
     styleLayout->addWidget(bgStyleCombo, 1);
     layout->addLayout(styleLayout);
 
@@ -241,6 +263,12 @@ void DocumentSettingsDialog::createPageTab()
     lineSpacingLayout->addWidget(lineSpacingSpin);
     lineSpacingLayout->addStretch();
     layout->addLayout(lineSpacingLayout);
+    // The spacing belongs to Grid and Lines; a paper brings its own.
+    connect(bgStyleCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
+        const bool classic = PaperCombo::paperId(bgStyleCombo).isEmpty();
+        gridSpacingSpin->setEnabled(classic && m_doc);
+        lineSpacingSpin->setEnabled(classic && m_doc);
+    });
 
     layout->addStretch();
 
@@ -276,6 +304,28 @@ void DocumentSettingsDialog::chooseGridColor()
         selectedGridColor = chosen;
         gridColorButton->setStyleSheet(QString("background-color: %1").arg(selectedGridColor.name()));
     }
+}
+
+void DocumentSettingsDialog::onPaperActivated(int index)
+{
+    if (bgStyleCombo->itemData(index).toString() != QLatin1String("add:")) {
+        lastPaperIndex = index;
+        return;
+    }
+    const QString source = QFileDialog::getOpenFileName(
+        this, tr("Add a Paper"), QString(),
+        tr("PDF or picture (*.pdf *.png *.jpg *.jpeg *.bmp *.webp)"));
+    QString error;
+    const QString png = source.isEmpty() ? QString() : Paper::importUserPaper(source, &error);
+    if (png.isEmpty()) {
+        if (!error.isEmpty()) QMessageBox::warning(this, tr("Add a Paper"), error);
+        bgStyleCombo->setCurrentIndex(lastPaperIndex);
+        return;
+    }
+    bgStyleCombo->insertItem(index, tr("My paper: %1").arg(QFileInfo(png).completeBaseName()),
+                             QStringLiteral("file:") + png);
+    bgStyleCombo->setCurrentIndex(index);
+    lastPaperIndex = index;
 }
 
 void DocumentSettingsDialog::onPageSizePresetChanged(int index)
@@ -558,12 +608,27 @@ void DocumentSettingsDialog::loadSettings()
     // Background: prefill from the document's current document-wide defaults.
     loadedBgTypeValue = static_cast<int>(m_doc->defaultBackgroundType);
     if (bgStyleCombo) {
-        int styleIdx = bgStyleCombo->findData(loadedBgTypeValue);
-        // findData returns -1 for a PDF/Custom-typed default (no combo entry,
-        // matching the Control Panel which never lists them); display None but
-        // remember it wasn't listed so applyChanges() preserves the real type.
-        bgTypeInCombo = (styleIdx >= 0);
-        bgStyleCombo->setCurrentIndex(bgTypeInCombo ? styleIdx : 0);
+        // The note's own paper (a picture already in its assets) is listed
+        // before "Add a paper...".
+        const int addIndex = bgStyleCombo->findData(QStringLiteral("add:"));
+        if (!m_doc->defaultCustomImage.isEmpty() && addIndex >= 0) {
+            bgStyleCombo->insertItem(addIndex, tr("This note's own paper"),
+                                     QStringLiteral("custom:") + m_doc->defaultCustomImage);
+        }
+        // A PDF-typed default (or a Custom one without its picture) has no
+        // entry, matching the Control Panel which never lists them; display
+        // None but remember it wasn't listed so applyChanges() preserves the
+        // real type.
+        if (!m_doc->defaultCustomImage.isEmpty()
+            && m_doc->defaultBackgroundType == Page::BackgroundType::Custom) {
+            const int idx = bgStyleCombo->findData(QStringLiteral("custom:") + m_doc->defaultCustomImage);
+            bgTypeInCombo = idx >= 0;
+            if (bgTypeInCombo) bgStyleCombo->setCurrentIndex(idx);
+        } else {
+            bgTypeInCombo = PaperCombo::select(bgStyleCombo, m_doc->defaultPaperId, loadedBgTypeValue);
+        }
+        if (!bgTypeInCombo) bgStyleCombo->setCurrentIndex(0);
+        lastPaperIndex = loadedPaperIndex = bgStyleCombo->currentIndex();
     }
     if (bgColorButton) {
         selectedBgColor = m_doc->defaultBackgroundColor;
@@ -624,7 +689,12 @@ void DocumentSettingsDialog::applyChanges()
     // the defaults + every page/tile, preserves PDF backgrounds, redraws, and
     // refreshes thumbnails). Only apply when something changed, so a no-op OK
     // doesn't dirty the document or trigger a full redraw/thumbnail rebuild.
-    if (bgStyleCombo && mainWindowRef) {
+    // Item data: a type number (None/Grid/Lines), a paper id, "file:<png>" (a
+    // paper of your own, copied into the note now), "custom:<name>" (the
+    // note's own paper) or "add:" (nothing chosen).
+    const QVariant bgData = bgStyleCombo ? bgStyleCombo->currentData() : QVariant();
+    const QString bgKey = bgData.userType() == QMetaType::QString ? bgData.toString() : QString();
+    if (bgStyleCombo && mainWindowRef && bgKey != QLatin1String("add:")) {
         // Resolve the target type. When the document's original type isn't one of
         // the listed styles (PDF/Custom) and the user left the fallback selection
         // untouched (index 0), preserve the original type rather than clobbering
@@ -635,18 +705,45 @@ void DocumentSettingsDialog::applyChanges()
         } else {
             typeValue = loadedBgTypeValue;
         }
-        const auto type = static_cast<Page::BackgroundType>(typeValue);
-        const int gridSpacing = gridSpacingSpin ? gridSpacingSpin->value() : m_doc->defaultGridSpacing;
-        const int lineSpacing = lineSpacingSpin ? lineSpacingSpin->value() : m_doc->defaultLineSpacing;
+        auto type = static_cast<Page::BackgroundType>(typeValue);
+        int gridSpacing = gridSpacingSpin ? gridSpacingSpin->value() : m_doc->defaultGridSpacing;
+        int lineSpacing = lineSpacingSpin ? lineSpacingSpin->value() : m_doc->defaultLineSpacing;
+
+        QString paperId, customImage, error;
+        bool ok = true;
+        if (bgStyleCombo->currentIndex() == loadedPaperIndex) {
+            // Untouched: keep the note's paper as it is, even one this version
+            // does not know.
+            type = m_doc->defaultBackgroundType;
+            paperId = m_doc->defaultPaperId;
+            customImage = m_doc->defaultCustomImage;
+        } else if (bgKey.startsWith(QLatin1String("file:"))) {
+            customImage = Paper::adoptUserPaper(bgKey.mid(5), m_doc->bundlePath(), &error);
+            ok = !customImage.isEmpty();
+        } else if (bgKey.startsWith(QLatin1String("custom:"))) {
+            customImage = bgKey.mid(7);
+        } else if (!bgKey.isEmpty()) {
+            paperId = bgKey;
+            int spacing = 0;
+            Paper::fallbackFor(paperId, &type, &spacing);
+            if (spacing > 0) gridSpacing = lineSpacing = spacing;
+        }
+        if (!customImage.isEmpty()) type = Page::BackgroundType::Custom;
+
         const bool bgChanged =
             type != m_doc->defaultBackgroundType ||
             selectedBgColor != m_doc->defaultBackgroundColor ||
             selectedGridColor != m_doc->defaultGridColor ||
             gridSpacing != m_doc->defaultGridSpacing ||
-            lineSpacing != m_doc->defaultLineSpacing;
-        if (bgChanged) {
+            lineSpacing != m_doc->defaultLineSpacing ||
+            paperId != m_doc->defaultPaperId ||
+            customImage != m_doc->defaultCustomImage;
+        if (!ok) {
+            QMessageBox::warning(this, tr("Add a Paper"), error);
+        } else if (bgChanged) {
             mainWindowRef->applyBackgroundSettings(
-                type, selectedBgColor, selectedGridColor, gridSpacing, lineSpacing);
+                type, selectedBgColor, selectedGridColor, gridSpacing, lineSpacing,
+                paperId, customImage);
         }
     }
 

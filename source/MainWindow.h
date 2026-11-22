@@ -51,6 +51,8 @@ class QThread;
 // PDF Search
 class PdfSearchBar;
 class PdfSearchEngine;
+class AutoSaver;
+struct NewNoteSpec;
 struct PdfSearchMatch;
 struct PdfSearchState;
 // PdfOutlineItem must be a COMPLETE type here (not just forward-declared): a
@@ -191,9 +193,14 @@ public:
      * @param gridColor Grid/line color
      * @param gridSpacing Grid spacing in pixels
      * @param lineSpacing Line spacing in pixels
+     * @param paperId A paper drawn by code (core/Paper.h); its fallback replaces
+     *        type and spacing. Empty clears the paper.
+     * @param customImage A paper of your own, already in the note's assets/images.
      */
     void applyBackgroundSettings(Page::BackgroundType type, const QColor& bgColor,
-                                 const QColor& gridColor, int gridSpacing, int lineSpacing);
+                                 const QColor& gridColor, int gridSpacing, int lineSpacing,
+                                 const QString& paperId = QString(),
+                                 const QString& customImage = QString());
 
     QColor getDefaultPenColor();
     void setPdfDarkModeEnabled(bool enabled);
@@ -245,9 +252,16 @@ public:
      * Used when a document needs to be closed before an external operation:
      * - Rename: discardChanges=false (save first, then rename)
      * - Delete: discardChanges=true (just close, file will be deleted anyway)
+     * @param bundlePath When set, only the note open from that folder (a copy
+     *                   made outside SpeedyNote has the same id).
      */
-    bool closeDocumentById(const QString& documentId, bool discardChanges = false);
-    
+    bool closeDocumentById(const QString& documentId, bool discardChanges = false,
+                           const QString& bundlePath = QString());
+
+    /// Opens a note left without a place by a crash (Step R3), titled "(recovered)",
+    /// or, with recovered = false, a copy made from an earlier version (Step R4).
+    void openRecoveredNote(const QString& bundlePath, bool recovered = true);
+
     /**
      * @brief Show PDF open dialog and open selected PDF in a new tab.
      * 
@@ -290,21 +304,19 @@ public:
     // New: Keyboard mapping methods (made public for ControlPanelDialog)
     // REMOVED MW7.6: addKeyboardMapping, removeKeyboardMapping, and getKeyboardMappings removed - old mapping system deleted
 
-    void addNewTab();
-    
     /**
-     * @brief Create a new tab with an edgeless (infinite canvas) document.
-     * 
-     * Edgeless mode provides an infinite canvas where tiles are created
-     * on-demand as the user draws.
+     * @brief The one way to make a note (Step N1): the New note window (unless
+     * newNote/ask is off and !forceShow), then createNote().
+     * @param folderHint Where the window starts (a Library section); empty = the last place.
      */
-    void addNewEdgelessTab();
+    void newNote(bool edgeless = false, const QString& folderHint = QString(), bool forceShow = false);
 
     /**
-     * @brief New paged or edgeless tab, saved at once as bundlePath (a .snb in a
-     * library section), so the note exists where the user made it.
+     * @brief Makes the note of spec, saves it at its place at once and opens it
+     * in a new tab. A failed save asks (SaveErrorBox); the note then stays open
+     * without a place, kept safe in <AppData>/unsaved.
      */
-    void addNewTabAt(const QString& bundlePath, bool edgeless);
+    Document* createNote(const NewNoteSpec& spec);
 
     /**
      * TEMPORARY: Load edgeless document from .snb bundle directory.
@@ -603,7 +615,25 @@ private:
      * Used by saveDocument(), tab close handlers, and window close event.
      */
     bool saveNewDocumentWithDialog(Document* doc);
-    
+
+    /**
+     * @brief Save a note that has a place on disk. On failure, SaveErrorBox
+     *        asks: try again, save to another place, or cancel.
+     * @return true once the note is saved (in place or elsewhere).
+     */
+    bool saveInPlaceOrAsk(Document* doc);
+
+    /**
+     * @brief Closing a note while autosave is on (Step R1): a note with a
+     *        place is saved without a question (a failure asks); a note without
+     *        a place that holds work asks "Keep this note?".
+     * @return true when the note may close.
+     */
+    bool closeWithAutosave(Document* doc);
+
+    /// Shows the autosave state of the current note in the NavigationBar.
+    void refreshSaveSign();
+
     /**
      * @brief Phase P.4.6: Render a thumbnail for page 0 of a document.
      * @param doc The document to render from.
@@ -691,6 +721,7 @@ private:
     // Phase C.1.5: New tab system (QTabBar + QStackedWidget via TabManager)
     SplitViewManager *m_splitViewManager = nullptr;  // Manages split-view panes, tab bars, and viewports
     DocumentManager *m_documentManager = nullptr;  // Manages Document lifecycle
+    AutoSaver *m_autoSaver = nullptr;              // Step R1: notes save themselves
     
     // Toolbar extraction: NavigationBar (Phase A)
     NavigationBar *m_navigationBar = nullptr;

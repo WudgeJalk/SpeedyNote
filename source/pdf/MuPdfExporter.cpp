@@ -11,6 +11,7 @@
 #include "../core/DarkModeUtils.h"
 #include "../core/Document.h"
 #include "../core/Page.h"
+#include "../core/Paper.h"
 #include "../layers/VectorLayer.h"
 #include "../objects/ImageObject.h"
 #include "../objects/LinkObject.h"
@@ -1614,12 +1615,16 @@ static fz_buffer* buildBackgroundContentStream(fz_context* ctx, const Page* page
         gColor  = DarkModeUtils::invertColorLightness(gColor);
     }
     
-    // Check if we need to render any background
+    // Check if we need to render any background. A known paper replaces the
+    // grid or lines its type only names as the fallback for older versions.
+    const bool needsPaper = page->backgroundType != Page::BackgroundType::PDF
+                            && page->backgroundType != Page::BackgroundType::Custom
+                            && Paper::find(page->paperId);
     bool needsColorFill = (bgColor != Qt::white);
-    bool needsGrid = (page->backgroundType == Page::BackgroundType::Grid);
-    bool needsLines = (page->backgroundType == Page::BackgroundType::Lines);
-    
-    if (!needsColorFill && !needsGrid && !needsLines) {
+    bool needsGrid = !needsPaper && (page->backgroundType == Page::BackgroundType::Grid);
+    bool needsLines = !needsPaper && (page->backgroundType == Page::BackgroundType::Lines);
+
+    if (!needsColorFill && !needsGrid && !needsLines && !needsPaper) {
         return nullptr;  // Default white background, nothing to draw
     }
     
@@ -1642,7 +1647,12 @@ static fz_buffer* buildBackgroundContentStream(fz_context* ctx, const Page* page
             snprintf(cmd, sizeof(cmd), "0 0 %.4f %.4f re f\n", widthPt, heightPt);
             fz_append_string(ctx, buf, cmd);
         }
-        
+
+        if (needsPaper) {
+            const QByteArray ops = Paper::pdfOps(page->paperId, page->size, gColor, invertColors);
+            fz_append_data(ctx, buf, ops.constData(), static_cast<size_t>(ops.size()));
+        }
+
         // 2. Draw grid or lines
         if (needsGrid || needsLines) {
             float r = gColor.redF();
@@ -1727,6 +1737,7 @@ bool MuPdfExporter::renderBlankPage(int pageIndex)
     bool hasImages = !page->objects.empty();
     
     // Check for custom background image (also skip in annotations-only mode)
+    page->loadCustomBackground(m_document->bundlePath());
     bool hasCustomBackground = !m_options.annotationsOnly &&
                                (page->backgroundType == Page::BackgroundType::Custom && 
                                 !page->customBackground.isNull());

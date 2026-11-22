@@ -27,6 +27,9 @@ struct Params {
     qreal roughPercent = 12.0;
     qreal equalPercent = 12.0;    ///< Lengths this close (% of the longer) are made equal: circle, square, rhombus
     qreal angleSnapDeg = 12.0;    ///< Sides this close to parallel or to square are made so
+    /// Four sides with one parallel pair: the other pair must differ by more
+    /// than this for a trapezoid, else it is a box (rectangle, parallelogram).
+    qreal trapezoidDeg = 25.0;
     qreal levelDeg = 5.0;         ///< A clean shape this close to the page axes is made level
 };
 
@@ -55,8 +58,9 @@ qreal stepRadius(int step, qreal width);
  */
 QVector<QPointF> jointCorners(const QVector<QPointF>& pts, const QVector<int>& joints);
 
-/// The rounding step (0..3) that gives the corners of @p pts; -1 without valid joints.
-int roundingStep(const QVector<QPointF>& pts, const QVector<int>& joints, qreal width);
+/// The corner radius that gives the corners of @p pts (the largest of its
+/// corners; 0 sharp); -1 without valid joints.
+qreal cornerRadius(const QVector<QPointF>& pts, const QVector<int>& joints, qreal width);
 
 /**
  * @brief The cleaned line. A closed line becomes a perfect ellipse (a circle

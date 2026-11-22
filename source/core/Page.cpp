@@ -5,6 +5,7 @@
 // ============================================================================
 
 #include "Page.h"
+#include "Paper.h"
 #include "../objects/OcrTextObject.h"
 #include "../objects/TextBoxObject.h"
 #include <QUuid>       // Phase C.0.1: UUID generation for LinkObject position links
@@ -577,7 +578,17 @@ void Page::renderBackground(QPainter& painter, const QPixmap* pdfBackground, qre
         }
         return;
     }
-    
+
+    if (Paper::find(paperId)) {
+        // Papers are laid out in page pixels: draw them under a zoom transform.
+        painter.fillRect(pageRect, backgroundColor);
+        painter.save();
+        painter.scale(zoom, zoom);
+        Paper::paint(painter, paperId, QRectF(QPointF(0, 0), size), gridColor);
+        painter.restore();
+        return;
+    }
+
     // For None/Grid/Lines, use the shared helper
     // Note: spacing is scaled by zoom since we're drawing in zoomed coordinates
     renderBackgroundPattern(
@@ -600,11 +611,21 @@ void Page::renderBackgroundPattern(
     const QColor& gridColor,
     qreal gridSpacing,
     qreal lineSpacing,
-    qreal penWidth)
+    qreal penWidth,
+    const QString& paperId,
+    bool endless)
 {
     // Fill background color
     painter.fillRect(rect, bgColor);
-    
+
+    // An endless canvas only takes papers made for it; others draw their fallback.
+    if (const Paper::PaperDef* paper = Paper::find(paperId)) {
+        if (!endless || paper->endless) {
+            Paper::paint(painter, paperId, rect, gridColor, endless);
+            return;
+        }
+    }
+
     // Draw pattern based on type
     switch (bgType) {
         case BackgroundType::None:
@@ -717,7 +738,7 @@ void Page::renderObjectsWithAffinity(QPainter& painter, qreal zoom, int affinity
 
 // ===== Serialization =====
 
-QJsonObject Page::toJson() const
+QJsonObject Page::toJson(bool withStrokes) const
 {
     QJsonObject obj;
     
@@ -738,7 +759,9 @@ QJsonObject Page::toJson() const
     obj["gridColor"] = gridColor.name(QColor::HexRgb);  // Use 6-char hex (#RRGGBB) for clarity
     obj["gridSpacing"] = gridSpacing;
     obj["lineSpacing"] = lineSpacing;
-    // Note: customBackground pixmap is not serialized - path should be stored separately
+    // Optional (Step N): written only when set, so plain pages stay byte-identical.
+    if (!paperId.isEmpty()) obj["paper"] = paperId;
+    if (!customImage.isEmpty()) obj["customImage"] = customImage;
     
     // Bookmarks (Task 1.2.6)
     obj["isBookmarked"] = isBookmarked;
@@ -752,7 +775,7 @@ QJsonObject Page::toJson() const
     // Layers
     QJsonArray layersArray;
     for (const auto& layer : vectorLayers) {
-        layersArray.append(layer->toJson());
+        layersArray.append(layer->toJson(withStrokes));
     }
     obj["layers"] = layersArray;
     
@@ -798,7 +821,9 @@ std::unique_ptr<Page> Page::fromJson(const QJsonObject& obj)
     page->gridColor = QColor(obj["gridColor"].toString("#c8c8c8"));  // Gray (200,200,200) in 6-char hex
     page->gridSpacing = obj["gridSpacing"].toInt(32);
     page->lineSpacing = obj["lineSpacing"].toInt(32);
-    
+    page->paperId = obj["paper"].toString();
+    page->customImage = obj["customImage"].toString();
+
     // Bookmarks (Task 1.2.6)
     page->isBookmarked = obj["isBookmarked"].toBool(false);
     page->bookmarkLabel = obj["bookmarkLabel"].toString();
@@ -840,6 +865,12 @@ std::unique_ptr<Page> Page::fromJson(const QJsonObject& obj)
     return page;
 }
 
+void Page::loadCustomBackground(const QString& basePath)
+{
+    if (customImage.isEmpty() || !customBackground.isNull() || basePath.isEmpty()) return;
+    customBackground = Paper::userPaperPixmap(basePath + QStringLiteral("/assets/images/") + customImage);
+}
+
 int Page::loadImages(const QString& basePath)
 {
     if (basePath.isEmpty()) {
@@ -848,7 +879,8 @@ int Page::loadImages(const QString& basePath)
         #endif
         return 0;
     }
-    
+    loadCustomBackground(basePath);
+
     // CR-O2: Use virtual loadAssets() instead of type-specific code
     // This allows future object types with assets to work automatically.
     int loaded = 0;

@@ -739,10 +739,14 @@ public:
     /// "Edit points": a round handle on each corner instead of the box.
     bool editPoints() const { return m_editPoints && canEditPoints(); }
     void setEditPoints(bool on);
-    /// Rounding of the selected shape's corners (0 sharp .. 3 large); -1 when it has none to set.
-    int cornerStep() const;
-    /// Rebuild the selected shape with rounding @p step, as one undo step.
-    void setCornerStep(int step);
+    /// How round the selected shape's corners are, as the panel slider shows it:
+    /// 0 sharp .. 1 the roundest; -1 when it has none to set.
+    qreal cornerFraction() const;
+    /// The panel slider: begin, then preview as it moves (the shape is redrawn,
+    /// no undo), then commit: one undo step, none when nothing changed.
+    void beginCornerRadius();
+    void previewCornerRadius(qreal fraction);
+    void commitCornerRadius();
 
     /**
      * @brief Get the current pen minimum stroke width.
@@ -1388,6 +1392,8 @@ public:
     bool hasSelectedObjects() const { return !m_selectedObjects.isEmpty(); }
 
     bool hasActiveInlineTextEdit() const;
+    /// A pointer is down or a text is being typed: autosave waits (Step R1).
+    bool isEditInProgress() const { return m_pointerActive || hasActiveInlineTextEdit(); }
     bool inlineTextEditorHasFocus() const;
     bool textBoxFormatBarHasFocus() const;
     bool linkObjectBarHasFocus() const;
@@ -4965,6 +4971,9 @@ private:
      * everywhere else.
      */
     void updateHighlighterCursor();
+    /// The open hand over the empty space around the pages (mouse or pen hover);
+    /// the tool's cursor back over a page. True when @p viewportPos is off the pages.
+    bool updateOffPageHoverCursor(const QPointF& viewportPos);
     
     /**
      * @brief Add a point to the current stroke with point decimation.
@@ -5086,6 +5095,9 @@ private:
     int m_cornerDrag = -1;                ///< The corner being dragged
     QVector<QPointF> m_cornerBase;        ///< The lasso shape's corners when the drag began
     qreal m_cornerRadius = 0.0;           ///< Its corner radius, kept during the drag
+    qreal m_cornerRadiusShown = -1.0;     ///< The slider's radius on the lasso shape (-1: not moved)
+    VectorStroke m_cornerStrokeBefore;    ///< The lasso shape when the slider began
+    bool m_cornerBakedBefore = false;     ///< Its baked flag then
 
     // ===== Incremental Stroke Rendering (Task 2.3) =====
     

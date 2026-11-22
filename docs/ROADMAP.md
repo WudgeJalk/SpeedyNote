@@ -26,6 +26,198 @@ What is wrong with the others (the user's words, 2026-11-19):
 3. **The user decides.** Each new feature comes with its settings. Nothing is fixed if it can be a choice.
 4. **No feature needs a special pen.** Each pen shortcut also has a way with a finger, a mouse or a key. Not every tablet has a side button.
 
+## Where we are, and what is next (plan of 2026-11-22)
+
+Everything up to here is in git: commit `83087fe` on `custom/pen-and-ui`, pushed to the user's fork.
+
+### Built and tried by the user
+
+The floating two-level bar, the colours, the stroke presets, the three pen icons, the selected-tool pill, draw and hold, clean shapes, hand-drawn arrows with the pen, line end handles, "Edit points", the selection menu next to the selection, the ruler, the marker shapes.
+
+### Built, but not tried by the user yet
+
+| What | How to try it |
+|---|---|
+| The X button with unsaved work (it froze the app before) | On a throw-away note: draw one line, click the X. The save box must answer. |
+| Pen vibration (A4) | Settings > Stylus > Pen Vibration. Write, change tool, draw and hold. |
+| Library page (C1) | Start screen > Library. New notebook, sections, a note in a section, drag and drop, delete, Pack notebook. |
+| Fixes of 2026-11-21 | The three dots never minimise; their menu stays in the window; the settings window fits the screen; a tap on the selected tool hides its options; the tab bar after full screen. |
+| Laser pointer (B1) | K key. |
+| Earlier versions (R4) | In a note that has a place, draw and wait 5 s: the page as it was before is kept. The three dots > "Restore an Earlier Version...": pick a time, "Open as a Copy". After 15 min of changes there is a second time. Settings > Page > Saving. |
+| The four faults (F1-F4) | With a mouse, hover the grey space next to a page (hand), then write with the pen: the pen cursor. Draw quick rough boxes with tails and overlaps, then hold: rectangles. Marker: a line, then a V at its end. Select a clean shape, corners button: move the slider, then Ctrl+Z once. |
+| Papers drawn by code (N, stage S5) | The three dots > "Current Document Settings..." > Page > Background Style: pick Cornell, a month planner, a to-do list, staves. Zoom in and out, write on it, export to PDF. "Add a paper from a PDF or picture..." for your own. Settings > Page > Default Background sets the paper of new notes. |
+| The New note window (N1, stage S6) | Ctrl+N, the "+" of the title row, the round "+" of the start screen, or a section of the Library page: the window opens. Pick a size, a colour, landscape, a paper, the place (Where), then Create: the note opens, already saved there, with its picture on the start screen. Try "Endless canvas", "Add from a PDF or picture...", and "Do not ask again" (then + > "New Note with Options..." or Settings > Page brings the window back). |
+| Covers, move to a notebook, note pictures (N2-N4, stage S7) | New note window > Cover: pick a design, a colour, or "Picture...", then Create: the start screen card shows the cover. Library page > a notebook > right click > "Cover...": the notebooks column shows it as a book ("+" > "Show notebooks as covers" turns it off). Open a section: each note shows its cover or its first page; notes never opened get their picture within a second or two. Start screen > a card's menu > "Move to a Notebook...": pick a section. |
+| Autosave and recovery (R1, R3) | Draw in a note, stop: the sign right of its name turns into a check within 5 s. Close the note: no question. On a new note: draw, wait 5 s, end SpeedyNote in the Task Manager, start it again: the note is offered back. Settings > Page > Saving. |
+| Fixes after the review | Open a PDF directly, write on it, wait 5 s, end SpeedyNote in the Task Manager: the PDF is offered back. Settings: scroll over a list without clicking it, the page scrolls and the value stays. Start screen > Duplicate a note, open both. Ctrl+N with Settings > Page on Grid: the window shows "Grid, 32 px" first. |
+
+### Step R - Never lose notes (first of all)
+
+The user, 2026-11-22: "This is a work app. It must be robust. We do not want to lose weeks or months of notes." The X-button freeze already cost him his test notes twice.
+
+| # | Step | Size |
+|---|---|---|
+| R0 | **Check how a note is saved today.** Read the save code: is each file written to a temporary file and then renamed (so a crash in the middle cannot leave a half file)? What happens when the disk is full, the folder is read-only, or a sync tool holds a file? Write the answers here before any change. | S |
+| R1 | **Autosave.** The open note saves by itself: a short time after the pen stops (a setting, for example 5 s) and at least every few minutes, in the background, without a stutter while writing (rule 1). Only the pages that changed are written. A small sign shows "saved". A switch turns it off. | M |
+| R2 | **Safe writes.** Every file of a note is written to a temporary file, flushed, then renamed over the old one. A failed save says so clearly and keeps the old file. | S-M |
+| R3 | **Recovery after a crash or a freeze.** Changes not yet saved go to a small journal next to the note. At the next start the app says "This note has changes that were not saved" and offers to bring them back. | M |
+| R4 | **Backups.** The app keeps the last few versions of each page (a number and an age, both settings), in the note's folder. "Restore an earlier version" in the menu. | M |
+| R5 | **A watchdog test.** An automatic test that kills the app in the middle of a save, many times, and checks that the note always opens with either the old or the new content, never a broken one. | S |
+
+#### R0 answers: how a note was saved before Step R (checked in the code on 2026-11-22)
+
+- A note is a folder (`.snb`). `document.json` holds the settings and the list of pages. Each page is one file in `pages/` (each tile in `tiles/` for an endless note). Pictures are in `assets/images/`. OCR text sits next to each page (`.ocr.json`).
+- Each page, tile and `document.json` was written through `QSaveFile`: the data goes to a temporary file, is flushed to the disk, then renamed over the old file. So a crash in the middle of one file could not leave a half file.
+- But the note as a whole was not safe. `document.json` was written first, the pages after. A crash between the two left a list of pages that named page files never written. Those pages then failed to load.
+- The OCR files, the `.snb_marker` file and the library list were written straight over the old file. A crash there could leave a half file.
+- Disk full, read-only folder, a file held by a sync tool: the save stopped and the old files stayed. But the app only said "Failed to save document", without the reason.
+- When quitting, a failed save showed a box with only OK, and the app closed anyway. The changes were lost.
+- A Save As that failed early (a folder it could not create) left the note pointing at the new, unfinished folder.
+- An endless note: a tile emptied and drawn again before the save was written, then deleted in the same save. Its drawing was lost.
+- HarmonyOS cannot rename files in user folders, so there the files are written straight (unchanged, see `platform/BundleFile.h`).
+
+What Step R2 changed (stage S1):
+- One helper (`Document::commitFile`) writes every file of a note: temporary file, flushed, renamed. Not yet the markdown notes of `assets/notes/` (`MarkdownNote::saveToFile`, a plain write on every key typed): a commit there would flush to the disk on every key; it needs a short delay first (to do).
+- The order is now: pages and tiles first, `document.json` last, old files removed after. A crash at any moment leaves the old `document.json` with all its pages whole, or the new one with all its pages present. Each page holds its old or its new content, never a mix.
+- A failed save says why ("The disk is full." or "The folder is read-only, or a file is held by another program"), keeps the last saved version on disk, and offers: Try again, Save to another place, Cancel. Cancel when quitting stops the quit.
+- The library list is written the safe way too.
+- Test `--test-savecrash`: kills the app 40 times during saves, makes each file of a save fail in turn, and checks that the note always opens, each page old or new.
+
+What Steps R1 and R3 changed (stage S2):
+- **Autosave** (`core/AutoSaver`). A note saves itself 5 s after the last change, and at least every 2 minutes while you keep writing (at a 1 s pause). Never while a pen, finger or mouse is down, or while you type in a text box. Only the pages that changed are written.
+- The GUI thread only takes a copy of the changed pages (the strokes are shared, not copied) and their small settings. Turning the strokes into JSON, the writing and the flush to disk run on one worker thread. A change made while a save runs stays unsaved and goes into the next save. A page that a running save holds is not unloaded until the save ends.
+- Measured (debug build with AddressSanitizer, many times slower than the real app): a page of 400 strokes of 80 points costs the GUI thread 3 ms (1.1 s when the JSON was built there), 10 changed pages 7 ms; the event loop never stopped longer than 12 ms while the worker wrote.
+- A failed autosave does not ask anything. The sign turns red; autosave tries again 30 s later; a click on the sign gives the usual choices (try again, save to another place).
+- **The sign**, right of the note's name: a check ("Saved 14:05"), a circle while saving, a red triangle when a save failed. A new note without a place says "Kept safe. Press Ctrl+S to choose a place."
+- **Settings > Page > Saving**: "Save notes by themselves while you work" (on), "Save after a pause of" (5 s, 1-60), "Save at least every" (2 min, 1-30).
+- **Closing with autosave on**: a note that has a place is saved without a question. Only a failed save asks (with "Close without saving"). A new note without a place that holds work asks "Keep this note?": Save to..., Delete, Cancel. With autosave off, closing asks as before.
+- **New notes without a place** (paged and endless) live in a temporary folder `<AppData>/unsaved/` (before: the system temp folder, which Windows Storage Sense can empty), and autosave writes there.
+- **After a crash, a freeze or a kill**: at the next start, the notes without a place that hold work are offered: "SpeedyNote did not close properly. These notes were never saved to a place and were kept: ... [Open them] [Later]". They open as "(recovered)", still without a place. The old system temp folder is searched too. Then the usual "Restore Previous Session" box, with "Your notes were saved automatically up to the last few seconds." Notes that have a place need nothing more: autosave already wrote them where they belong. The list of open tabs is now kept after each tab opens or closes, so it survives a crash.
+- What can still be lost: the changes of the last few seconds (up to "Save after a pause of"). (A PDF opened directly has a temporary folder since the review fixes.)
+- Test `--test-autosave`: the timing rules with a fake clock, an edit during a save, a failed save and its retry, and a child process killed after an autosave whose note is then offered back with its strokes.
+
+What Step R4 changed (stage S3):
+- **Earlier versions** (`core/NoteVersions`). Before a save writes over a page, a tile or `document.json`, the old file is copied into the note's own folder: `versions/pages/<page>/<time>.json` (`versions/tiles/...`, `versions/document/...`). The name is the time the old content was written. A removed page is always kept. Pictures and OCR files get no versions. The copy runs on the autosave worker thread; only a page saved when it leaves memory copies on the GUI thread (at most once per page per spacing). A failed copy never fails the save.
+- **How many**: a new version of a page at most every 15 minutes; at most 10 per page; versions older than 30 days are deleted, but the newest one of each page stays. When a note opens, a worker thread deletes what is over these limits, and the versions of removed pages once they are too old.
+- **Disk use is bounded**: at most "versions kept per page" copies of each page you change (with the defaults, 10 times the size of the pages you changed). A page you never change has none. Measured: a heavy page of 400 strokes of 80 points is 903 KB, so its 10 versions take 9 MB at most; a page of handwriting is usually far smaller. After 30 days without a change, a page keeps one copy.
+- **Restore**: the note's menu (the three dots) > "Restore an Earlier Version...". It lists the times, newest first, with the current page as it was then. "Open as a Copy" makes a new note without a place (in `<AppData>/unsaved/`, named "<note> (<time>)"): each page as it was at that time, the pictures and PDFs of the note, a new id. Nothing of the note is overwritten. If some pages have no copy that old, the window says so and the copy has them as they are now. Paged and endless notes; the preview is for paged notes only.
+- **Settings > Page > Saving**: "Keep earlier versions of each page" (on), "New version at most every" (15 min, 1-240), "Versions kept per page" (10, 1-100), "Keep versions for" (30 days, 1-365).
+- Packing a notebook (`.snbpack`) or a note (`.snbx`) leaves `versions/` out; Save As does not copy it. Old app versions ignore the folder.
+- Fixed on the way: the settings window opened taller than the screen (the tabs kept the height they had before they could scroll).
+- Test `--test-versions`: spacing, count and age, which file is picked for a time, a real note saved, a page removed, copies at two times, a pack without versions, a picture of the window.
+
+Fixed after the review of stages S1-S7 (2026-11-22):
+- **A PDF that loses its last page** (all its pages deleted): its bundled copy was deleted by the next autosave, so Ctrl+Z brought the pages back without their PDF. Deleting pages now keeps their PDF for undo, and a save removes a bundled PDF only after the new `document.json` is written.
+- **Two folders with one id** (a Duplicate from the start screen, a copy made in Explorer): opening the copy pointed the open note at it, and autosave wrote there. Duplicate now gives the copy a new id and its own name. Opening a copy while the original is open says so and opens nothing. Deleting, renaming or moving a copy no longer closes the original.
+- **Earlier versions of a removed page**: kept for "Keep versions for" days counted from the removal (not from when the page was last written), and a copy at an earlier time has a removed page even when the manifests of that time are already pruned (it goes at the end of the note).
+- **Save As carries the whole `assets/` folder**, the markdown notes too (a note without a place lost them when it got one).
+- **A folder moved or deleted while its note is open** is never rebuilt as a half note at the old place, by autosave, by closing or by Ctrl+S: the save says "The note's folder was moved or deleted." and offers another place.
+- **A tile that fails to load** (a sync tool, an offline file) stays in the note; drawing there sets the old file aside (`tiles/x,y.json.unreadable-<time>`) before the new tile is written.
+- **A broken `document.json`** opens from its newest earlier version. On HarmonyOS a failed write no longer deletes the file it was writing.
+- **No writes on the GUI thread while autosave is on**: a changed page or tile that leaves the view stays in memory until autosave writes it (a change of paper on a 300-page note used to write 300 pages when the pen lifted). An OCR result for a tile that a running save holds no longer waits for that save.
+- **The corners slider** moved and brought back to where it began leaves nothing pending (undo used to leave a floating copy).
+- **The New note window keeps the classic Grid and Lines** of Settings > Page at their own spacing ("Grid, 32 px", first in Basic), instead of turning them into squared or lined paper and changing Settings > Page.
+- **A PDF opened directly** gets a temporary folder: its annotations are autosaved and offered back after a crash. Closing it with autosave on asks "Keep this note?" only when it was annotated.
+- **Your own paper from a PDF** is recognised by its content, and a PDF that Android hands over as `content://` is copied to a file first.
+- Not done: with autosave off, the changes of a note that has a place are not kept anywhere for a crash (R3 asks for a journal; it needs its own design). The markdown notes are still written directly (see R2). On iOS, "Add a paper from a PDF or picture..." still uses the plain file dialog.
+
+### Step F - Small faults found by the user on 2026-11-22
+
+| # | Fault | Wanted |
+|---|---|---|
+| F1 | In pen mode the cursor is sometimes a hand, not the pen tip. It still writes. | Always the pen cursor when the pen tool is active. Find what leaves the hand (after a pan, a finger touch, a selection, the option bar?). |
+| F2 | Not every hand-drawn rectangle becomes clean. In the user's picture of about 30 boxes, some stay wobbly, some keep a short tail where the stroke started or overshot, some become a trapezoid. | A box drawn fast, with an overlap or a small gap at the closing point, must still become a rectangle. Cut the tails. Prefer the rectangle over the trapezoid when the sides are nearly parallel. Test with many rough boxes. |
+| F3 | Hand-drawn arrows do not work with the highlighter. | Same arrow recognition for the marker as for the pen. |
+| F4 | The corner roundness is a menu with 4 steps (sharp, small, medium, large). | A slider in the small panel, from sharp to very round, that redraws the shape while it moves. One undo step. |
+| F5 | In the settings, a scroll (wheel, finger or pen) over a list or a number box changes its value. The user found his "Selection menu" setting changed to "at the side" without wanting it. | A list or a number box in the settings changes by scroll only after it was clicked (it has the focus). Otherwise the scroll moves the page. One event filter for the whole settings window. |
+
+What Step F changed (stage S4):
+- **F1, the hand in pen mode.** The cause: only the mouse set the open hand over the grey space around the pages. The pen's hover never reaches that code, so a hand left by a mouse or a touchpad stayed while the pen wrote. The hand also stayed when the pointer left the view. Now the pen's hover sets the hand and takes it away like the mouse, and leaving the view, the pen going away and the end of a pan give the tool's cursor back.
+- **F2, rough boxes.** Three changes in the shape cleaner. (1) The closing point is where the two ends of the line come nearest each other, so a tail at the start and an overshoot or an overlap at the end are both cut. (2) A corner where the fitted sides hardly turn (a wobble, a stub) is dropped. A corner rounded wide by a quick hand is found by a second look at half the points. (3) A box with one pair of sides parallel becomes a trapezoid only when the other pair differs by more than a new setting, Settings > Drawing > Shapes, "Trapezoid only when two opposite sides differ by over" (25°, 12-45°).
+- Measured on generated rough boxes (tails, overshoots, overlaps, gaps, 3 to 25 units between points, up to 20° tilted, sides up to 15° off): 27 of 30 became rectangles before, 30 of 30 now (169 of 200 before, 197 of 200 now). Rough trapezoids and parallelograms stay what they are (5 of 5 each); rough triangles 172 of 200 before, 194 now; rough circles and ellipses unchanged.
+- **F3, marker arrows.** Hand-drawn arrows now work with the marker too (a head after the line, or in the same stroke). A marker head does not finish a pen line, nor the other way round. The head is see-through like the line, without darker overlaps.
+- **F4, the roundness slider.** The corners button of the selection panel opens a slider "Sharp ... Round". The shape is redrawn while it moves; letting go is one undo step (none if nothing changed). Arrow keys or the wheel work too (the step is kept 0.3 s after the last key). It works on a cleaned shape (lasso) and on a fixed shape (rectangle, triangle, diamond; the rounded rectangle keeps its own corners). The round corners are drawn with twice as many points, so a large radius has no bump where it meets a side.
+- Saved: a fixed shape gets `"cornerRadius"` in its JSON only when the slider set it; `"roundness"` still holds the nearest of the old 4 steps, so an older version shows a rounding close to it. A cleaned stroke needs no new field.
+- Fixed on the way: undo or redo while a line or a shape stayed selected after an edit left the edited copy floating over the restored one. The selection now lets go first.
+- Tests: `--test-shapes` (30 rough boxes, trapezoids, parallelograms, the trapezoid setting), `--test-viewport-unit` (the hand and the pen, marker arrows, the slider and its undo).
+- **F5, scroll in the settings** (fixed after the review): every list, number box and slider of the settings window takes the wheel only once clicked; otherwise the page scrolls (`DialogSizing::wheelNeedsFocus`, one event filter).
+
+### Step N - A new note starts with a place and a paper (next feature)
+
+The user, 2026-11-22: "When we create a new paged notebook, we decide neither where to save it from the start, nor the colour of the background before it opens. A minimum of configuration."
+
+Today the round "+" button of the start screen makes a loose "untitled" note. It has no place on disk until the first save, and it takes the default paper. Only the Library page creates a note inside a section.
+
+| # | Step | Size |
+|---|---|---|
+| N1 | **"New note" window, as rich as the GoodNotes one** (the user's screenshot of 2026-11-22: "I would like to have as many possibilities"). One window for every way to make a note (the "+" of the start screen, the "+" of the title row, Ctrl+N, the Library page). Left side: the title, the cover (with its picture), the paper (with its picture). Top row: the page size (A4, A5, Letter, a size of your own...), the paper colour (white, yellow, dark, your own), portrait or landscape. Main part: a gallery of papers sorted in groups that fold: Basic (plain, lined, squared, dotted), Writing paper, Planning (monthly, weekly, to-do lists, accounting), Music (staves, guitar tablature), and more; each one with a small picture. Also: where the note goes (a notebook and a section of the library, or another folder; it starts in the last place used), and paged or endless paper. The note is saved at its place at once. A switch "do not ask, use my defaults" for the fast way (rule 3). The papers must be drawn by code or by small vector files so they stay sharp and cost nothing while writing (rule 1), and a paper that an old version of the app does not know must fall back to plain (rule 2). The user can add his own paper from a PDF or a picture. | L |
+| N2 | **An old loose `.snb` goes into the library.** It exists in the Library page ("Add an existing note here"). To add: the same action from the Chronologie and Favoris pages ("Move to a notebook..."), and drag a note from there onto a section. | S |
+| N3 | **Notebook covers** (part of C6; chosen in the "New note" window too). A notebook of the library shows a cover: a colour, a title, a picture or a ready-made design. Saved in the notebook's small file. The notebooks column can show covers like books on a shelf. | M |
+| N4 | **Small pictures of the notes** in the notes column of the Library page (first page of each note, made once and cached). | S |
+
+#### The papers of the "New note" window (from the user's GoodNotes screenshots, 2026-11-22)
+
+We draw our own version of each kind of paper. The list is the target for N1:
+
+| Group | Papers |
+|---|---|
+| Basic | Plain; dotted; lined, narrow; lined, wide; squared |
+| Writing paper | Cornell; legal (a red margin line); one column; one column, mixed; two columns; two columns, left; two columns, right; three columns |
+| Planning | Accounting; monthly planner (several kinds); weekly planner (several kinds); to-do lists |
+| Music | Guitar score; guitar tablature; music paper (staves) |
+
+Each paper works with each page size, each paper colour, and portrait or landscape.
+
+What the paper engine changed (stage S5):
+- **Papers drawn by code** (`core/Paper`). Each paper is a few rules in one table: ruled lines, a grid, dots, single lines, frames, cells, check boxes, and labels (weekday names, day numbers). A position is a share of the page side plus millimetres, so every paper fits every size, both ways. 25 papers: Basic (plain, dotted, lined narrow and wide, squared), Writing paper (Cornell, legal, one column, one column mixed, two columns, two columns left and right, three columns), Planning (accounting, month in a 5- or 6-week grid, month as a list, week in boxes, rows or columns, to-do list in one or two columns), Music (staves, guitar tablature, guitar score).
+- **Fast while writing.** The lines are built once and kept (last 32 page sizes). A pen event redraws only what lies under the pen. Lines closer than 2 screen pixels, dots closer than 3 and labels smaller than 4 are left out when zoomed far out. Measured twice (debug build with AddressSanitizer, A3): a 40x40 pen update costs 52-127 µs, 6 to 8 times less than the old grid at the same spacing (469-767 µs); a whole page of squared paper costs about the same as the old grid (8.3 against 9.3 ms, 13.6 against 14.2 ms).
+- **Sharp at every zoom**: lines are one screen pixel at any zoom; labels are shapes, not a picture. Weekday names follow the system language and its first day of the week.
+- **Endless canvas**: dotted, lined, squared and staves fill it, laid out from the world origin so the tiles join without a seam. Other papers draw their fallback there.
+- **Saved** (all optional, written only when used): a page gets `"paper"` (and `"customImage"` for your own paper); `default_background` in `document.json` gets `"paper"` and `"custom_image"`; new pages copy them. The page's old `backgroundType` keeps the paper's fallback: lined papers are "lines" with their spacing (24, 27, 33 or 34 px), squared is "grid" (19 px), the others "none". An older SpeedyNote shows ruled or plain paper; if it saves the page, the paper name is dropped and the page stays on its fallback. A paper name this version does not know draws its fallback and is kept.
+- **PDF export**: the paper goes into the PDF as vector lines and filled shapes (labels too, no fonts).
+- **Your own paper**: "Add a paper from a PDF or picture..." in the note's settings. The first page of a PDF (150 DPI) or a picture, at most 2400 px on its long side, is kept as a PNG in `<AppData>/papers` and listed as "My paper: <name>". When chosen, it is copied into the note (`assets/images/paper-<name>.png`) and stretched over each page. One picture in memory for all pages. The orphan cleanup keeps it; Save As, packing and versions copy it with the other pictures. Not for endless notes. An older version shows plain paper.
+- **Settings**: the background list of Settings > Page and of the note's settings lists every paper after None / Grid / Lines; the spacing boxes are greyed out when a paper brings its own. New setting `background/paper` (the paper of new notes; empty = the old type).
+- Fixed on the way: changing a note's background did not mark its pages as changed, so a page unloaded or reopened came back with its old background.
+- Test `--test-paper`: every paper inside A4, A5 and Letter both ways; endless tiles join; small repaints match one whole paint; saved keys; fallback; unknown names; PDF operators; a real PDF export read back; your own paper through save, cleanup and reload; timings; pictures in `%TEMP%` (`speedynote_papers*.png`, `speedynote_paper_*.png`).
+
+What the New note window changed (stage S6):
+- **One way to make a note** (`MainWindow::newNote`): Ctrl+N, Ctrl+Shift+N, the "+" of the title row, the macOS File menu, the round "+" of the start screen and the Library page all open the New note window (`ui/dialogs/NewNoteDialog`). Its Create calls `MainWindow::createNote`, which makes the note, puts the choices on it (`NewNote::apply`), **saves it at its place at once**, adds it to the start screen with its picture, and opens it. If that save fails, the usual box asks (try again, another place); on Cancel the note stays open without a place, kept safe like any new note.
+- **The window**, in the style of the start screen, light and dark: on the left the title ("Note 2026-11-22"), a picture of the page as chosen, its paper and size; at the top the page size (A3, B4, A4, B5, A5, Letter, Legal, Tabloid, a size of your own in mm or px), the paper colour (white, cream, yellow, dark, a colour of your own), portrait or landscape, pages or endless canvas; in the middle the papers in groups that fold (Basic, Writing paper, Planning, Music, My papers with "Add from a PDF or picture..."); at the bottom "Where" and "Do not ask again, use these settings". A tap chooses a paper, a double tap or Enter makes the note, a drag scrolls (finger, pen or mouse). With "Endless canvas" only papers that go on forever can be picked; a page paper gives way to the nearest one (lined, squared or plain) and comes back with "Pages". On a screen narrower than 700 px the parts stack and the page picture is left out.
+- **Where** (`ui/widgets/LibraryPlacePicker`): shows "Notebook › Section" for a place in the Library, else the folder. Its menu lists the notebooks and their sections from the Library, and "Another folder..." on a computer. It starts in the last place used, else the last save folder, else Documents/SpeedyNote (the app's notebooks folder on a phone or tablet). From the Library page it starts in the chosen section; the name prompt there is gone.
+- **Settings**: `newNote/ask` (on) is the switch of the window and is also in Settings > Page: "Show the New note window. Off: a new note uses your last choices at once." "+ > New Note with Options..." always shows it. The last choices: `newNote/place`, `newNote/landscape`, `newNote/edgeless` (the mode of "with options"), `newNote/customImage` (your own paper). Size, colour and paper are the ones of Settings > Page (`page/width`, `page/height`, `background/color`, `background/gridColor`, `background/paper` + `background/type`), so the window and the settings never disagree. Without a paper yet, the classic background of Settings > Page stays, at its spacing: the gallery shows it first as "Grid, 32 px" or "Lines, 32 px" (none → plain). An endless note does not change the paper or size of pages.
+- Settings > Page shows a size of your own as "Custom (...)" instead of turning it into US Letter on OK.
+- Nothing new in the note's files: the window writes the paper, size and colour keys of stage S5.
+- Small pictures of papers (`Paper::paintDrawing` gained a `detail` factor): the gallery shows each paper on an A5-tall page, so a 5 mm grid, dots and staves are still seen at tile size; the page picture on the left is exact.
+- Test `--test-newnote`: a note made from the choices (size, landscape, colour, Cornell and its fallback, your own paper copied into the note, an endless note), saved at once and loaded back, not marked changed; " (2)" for a name taken; "Notebook › Section"; remember then defaults; the window's Paged/Endless paper rules; pictures `%TEMP%\speedynote_newnote_{light,dark,landscape,endless}.png`. It puts back every setting and start-screen entry it touches.
+
+What covers, moving and note pictures changed (stage S7):
+- **Covers drawn by code** (`core/CoverPainter`): plain, spine (a dark band at the left), stripes, dots, frame, label (a white title box), linen, split, picture (your photo fills the cover). A colour, and the title on the cover or not. A cover is a small object `{"design", "color", "showTitle", "image"}`; only what differs from the defaults is written.
+- **The cover window** (`ui/widgets/CoverPicker`): a preview, the designs (and "No cover"), 13 colours and a colour of your own, "Show the title on the cover", "Picture...". Used by the New note window (the Cover row on the left) and by "Cover..." in a notebook's menu on the Library page.
+- **A note's cover** is saved as the optional `"cover"` key of its `document.json`; its picture is copied into the note (`assets/images/cover.jpg`, at most 1200 px, PNG when it has see-through parts) and kept by the clean-up of unused pictures. The start screen cards (Chronologie, Favoris, search) show the cover as a book instead of page 1. The New note window keeps the last design and colour for the next note (`newNote/cover`), not a photo.
+- **A notebook's cover** is saved as `"cover"` in its `.speedynote-section.json` (the other keys stay); its picture is copied into the folder as `.speedynote-cover.jpg`. The notebooks column of the Library page shows each notebook as a book: its cover, else a spine book in the notebook's colour. Setting `library/showCovers` (on): "+" of the notebooks column > "Show notebooks as covers"; off gives the small colour mark of before.
+- **Move to a Notebook...** (N2): in the menu of a card on the start screen (Chronologie, Favoris, search). It opens the menu of places of the New note window (notebooks, sections, another folder) and moves the note there. The note closes first if it is open (the editor saves or asks), and the start screen, the stars and the picture follow it. The Library page's drag and drop uses the same code (`LibraryView::moveNoteInto`). Dragging a card onto a section is not done (two different pages).
+- **Pictures of the notes** (N4) in the notes column of the Library page, 48 × 64: the cover, else the start screen's cached picture of page 1. Listing reads only each note's `document.json` and the cached picture, never the note. A note without a picture gets one on an idle tick (one note every 0.15 s, only while the Library page is shown): it is loaded, page 1 (or the canvas around its last place) is drawn and kept in the same cache as the start screen. A note that cannot be loaded is not tried again in that session. The picture code moved from MainWindow to `ThumbnailRenderer::renderFirstPage`.
+- The thumbnail cache now also works for a note that was never on the start screen (its id is read from its `document.json`).
+- An older SpeedyNote ignores the covers: a card shows page 1. If it saves such a note, the cover key is dropped and its picture may be removed as unused; the note itself is not touched.
+- Test `--test-covers`: every design, a picture that fills, a big picture copied smaller, a note cover through apply, save, clean-up and reload, the start screen's knowledge of it, a notebook cover with its other keys, moving a loose note into a section, a note never opened getting its picture from the Library page (paged and endless). Pictures in `%TEMP%`: `speedynote_covers.png`, `speedynote_card_cover.png`, `speedynote_library_covers.png`, `speedynote_library_nocovers.png`, `speedynote_coverpicker.png`, `speedynote_newnote_cover.png`.
+
+### After that, in this order
+
+1. **D1 - Settings with categories.** The toolbar work added many settings, spread over three tabs. One page per category (Interface, Writing experience, Pen and touch, Shapes, Page, Files), a search box, one line of help per setting.
+2. **C1b - A whole notebook as one PDF.** Then **C2 - structure templates** (a new class with its sections in one action).
+3. **C6 - More page designs** (dots, Cornell, planner).
+4. **D3 - The app font**, with the user (which font).
+5. **B7** is done in practice (handles on shapes). To close after the user's test.
+6. Part E (Hoverbox), A5 (profiles), and the "wanted later" tools (pencil, tape, stickers, sticky notes, audio).
+
+### Lessons of these three days (for whoever works next)
+
+- **Unit tests were not enough.** The first batch passed every test and failed in the user's hands. Since then each change is checked in a real launch, with a synthetic pen, finger and mouse.
+- **Never build in the repo while the user's app runs.** `compile.ps1` deletes `build\` first. Build in a copy of the tree instead.
+- **The app is single-instance.** A second launch talks to the user's running copy. No launch while a copy that is not ours runs.
+- **A launch clears the saved list of open tabs.** Save `session/lastOpenTabs` before and put it back after.
+- **Save often was not enough for the user:** the note `Math-TIN` lost two days of test drawings to the X-button freeze. An autosave is worth a step of its own (see "Ideas for later").
+
 ## What the app can already do
 
 Checked in the code on 2026-11-19.
@@ -243,6 +435,8 @@ Checked in the code on 2026-11-19.
 ## Ideas for later
 
 Add new ideas here so they are not lost.
+
+- **Autosave.** Save the open note by itself every few minutes and before a risky action, with a setting. Asked by nobody yet, but the freeze of 2026-11-20 cost the user his test notes twice.
 
 - **Connect an AI (LLM) with your own API key.** A settings screen where you choose a service (Claude, Gemini, OpenAI, or any other with a compatible address) and paste your key. The key stays on your computer. Rule 1 applies: no AI code may slow the pen. What the user wants from it (handwritten list, 2026-11-19):
   - Index the content of the notes, to search in them.

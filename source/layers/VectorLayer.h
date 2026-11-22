@@ -531,21 +531,30 @@ public:
      * @brief Serialize layer to JSON.
      * @return JSON object containing layer data.
      */
-    QJsonObject toJson() const {
+    QJsonObject toJson(bool withStrokes = true) const {
         QJsonObject obj;
         obj["id"] = id;
         obj["name"] = name;
         obj["visible"] = visible;
         obj["opacity"] = opacity;
         obj["locked"] = locked;
-        
+
+        if (withStrokes) {
+            obj["strokes"] = strokesToJson(m_strokes);
+        }
+
+        return obj;
+    }
+
+    /// The "strokes" array of a layer. Pure: a save calls it on its writer
+    /// thread with a copy of strokes() (implicitly shared, so the copy is cheap
+    /// and later edits of the layer do not touch it).
+    static QJsonArray strokesToJson(const QVector<VectorStroke>& strokes) {
         QJsonArray strokesArray;
-        for (const auto& stroke : m_strokes) {
+        for (const auto& stroke : strokes) {
             strokesArray.append(stroke.toJson());
         }
-        obj["strokes"] = strokesArray;
-        
-        return obj;
+        return strokesArray;
     }
     
     /**

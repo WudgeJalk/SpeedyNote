@@ -6,6 +6,7 @@
 
 #include "DocumentManager.h"
 #include "Document.h"
+#include "Page.h"
 #include "NotebookLibrary.h"
 #include "../sharing/NotebookImporter.h"
 
@@ -15,6 +16,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QStandardPaths>
+#include <algorithm>
 #include <QUuid>
 #include <QDateTime>
 #include <QRegularExpression>
@@ -41,6 +43,7 @@ DocumentManager::~DocumentManager()
 {
     // Clean up temp bundles and delete all owned documents
     for (Document* doc : m_documents) {
+        doc->waitForPendingSave();
         const bool cleanupPersistedAssets = !hasUnsavedChanges(doc);
         // Clean up temp bundle if exists (handles discarded edgeless docs)
         cleanupTempBundle(doc);
@@ -77,9 +80,31 @@ Document* DocumentManager::createDocument(const QString& name)
     m_documents.append(doc);
     m_documentPaths[doc] = QString();  // New document has no path yet
     m_modifiedFlags[doc] = false;      // New document is not modified
-    
+
+    // Step R1: autosave needs a place, so a new note gets a temp bundle too.
+    initTempBundle(doc);
+
     emit documentCreated(doc);
     return doc;
+}
+
+void DocumentManager::initTempBundle(Document* doc)
+{
+    QString tempPath = createTempBundlePath(doc);
+    if (tempPath.isEmpty()) {
+        qWarning() << "DocumentManager: Failed to create temp bundle dir, no autosave or tile eviction";
+        return;
+    }
+    m_tempBundlePaths[doc] = tempPath;
+
+    // Writes document.json and sets m_lazyLoadEnabled (tile eviction needs it).
+    if (doc->saveBundle(tempPath)) {
+#ifdef SPEEDYNOTE_DEBUG
+        qDebug() << "DocumentManager: Initialized temp bundle at" << tempPath;
+#endif
+    } else {
+        qWarning() << "DocumentManager: Failed to initialize temp bundle" << tempPath;
+    }
 }
 
 Document* DocumentManager::createEdgelessDocument(const QString& name)
@@ -101,29 +126,9 @@ Document* DocumentManager::createEdgelessDocument(const QString& name)
     m_documentPaths[doc] = QString();  // New document has no path yet
     m_modifiedFlags[doc] = false;      // New document is not modified
     
-    // ========== TEMP BUNDLE CREATION (A3: Create immediately) ==========
-    // Create a temp .snb bundle directory immediately to enable tile eviction.
-    // This prevents unbounded memory growth for unsaved edgeless canvases.
-    QString tempPath = createTempBundlePath(doc);
-    if (!tempPath.isEmpty()) {
-        m_tempBundlePaths[doc] = tempPath;
-        
-        // CRITICAL: Call saveBundle() to:
-        // 1. Write document.json manifest
-        // 2. Set m_lazyLoadEnabled = true (enables evictDistantTiles())
-        // Without this, eviction won't work and memory will grow unbounded.
-        if (doc->saveBundle(tempPath)) {
-#ifdef SPEEDYNOTE_DEBUG
-            qDebug() << "DocumentManager: Initialized temp bundle at" << tempPath;
-#endif
-        } else {
-            qWarning() << "DocumentManager: Failed to initialize temp bundle, tile eviction disabled";
-        }
-    } else {
-        qWarning() << "DocumentManager: Failed to create temp bundle dir, tile eviction disabled";
-    }
-    // ====================================================================
-    
+    // A3: the temp bundle enables tile eviction (bounded memory) and autosave.
+    initTempBundle(doc);
+
 #ifdef SPEEDYNOTE_DEBUG
     qDebug() << "DocumentManager: Created edgeless document" << doc->name;
 #endif
@@ -159,7 +164,13 @@ Document* DocumentManager::loadDocument(const QString& path)
         m_documents.append(doc);
         m_documentPaths[doc] = QString();  // PDF-based doc has no .snx path yet
         m_modifiedFlags[doc] = false;
-        
+        // Making the pages is not an edit (tempNoteHasWork reads lastModified).
+        doc->clearModified();
+        doc->lastModified = doc->created;
+        // Steps R1/R3: annotations on a PDF not yet saved as a note are autosaved
+        // into a temp bundle too, and offered back after a crash.
+        initTempBundle(doc);
+
         addToRecent(path);
         emit documentLoaded(doc);
         return doc;
@@ -233,9 +244,11 @@ Document* DocumentManager::loadDocument(const QString& path)
             m_documents.append(doc);
             m_documentPaths[doc] = path;
             m_modifiedFlags[doc] = false;
-            
+
             addToRecent(path);
-            
+            // Step R4: versions of removed pages and over the limits go, off the GUI thread.
+            NoteVersions::pruneVersionsLater(path);
+
             // Phase P.2.8: Add to NotebookLibrary for launcher
             NotebookLibrary::instance()->addToRecent(path);
             
@@ -295,7 +308,8 @@ void DocumentManager::closeDocument(Document* doc)
         qWarning() << "DocumentManager::closeDocument: Document not found";
         return;
     }
-    
+    doc->waitForPendingSave();
+
 #ifdef SPEEDYNOTE_DEBUG
     qDebug() << "DocumentManager::closeDocument: Closing document" << doc 
              << "remaining=" << (m_documents.size() - 1);
@@ -513,8 +527,10 @@ bool DocumentManager::doSave(Document* doc, const QString& path)
         bundlePath += ".snb";
     }
     
-    if (!doc->saveBundle(bundlePath)) {
-        qWarning() << "DocumentManager::doSave: Failed to save bundle:" << bundlePath;
+    m_lastSaveError.clear();
+    if (!doc->saveBundle(bundlePath, /*finalize=*/false, &m_lastSaveError)) {
+        qWarning() << "DocumentManager::doSave: Failed to save bundle:" << bundlePath
+                   << m_lastSaveError;
         return false;
     }
     
@@ -552,12 +568,11 @@ QString DocumentManager::createTempBundlePath(Document* doc)
         return QString();
     }
     
-    // Create temp directory path for unsaved documents:
-    // QStandardPaths::TempLocation + prefix + uuid
-    QString tempBase = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
+    // <AppData>/unsaved/ + prefix + uuid. Not the system temp folder: Windows
+    // Storage Sense and Linux tmp cleaners empty it, and these notes are real work.
     QString uuid = doc->id.left(8);  // Use first 8 chars of doc ID for uniqueness
     QString prefix = doc->isEdgeless() ? TEMP_EDGELESS_PREFIX : TEMP_PAGED_PREFIX;
-    QString tempPath = tempBase + "/" + prefix + uuid + ".snb";
+    QString tempPath = unsavedDir() + "/" + prefix + uuid + ".snb";
     
     // Create the directory
     QDir dir;
@@ -669,8 +684,9 @@ void DocumentManager::cleanupTempBundle(Document* doc)
         return;
     }
 
-    // Image workers may still be atomically publishing into this temporary
-    // bundle. Join them before recursively deleting the directory.
+    // Image workers and an autosave may still be atomically publishing into
+    // this temporary bundle. Join them before recursively deleting the directory.
+    doc->waitForPendingSave();
     doc->flushPendingImageWrites();
     
     // Remove from tracking
@@ -700,7 +716,9 @@ int DocumentManager::autoSaveModifiedDocuments()
         // IMPORTANT: Use hasUnsavedChanges() which checks both m_modifiedFlags
         // AND doc->modified. User edits often set doc->modified directly
         // (e.g., when writing strokes), not through DocumentManager::markModified()
-        if (!hasUnsavedChanges(doc)) {
+        // A note without a place that autosave already kept in its temp
+        // bundle is "saved" there, but still has to reach app storage.
+        if (!hasUnsavedChanges(doc) && !(isUsingTempBundle(doc) && tempNoteHasWork(doc))) {
             continue;  // No changes to save
         }
         
@@ -756,6 +774,108 @@ int DocumentManager::autoSaveModifiedDocuments()
     // Always save, even if savedCount is 0, to flush any pending library changes
     // (e.g., documents opened during the session)
     NotebookLibrary::instance()->save();
-    
+
     return savedCount;
+}
+
+// ============================================================================
+// Notes without a place (Step R3)
+// ============================================================================
+
+static QString s_unsavedDirForTests;
+
+QString DocumentManager::unsavedDir()
+{
+    if (!s_unsavedDirForTests.isEmpty()) {
+        return s_unsavedDirForTests;
+    }
+    return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/unsaved";
+}
+
+void DocumentManager::setUnsavedDirForTests(const QString& dir)
+{
+    s_unsavedDirForTests = dir;
+}
+
+bool DocumentManager::tempNoteHasWork(const Document* doc)
+{
+    if (!doc) {
+        return false;
+    }
+    if (doc->isEdgeless()) {
+        return doc->tileCount() > 0 || doc->tileIndexCount() > 0;
+    }
+    // markModified() moves lastModified; a note never changed keeps created.
+    // Files keep these times to the second only, so a note loaded back (after
+    // a crash) is also judged by what it holds.
+    if (doc->lastModified != doc->created) {
+        return true;
+    }
+    // The pages of a PDF opened directly are not work; an edit moved lastModified.
+    if (!doc->pdfPath().isEmpty()) {
+        return false;
+    }
+    if (doc->pageCount() > 1) {
+        return true;
+    }
+    const Page* first = doc->page(0);
+    return first && first->hasContent();
+}
+
+QVector<DocumentManager::LeftoverNote> DocumentManager::leftoverTempBundles()
+{
+    QVector<LeftoverNote> notes;
+    const QStringList filters = {TEMP_EDGELESS_PREFIX + "*.snb", TEMP_PAGED_PREFIX + "*.snb"};
+    const QStringList folders = {unsavedDir(),
+                                 QStandardPaths::writableLocation(QStandardPaths::TempLocation)};
+    for (const QString& folder : folders) {
+        const QFileInfoList bundles = QDir(folder).entryInfoList(filters, QDir::Dirs | QDir::NoDotAndDotDot);
+        for (const QFileInfo& bundle : bundles) {
+            const QString manifestPath = bundle.absoluteFilePath() + "/document.json";
+            if (!QFileInfo::exists(manifestPath)) {
+                continue;  // never written: holds nothing
+            }
+            // Rare (after a crash) and small: load it and ask the same question
+            // as when it closes.
+            const auto loaded = Document::loadBundle(bundle.absoluteFilePath());
+            if (!loaded || !tempNoteHasWork(loaded.get())) {
+                continue;
+            }
+            LeftoverNote note;
+            note.path = bundle.absoluteFilePath();
+            note.name = loaded->name;
+            note.lastChange = QFileInfo(manifestPath).lastModified();
+            notes.append(note);
+        }
+    }
+    std::sort(notes.begin(), notes.end(), [](const LeftoverNote& a, const LeftoverNote& b) {
+        return a.lastChange > b.lastChange;
+    });
+    return notes;
+}
+
+QString DocumentManager::newTempBundlePath(bool edgeless)
+{
+    QString path;
+    do {
+        path = unsavedDir() + "/" + (edgeless ? TEMP_EDGELESS_PREFIX : TEMP_PAGED_PREFIX)
+             + QUuid::createUuid().toString(QUuid::WithoutBraces).left(8) + ".snb";
+    } while (QFileInfo::exists(path));
+    return path;
+}
+
+Document* DocumentManager::adoptTempBundle(const QString& path)
+{
+    auto docPtr = Document::loadBundle(path);
+    if (!docPtr) {
+        qWarning() << "DocumentManager::adoptTempBundle: cannot load" << path;
+        return nullptr;
+    }
+    Document* doc = docPtr.release();
+    m_documents.append(doc);
+    m_documentPaths[doc] = QString();  // still no place: Ctrl+S asks for one
+    m_modifiedFlags[doc] = false;
+    m_tempBundlePaths[doc] = path;
+    emit documentLoaded(doc);
+    return doc;
 }

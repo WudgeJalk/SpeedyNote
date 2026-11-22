@@ -2,9 +2,13 @@
 #include "../core/DarkModeUtils.h"
 #include "../core/Document.h"
 #include "../core/Page.h"
+#include "../core/Paper.h"
 #include "../layers/VectorLayer.h"
+#include "../objects/InsertedObject.h"
 #include "../pdf/PdfProvider.h"
 
+#include <algorithm>
+#include <cmath>
 #include <QPainter>
 #include <QtConcurrent>
 #include <QThreadStorage>
@@ -235,7 +239,12 @@ ThumbnailRenderer::ThumbnailSnapshot ThumbnailRenderer::createSnapshot(
     snapshot.gridColor = page->gridColor;
     snapshot.gridSpacing = page->gridSpacing;
     snapshot.lineSpacing = page->lineSpacing;
-    
+    snapshot.paperId = page->paperId;
+    if (page->backgroundType == Page::BackgroundType::Custom && !page->customImage.isEmpty()
+        && !doc->bundlePath().isEmpty()) {
+        snapshot.customImagePath = doc->bundlePath() + QStringLiteral("/assets/images/") + page->customImage;
+    }
+
     // Calculate thumbnail dimensions
     qreal aspectRatio = pageSize.height() / pageSize.width();
     int thumbnailWidth = width;
@@ -379,6 +388,10 @@ QPixmap ThumbnailRenderer::renderFromSnapshot(const ThumbnailSnapshot& snapshot)
     
     if (!pdfBackground.isNull()) {
         painter.drawPixmap(pageRect.toRect(), pdfBackground);
+    } else if (!snapshot.customImagePath.isEmpty()) {
+        painter.fillRect(pageRect, snapshot.backgroundColor);
+        const QImage paper = Paper::userPaperImage(snapshot.customImagePath);
+        if (!paper.isNull()) painter.drawImage(pageRect, paper);
     } else {
         Page::renderBackgroundPattern(
             painter,
@@ -387,7 +400,9 @@ QPixmap ThumbnailRenderer::renderFromSnapshot(const ThumbnailSnapshot& snapshot)
             snapshot.backgroundType,
             snapshot.gridColor,
             snapshot.gridSpacing,
-            snapshot.lineSpacing
+            snapshot.lineSpacing,
+            1.0,
+            snapshot.paperId
         );
     }
     
@@ -419,3 +434,283 @@ QPixmap ThumbnailRenderer::renderFromSnapshot(const ThumbnailSnapshot& snapshot)
     return thumbnail;
 }
 
+
+// ============================================================================
+// The first page of a note, for the start screen and the Library (moved from
+// MainWindow, Step N4). GUI thread: it reads the live Document.
+// ============================================================================
+
+namespace {
+
+QPixmap renderPagedThumbnail(Document* doc, int width, qreal dpr)
+{
+    // Phase P.4.6: Render page-0 thumbnail for saving to NotebookLibrary
+    if (!doc || doc->isEdgeless() || doc->pageCount() == 0) {
+        return QPixmap();
+    }
+    
+    
+    // Get page size from metadata
+    QSizeF pageSize = doc->pageSizeAt(0);
+    if (pageSize.isEmpty()) {
+        pageSize = QSizeF(612, 792);  // Default US Letter
+    }
+    
+    // Calculate dimensions
+    qreal aspectRatio = pageSize.height() / pageSize.width();
+    int thumbnailHeight = static_cast<int>(width * aspectRatio);
+    
+    int physicalWidth = static_cast<int>(width * dpr);
+    int physicalHeight = static_cast<int>(thumbnailHeight * dpr);
+    
+    // Create pixmap
+    QPixmap thumbnail(physicalWidth, physicalHeight);
+    thumbnail.setDevicePixelRatio(dpr);
+    thumbnail.fill(Qt::white);
+    
+    QPainter painter(&thumbnail);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+    
+    // Calculate scale factor
+    qreal scale = static_cast<qreal>(width) / pageSize.width();
+    painter.scale(scale, scale);
+    
+    // Get the page (may trigger lazy load)
+    Page* page = doc->page(0);
+    if (!page) {
+        qWarning() << "renderPage0Thumbnail: page(0) returned nullptr";
+        painter.end();
+        return thumbnail;  // Return white placeholder
+    }
+    
+    // Defensive check: verify page has layers (should always have at least 1)
+    int layerCount = page->layerCount();
+    if (layerCount <= 0) {
+        qWarning() << "renderPage0Thumbnail: page has no layers, skipping layer rendering";
+    }
+    
+    // Render PDF background if available (resolve the page's own PDF source)
+    QPixmap pdfBackground;
+    if (page->backgroundType == Page::BackgroundType::PDF && page->pdfPageNumber >= 0
+        && doc->providerForSource(page->pdfSourceId)) {
+        qreal pdfDpi = (width * dpr) / (pageSize.width() / 72.0);
+        pdfDpi = qMin(pdfDpi, 150.0);  // Cap at 150 DPI
+
+        QImage pdfImage = doc->renderPdfPageToImage(page->pdfSourceId, page->pdfPageNumber, pdfDpi);
+        if (!pdfImage.isNull()) {
+            pdfBackground = QPixmap::fromImage(pdfImage);
+        }
+    }
+    
+    // Render background
+    page->renderBackground(painter, pdfBackground.isNull() ? nullptr : &pdfBackground, 1.0);
+    
+    // Render vector layers (with bounds check)
+    for (int layerIdx = 0; layerIdx < layerCount; ++layerIdx) {
+        VectorLayer* layer = page->layer(layerIdx);
+        if (layer && layer->visible) {
+            layer->render(painter);
+        }
+    }
+    
+    // Render inserted objects
+    page->renderObjects(painter, 1.0);
+    
+    painter.end();
+    return thumbnail;
+}
+
+QPixmap renderEdgelessThumbnail(Document* doc, int width, qreal dpr)
+{
+    if (!doc || !doc->isEdgeless()) {
+        return QPixmap();
+    }
+    
+    
+    int physicalWidth = static_cast<int>(width * dpr);
+    int physicalHeight = static_cast<int>(width * dpr);
+    
+    int tileSize = Document::EDGELESS_TILE_SIZE;
+    
+    // Determine the center point for the thumbnail viewport.
+    // Primary: last_position (where the user was last looking).
+    // Fallback: center of the first indexed tile if last_position has no nearby tiles.
+    QPointF center = doc->edgelessLastPosition();
+    
+    // Define a virtual viewport: 1 tile centered on the position.
+    // A single tile keeps content legible at small thumbnail sizes.
+    qreal viewExtent = tileSize * 1.0;
+    QRectF viewRect(center.x() - viewExtent / 2.0, center.y() - viewExtent / 2.0,
+                    viewExtent, viewExtent);
+    
+    // Find tiles that intersect this viewport (with margin for strokes at edges).
+    // tilesInRect() returns ALL coordinate positions in the range, even empty ones,
+    // so we filter to keep only coordinates where an actual tile exists.
+    static constexpr int STROKE_MARGIN = 100;
+    QRectF marginRect = viewRect.adjusted(-STROKE_MARGIN, -STROKE_MARGIN,
+                                          STROKE_MARGIN, STROKE_MARGIN);
+    QVector<Document::TileCoord> allTiles;
+    {
+        QVector<Document::TileCoord> candidates = doc->tilesInRect(marginRect);
+        for (const auto& coord : candidates) {
+            if (doc->getTile(coord.first, coord.second)) {
+                allTiles.append(coord);
+            }
+        }
+    }
+    
+    // Fallback: if no tiles with content near last_position, try the first loaded tile
+    if (allTiles.isEmpty()) {
+        QVector<Document::TileCoord> allCoords = doc->allTileCoords();
+        if (!allCoords.isEmpty()) {
+            // Use first tile and re-center viewport on it
+            auto firstCoord = allCoords.first();
+            center = QPointF(firstCoord.first * tileSize + tileSize / 2.0,
+                             firstCoord.second * tileSize + tileSize / 2.0);
+            viewRect = QRectF(center.x() - viewExtent / 2.0, center.y() - viewExtent / 2.0,
+                              viewExtent, viewExtent);
+            marginRect = viewRect.adjusted(-STROKE_MARGIN, -STROKE_MARGIN,
+                                           STROKE_MARGIN, STROKE_MARGIN);
+            QVector<Document::TileCoord> fallbackCandidates = doc->tilesInRect(marginRect);
+            for (const auto& coord : fallbackCandidates) {
+                if (doc->getTile(coord.first, coord.second)) {
+                    allTiles.append(coord);
+                }
+            }
+        }
+    }
+    
+    // Create the thumbnail pixmap
+    QPixmap thumbnail(physicalWidth, physicalHeight);
+    thumbnail.setDevicePixelRatio(dpr);
+    thumbnail.fill(doc->defaultBackgroundColor);
+    
+    QPainter painter(&thumbnail);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+    
+    // Calculate scale: map viewExtent doc units to width logical pixels
+    qreal scale = static_cast<qreal>(width) / viewExtent;
+    
+    // Transform: translate so viewRect.topLeft maps to (0,0), then scale
+    painter.scale(scale, scale);
+    painter.translate(-viewRect.left(), -viewRect.top());
+    
+    // Pre-calculate visible tile range for background pass
+    int minVisibleTx = static_cast<int>(std::floor(viewRect.left() / tileSize));
+    int maxVisibleTx = static_cast<int>(std::floor(viewRect.right() / tileSize));
+    int minVisibleTy = static_cast<int>(std::floor(viewRect.top() / tileSize));
+    int maxVisibleTy = static_cast<int>(std::floor(viewRect.bottom() / tileSize));
+    
+    // ===== PASS 1: Render backgrounds for visible tiles =====
+    // Render all tile positions in the view, even empty ones (they get default background)
+    for (int tx = minVisibleTx; tx <= maxVisibleTx; ++tx) {
+        for (int ty = minVisibleTy; ty <= maxVisibleTy; ++ty) {
+            QRectF tileRect(tx * tileSize, ty * tileSize, tileSize, tileSize);
+            Page* tile = doc->getTile(tx, ty);
+            
+            if (tile) {
+                Page::renderBackgroundPattern(
+                    painter, tileRect,
+                    tile->backgroundColor, tile->backgroundType,
+                    tile->gridColor, tile->gridSpacing, tile->lineSpacing,
+                    1.0,  // No zoom compensation needed for static thumbnail
+                    tile->paperId, true
+                );
+            } else {
+                Page::renderBackgroundPattern(
+                    painter, tileRect,
+                    doc->defaultBackgroundColor, doc->defaultBackgroundType,
+                    doc->defaultGridColor, doc->defaultGridSpacing, doc->defaultLineSpacing,
+                    1.0, doc->defaultPaperId, true
+                );
+            }
+        }
+    }
+    
+    // If no tiles with content exist, we're done (thumbnail shows just the background)
+    if (allTiles.isEmpty()) {
+        painter.end();
+        return thumbnail;
+    }
+    
+    // ===== PASS 2: Render objects with default affinity (-1) =====
+    // These render below all stroke layers
+    const auto& layers = doc->edgelessLayers();
+    auto renderObjectsWithAffinity = [&](int affinity) {
+        // Check if the tied layer is visible (affinity K ties to Layer K+1)
+        int tiedLayerIndex = affinity + 1;
+        if (tiedLayerIndex >= 0 && tiedLayerIndex < static_cast<int>(layers.size())) {
+            if (!layers[tiedLayerIndex].visible) return;
+        }
+        
+        for (const auto& coord : allTiles) {
+            Page* tile = doc->getTile(coord.first, coord.second);
+            if (!tile) continue;
+            
+            auto it = tile->objectsByAffinity.find(affinity);
+            if (it == tile->objectsByAffinity.end() || it->second.empty()) continue;
+            
+            QPointF tileOrigin(coord.first * tileSize, coord.second * tileSize);
+            
+            // Sort by z-order
+            std::vector<InsertedObject*> objs = it->second;
+            std::sort(objs.begin(), objs.end(),
+                      [](InsertedObject* a, InsertedObject* b) {
+                          return a->zOrder < b->zOrder;
+                      });
+            
+            for (InsertedObject* obj : objs) {
+                if (!obj->visible) continue;
+                painter.save();
+                painter.translate(tileOrigin);
+                obj->render(painter, 1.0);
+                painter.restore();
+            }
+        }
+    };
+    
+    renderObjectsWithAffinity(-1);
+    
+    // ===== PASS 3: Interleaved layer strokes and objects =====
+    int maxLayerCount = 0;
+    for (const auto& coord : allTiles) {
+        Page* tile = doc->getTile(coord.first, coord.second);
+        if (tile) {
+            maxLayerCount = qMax(maxLayerCount, tile->layerCount());
+        }
+    }
+    
+    for (int layerIdx = 0; layerIdx < maxLayerCount; ++layerIdx) {
+        // PASS 3a: Render this layer's strokes from all tiles
+        for (const auto& coord : allTiles) {
+            Page* tile = doc->getTile(coord.first, coord.second);
+            if (!tile) continue;
+            if (layerIdx >= tile->layerCount()) continue;
+            
+            VectorLayer* layer = tile->layer(layerIdx);
+            if (!layer || !layer->visible) continue;
+            
+            QPointF tileOrigin(coord.first * tileSize, coord.second * tileSize);
+            painter.save();
+            painter.translate(tileOrigin);
+            layer->render(painter);
+            painter.restore();
+        }
+        
+        // PASS 3b: Render objects with affinity = layerIdx
+        renderObjectsWithAffinity(layerIdx);
+    }
+    
+    painter.end();
+    return thumbnail;
+}
+
+} // namespace
+
+QPixmap ThumbnailRenderer::renderFirstPage(Document* doc, int width, qreal dpr)
+{
+    if (!doc || width <= 0) return QPixmap();
+    return doc->isEdgeless() ? renderEdgelessThumbnail(doc, width, dpr) : renderPagedThumbnail(doc, width, dpr);
+}

@@ -7,11 +7,17 @@
  *
  * Header-only and free of state: these are three short answers to the same
  * mistake, which is treating a size measured on one desktop as a property of
- * the dialog rather than of the font it was measured with.
+ * the dialog rather than of the font it was measured with. wheelNeedsFocus()
+ * is the scrolling counterpart: a page that scrolls must not change its boxes.
  */
 
 #include <QAbstractScrollArea>
+#include <QAbstractSlider>
+#include <QAbstractSpinBox>
+#include <QComboBox>
 #include <QDialog>
+#include <QEvent>
+#include <QScrollBar>
 #include <QFont>
 #include <QFrame>
 #include <QScreen>
@@ -105,6 +111,43 @@ inline QScrollArea* inScrollArea(QWidget* content, QWidget* parent = nullptr)
 #endif
 
     return area;
+}
+
+/// Swallows the wheel for a widget without the focus, leaving it unaccepted
+/// so it goes on to the scroll area behind (see wheelNeedsFocus()).
+class WheelNeedsFocus : public QObject
+{
+public:
+    using QObject::QObject;
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        if (event->type() == QEvent::Wheel) {
+            const auto* widget = qobject_cast<QWidget*>(watched);
+            if (widget && !widget->hasFocus()) {
+                event->ignore();  // unaccepted: QApplication hands it to the parent
+                return true;
+            }
+        }
+        return QObject::eventFilter(watched, event);
+    }
+};
+
+/// The lists, number boxes and sliders inside `root` change by the wheel (or a
+/// touchpad or pen scroll) only once clicked; otherwise the page scrolls. A
+/// scroll through a settings page must never change a setting by accident.
+inline void wheelNeedsFocus(QWidget* root)
+{
+    auto* filter = new WheelNeedsFocus(root);
+    const QList<QWidget*> widgets = root->findChildren<QWidget*>();
+    for (QWidget* widget : widgets) {
+        const bool slider = qobject_cast<QAbstractSlider*>(widget) && !qobject_cast<QScrollBar*>(widget);
+        if (slider || qobject_cast<QComboBox*>(widget) || qobject_cast<QAbstractSpinBox*>(widget)) {
+            widget->setFocusPolicy(Qt::StrongFocus);  // not WheelFocus: the wheel alone never focuses it
+            widget->installEventFilter(filter);
+        }
+    }
 }
 
 }  // namespace DialogSizing

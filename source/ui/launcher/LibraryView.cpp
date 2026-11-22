@@ -2,7 +2,10 @@
 #include "Launcher.h"
 #include "../ThemeColors.h"
 #include "../MenuPopup.h"
+#include "../ThumbnailRenderer.h"
+#include "../widgets/CoverPicker.h"
 #include "../../compat/qt_compat.h"
+#include "../../core/CoverPainter.h"
 #include "../../core/Document.h"
 #include "../../core/LibraryTree.h"
 #include "../../core/NotebookLibrary.h"
@@ -17,15 +20,20 @@
 #include <QFileInfo>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QImageReader>
 #include <QInputDialog>
+#include <QJsonDocument>
 #include <QLabel>
 #include <QListWidget>
 #include <QMenu>
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPixmapCache>
 #include <QPushButton>
+#include <QSet>
 #include <QSettings>
+#include <QStyle>
 #include <QStyleHints>
 #include <QTreeWidget>
 #include <QVBoxLayout>
@@ -34,6 +42,27 @@ static const char* KEY_NOTEBOOKS = "library/notebooks";
 static const char* KEY_NOTEBOOK = "library/lastNotebook";
 static const char* KEY_SECTION = "library/lastSection";
 static const char* KEY_PARENT = "library/lastParentDir";
+static const char* KEY_COVERS = "library/showCovers";
+
+static const QSize NOTEBOOK_COVER(30, 40);   // a notebook as a book in its column
+static const QSize NOTE_ICON(48, 64);        // a note's cover or page 1 in the notes column
+static const int THUMBNAIL_WIDTH = 180;      // as the start screen's cards (one cache for both)
+
+static bool showCovers()
+{
+    return QSettings("SpeedyNote", "App").value(KEY_COVERS, true).toBool();
+}
+
+// A cover drawn into a small picture (no title: it could not be read there).
+static QPixmap coverPixmap(const QJsonObject& cover, const QString& baseDir, const QSize& size, qreal dpr)
+{
+    QPixmap pm(size * dpr);
+    pm.setDevicePixelRatio(dpr);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    CoverPainter::paint(p, QRectF(QPointF(0.5, 0.5), QSizeF(size) - QSizeF(1, 1)), cover, QString(), baseDir);
+    return pm;
+}
 
 static QIcon swatch(const QColor& color)
 {
@@ -145,6 +174,12 @@ LibraryView::LibraryView(QWidget* parent)
         if (!pathOf(item).isEmpty()) emit noteOpenRequested(pathOf(item));
     });
 
+    m_notes->setIconSize(NOTE_ICON);
+    // One note per tick, with a pause between: the page stays responsive.
+    m_thumbTimer.setSingleShot(true);
+    m_thumbTimer.setInterval(150);
+    connect(&m_thumbTimer, &QTimer::timeout, this, &LibraryView::makeNextThumbnail);
+
     m_holdTimer.setSingleShot(true);
     m_holdTimer.setInterval(QGuiApplication::styleHints()->mousePressAndHoldInterval());
     connect(&m_holdTimer, &QTimer::timeout, this, [this]() {
@@ -177,12 +212,14 @@ void LibraryView::reload()
     {
         const QSignalBlocker block(m_notebooks);
         m_notebooks->clear();
+        const int small = style()->pixelMetric(QStyle::PM_SmallIconSize);
+        m_notebooks->setIconSize(showCovers() ? NOTEBOOK_COVER : QSize(small, small));
         for (const QString& path : settings.value(KEY_NOTEBOOKS).toStringList()) {
             auto* item = new QListWidgetItem(QFileInfo(path).fileName(), m_notebooks);
             item->setData(Qt::UserRole, path);
             item->setToolTip(QDir::toNativeSeparators(path));
             const bool here = QFileInfo(path).isDir();
-            item->setIcon(swatch(here ? LibraryTree::color(path) : QColor()));
+            item->setIcon(here ? notebookIcon(path) : swatch(QColor()));
             if (!here) {  // gone, renamed or not synced yet: shown greyed, never blocking
                 item->setText(tr("%1 (missing)").arg(item->text()));
                 item->setForeground(QColor(128, 128, 128));
@@ -238,11 +275,14 @@ void LibraryView::fillNotes()
 {
     const QString section = sectionPath();
     m_notes->clear();
+    m_thumbQueue.clear();
     m_notesTitle->setText(section.isEmpty() ? tr("Notes") : LibraryTree::displayName(section));
     for (const QString& path : LibraryTree::notes(section)) {
         auto* item = new QListWidgetItem(LibraryTree::displayName(path), m_notes);
         item->setData(Qt::UserRole, path);
+        item->setIcon(noteIcon(path));
     }
+    if (!m_thumbQueue.isEmpty()) m_thumbTimer.start();
     if (!section.isEmpty()) {
         QSettings("SpeedyNote", "App").setValue(KEY_SECTION, section);
         if (m_notes->count() == 0) {
@@ -250,6 +290,106 @@ void LibraryView::fillNotes()
             hint->setFlags(Qt::NoItemFlags);
         }
     }
+}
+
+QIcon LibraryView::notebookIcon(const QString& path) const
+{
+    if (!showCovers()) return swatch(LibraryTree::color(path));
+    QJsonObject cover = LibraryTree::cover(path);
+    if (cover.isEmpty()) {   // no cover chosen: a plain book in the notebook's colour
+        const QColor color = LibraryTree::color(path);
+        cover = {{"design", "spine"}};
+        if (color.isValid()) cover["color"] = color.name();
+    }
+    return QIcon(coverPixmap(cover, path, NOTEBOOK_COVER, devicePixelRatioF()));
+}
+
+// Notes whose picture could not be made this session (damaged, half synced):
+// not tried again on every visit.
+static QSet<QString>& thumbnailFailures()
+{
+    static QSet<QString> failed;
+    return failed;
+}
+
+QIcon LibraryView::noteIcon(const QString& path)
+{
+    const qreal dpr = devicePixelRatioF();
+    // The manifest only, never the note: its cover, else the cached page 1.
+    QJsonObject cover;
+    QFile manifest(path + "/document.json");
+    if (manifest.open(QIODevice::ReadOnly))
+        cover = QJsonDocument::fromJson(manifest.readAll()).object().value("cover").toObject();
+    if (!cover.isEmpty()) return QIcon(coverPixmap(cover, path + "/assets/images", NOTE_ICON, dpr));
+
+    const QString thumb = NotebookLibrary::instance()->thumbnailPathFor(path);
+    const QString key = thumb.isEmpty() ? QString()
+        : QStringLiteral("libnote:%1:%2:").arg(QFileInfo(thumb).lastModified().toMSecsSinceEpoch()).arg(dpr) + thumb;
+    QPixmap pm;
+    if (!key.isEmpty() && QPixmapCache::find(key, &pm)) return QIcon(pm);
+
+    pm = QPixmap(NOTE_ICON * dpr);
+    pm.setDevicePixelRatio(dpr);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing);
+    const QRectF box(QPointF(0.5, 0.5), QSizeF(NOTE_ICON) - QSizeF(1, 1));
+    QImage image;
+    if (!thumb.isEmpty()) {
+        QImageReader reader(thumb);
+        const QSize full = reader.size();
+        if (full.isValid()) reader.setScaledSize(full.scaled(qRound(NOTE_ICON.width() * dpr), 100000, Qt::KeepAspectRatio));
+        image = reader.read();
+    }
+    if (!image.isNull()) {
+        // The page across the width, its top kept (as the start screen's cards).
+        const qreal h = qMin(box.height(), box.width() * image.height() / image.width());
+        const QRectF target(box.left(), box.top() + (box.height() - h) / 2, box.width(), h);
+        const QRectF source(0, 0, image.width(), image.width() * h / box.width());
+        p.drawImage(target, image, source);
+        p.setPen(QPen(QColor(0, 0, 0, 60), 1));
+        p.setBrush(Qt::NoBrush);
+        p.drawRect(target);
+        p.end();
+        QPixmapCache::insert(key, pm);
+        return QIcon(pm);
+    }
+    // No picture yet: a blank page, and the picture is made on an idle tick.
+    p.setPen(QPen(QColor(150, 150, 150), 1));
+    p.setBrush(QColor(250, 250, 250));
+    p.drawRoundedRect(box.adjusted(4, 0, -4, 0), 2, 2);
+    p.setPen(QPen(QColor(200, 200, 200), 1));
+    for (int i = 1; i <= 4; ++i) p.drawLine(QPointF(box.left() + 10, box.top() + 12 * i), QPointF(box.right() - 10, box.top() + 12 * i));
+    if (!thumbnailFailures().contains(path)) m_thumbQueue << path;
+    return QIcon(pm);
+}
+
+void LibraryView::makeNextThumbnail()
+{
+    if (!isVisible() || m_thumbQueue.isEmpty()) return;  // showing the page again refills the queue
+    const QString path = m_thumbQueue.takeFirst();
+    QPixmap thumbnail;
+    // Loading the note is the cost; it reads files only and saves nothing.
+    if (auto doc = Document::loadBundle(path))
+        thumbnail = ThumbnailRenderer::renderFirstPage(doc.get(), THUMBNAIL_WIDTH, qMin(devicePixelRatioF(), 2.0));
+    if (!thumbnail.isNull()) NotebookLibrary::instance()->saveThumbnail(path, thumbnail);
+    if (thumbnail.isNull() || NotebookLibrary::instance()->thumbnailPathFor(path).isEmpty()) {
+        thumbnailFailures().insert(path);  // also a note without an id to file it under
+    } else {
+        for (int i = 0; i < m_notes->count(); ++i) {
+            if (pathOf(m_notes->item(i)) == path) m_notes->item(i)->setIcon(noteIcon(path));
+        }
+    }
+    if (!m_thumbQueue.isEmpty()) m_thumbTimer.start();
+}
+
+void LibraryView::editCover(const QString& path)
+{
+    QJsonObject cover = LibraryTree::cover(path);
+    if (!CoverPicker::edit(this, &cover, LibraryTree::displayName(path), path)) return;
+    QString error;
+    if (!LibraryTree::setCover(path, cover, &error)) QMessageBox::warning(this, tr("Cover"), error);
+    reload();
 }
 
 void LibraryView::showMenu(QAbstractItemView* view, const QString& path, const QPoint& globalPos)
@@ -281,6 +421,16 @@ void LibraryView::showMenu(QAbstractItemView* view, const QString& path, const Q
             add(tr("New notebook..."), [this]() { newNotebook(); });
             add(tr("Add an existing notebook folder..."), [this]() { addNotebookFolder(); });
             add(tr("Open a packed notebook..."), [this]() { openPacked(); });
+            menu.addSeparator();
+            QAction* covers = menu.addAction(tr("Show notebooks as covers"));
+            covers->setCheckable(true);
+            covers->setChecked(showCovers());
+            covers->setToolTip(tr("Each notebook shows its cover, like a book on a shelf. Off: a small colour mark."));
+            menu.setToolTipsVisible(true);
+            connect(covers, &QAction::toggled, this, [this](bool on) {
+                QSettings("SpeedyNote", "App").setValue(KEY_COVERS, on);
+                reload();
+            });
         } else if (!QFileInfo(path).isDir()) {
             add(tr("Locate..."), [this, path]() { locateNotebook(path); });
             add(tr("Remove from the list"), [this, path]() {
@@ -291,6 +441,7 @@ void LibraryView::showMenu(QAbstractItemView* view, const QString& path, const Q
         } else {
             add(tr("New section"), [this, path]() { newSection(path); });
             common(path);
+            add(tr("Cover..."), [this, path]() { editCover(path); });
             add(tr("Pack notebook..."), [this, path]() { packNotebook(path); });
             menu.addSeparator();
             add(tr("Remove from the list (keeps the folder)"), [this, path]() {
@@ -571,20 +722,9 @@ void LibraryView::newNote(bool edgeless)
 {
     const QString section = sectionPath();
     if (section.isEmpty()) return;
-    QString base = LibraryTree::uniqueName(section, edgeless ? tr("New canvas") : tr("New note"), ".snb");
-    base.chop(4);
-    const QString name = askName(this, edgeless ? tr("New edgeless canvas") : tr("New paged note"), base);
-    if (name.isEmpty()) return;
-    QString error = LibraryTree::checkName(name);
-    if (error.isEmpty() && QFileInfo::exists(section + "/" + name + ".snb"))
-        error = tr("\"%1\" already exists here.").arg(name);
-    if (!error.isEmpty()) {
-        QMessageBox::warning(this, tr("New note"), error);
-        return;
-    }
-    LibraryTree::placeBefore(section, name + ".snb");
-    emit newNoteRequested(section + "/" + name + ".snb", edgeless);  // the editor saves it there
-    fillNotes();
+    // The New note window asks the name and the rest; the note lands last
+    // in the section (a name missing from the saved order comes last).
+    emit newNoteRequested(section, edgeless);
 }
 
 void LibraryView::addExistingNote()
@@ -619,20 +759,20 @@ void LibraryView::addExistingNote()
 
 // Notes open in the editor hold their path: close them first (the editor asks
 // to save). False if the user cancelled.
-bool LibraryView::releaseNotes(const QString& path, QStringList* notes)
+static bool releaseNotes(const QString& path, QStringList* notes)
 {
     *notes = LibraryTree::notesUnder(path);
     MainWindow* mainWindow = MainWindow::findExistingMainWindow();
     if (!mainWindow || mainWindow->tabCount() == 0) return true;
     for (const QString& note : *notes) {
         const QString id = Document::peekBundleId(note);
-        if (!id.isEmpty() && !mainWindow->closeDocumentById(id)) return false;
+        if (!id.isEmpty() && !mainWindow->closeDocumentById(id, false, note)) return false;
     }
     return true;
 }
 
 // The recent list, the stars and the remembered choices follow a moved folder.
-void LibraryView::followNotes(const QString& oldRoot, const QString& newRoot, const QStringList& notes)
+static void followNotes(const QString& oldRoot, const QString& newRoot, const QStringList& notes)
 {
     for (const QString& note : notes)
         NotebookLibrary::instance()->updateBundlePath(note, rebase(note, oldRoot, newRoot));
@@ -704,17 +844,24 @@ void LibraryView::deleteEntry(const QString& path)
     setKnownNotebooks(list);
 }
 
-void LibraryView::moveEntry(const QString& path, const QString& dir, const QString& beforeName)
+QString LibraryView::moveNoteInto(QWidget* parent, const QString& path, const QString& dir,
+                                  const QString& beforeName)
 {
-    if (path.isEmpty() || dir.isEmpty()) return;
+    if (path.isEmpty() || dir.isEmpty()) return QString();
     QStringList notes;
-    if (parentOf(path) != dir && !releaseNotes(path, &notes)) return;
+    if (parentOf(path) != dir && !releaseNotes(path, &notes)) return QString();
     QString error;
     const QString moved = LibraryTree::move(path, dir, beforeName, &error);
     if (moved.isEmpty()) {
-        QMessageBox::warning(this, tr("Move"), error);
-        return;
+        QMessageBox::warning(parent, tr("Move"), error);
+        return QString();
     }
     if (moved != path) followNotes(path, moved, notes);
-    fillSections(rebase(sectionPath(), path, moved));
+    return moved;
+}
+
+void LibraryView::moveEntry(const QString& path, const QString& dir, const QString& beforeName)
+{
+    const QString moved = moveNoteInto(this, path, dir, beforeName);
+    if (!moved.isEmpty()) fillSections(rebase(sectionPath(), path, moved));
 }

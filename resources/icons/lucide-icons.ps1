@@ -23,7 +23,7 @@ $map = [ordered]@{
     settings = 'settings'; shape = 'shapes'; showtext = 'text-initial'; star = 'star'; straightLine = 'slash'
     tabs = 'app-window'; text = 'text-cursor'; thickness = 'spline'; trash = 'trash'; undo = 'undo'
     up_arrow = 'chevron-up'; url = 'link-2'; visible = 'eye'; warning = 'triangle-exclamation-point'; zoom = 'zoom-in'
-    pen_fountain = 'pen-tool'; brush = 'brush'; editpoints = 'vector-square'; corners = 'square-round-corner|squircle'
+    pen_fountain = 'pen-tool'; brush = 'brush'; editpoints = 'vector-square'; corners = 'square-round-corner|squircle'; saving = 'loader-circle|loader'
 }
 # Turned so the tip is at the bottom left, where the toolbar paints the tool's colour.
 $rotate = @{ pen_fountain = -90 }

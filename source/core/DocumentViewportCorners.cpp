@@ -2,14 +2,17 @@
 // DocumentViewport.cpp. "Edit points" in the selection panel shows a round
 // handle on each corner of a selected cleaned polygon (lasso) or fixed shape
 // (object) instead of the box. Dragging one moves that corner only; the two
-// sides that meet there follow. The panel's corner rounding rebuilds the shape
-// from its corners. One undo step each.
+// sides that meet there follow. The panel's roundness slider rebuilds the shape
+// from its corners while it moves. One undo step each.
 
 #include "DocumentViewport.h"
 #include "../objects/ShapeObject.h"
 #include "../strokes/ShapeCleaner.h"
 
+#include <QLineF>
 #include <QTransform>
+
+#include <cmath>
 
 namespace {
 
@@ -34,6 +37,32 @@ ShapeObject* polygonShape(InsertedObject* obj)
 {
     auto* shape = dynamic_cast<ShapeObject*>(obj);
     return shape && shape->kind != ShapeObject::Ellipse ? shape : nullptr;
+}
+
+/// The one selected fixed shape whose corners the slider rounds (a rounded
+/// rectangle keeps its own).
+ShapeObject* roundableShape(const QList<InsertedObject*>& selected)
+{
+    ShapeObject* shape = selected.size() == 1 ? polygonShape(selected.first()) : nullptr;
+    return shape && shape->kind != ShapeObject::RoundRect ? shape : nullptr;
+}
+
+/// The radius at the slider's far end: half the shortest side.
+qreal largestRadius(const QVector<QPointF>& c)
+{
+    qreal shortest = 0.0;
+    for (int i = 0; i < c.size(); ++i) {
+        const qreal side = QLineF(c[i], c[(i + 1) % c.size()]).length();
+        shortest = i == 0 ? side : qMin(shortest, side);
+    }
+    return 0.5 * shortest;
+}
+
+/// The slider's place (0..1) for @p radius; squared back, so small radii get more of the slider.
+qreal fractionOf(qreal radius, const QVector<QPointF>& corners)
+{
+    const qreal most = largestRadius(corners);
+    return most > 0.0 ? std::sqrt(qBound(0.0, radius / most, 1.0)) : 0.0;
 }
 
 /// Dragging corner @p i onto a neighbour would leave a side of no length.
@@ -130,37 +159,88 @@ void DocumentViewport::setEditPoints(bool on)
     update();
 }
 
-int DocumentViewport::cornerStep() const
+qreal DocumentViewport::cornerFraction() const
 {
     if (m_lassoSelection.isValid()) {
         if (!lassoShapeCorners(nullptr)) {
-            return -1;
+            return -1.0;
         }
         const VectorStroke& s = m_lassoSelection.selectedStrokes.first();
-        return ShapeCleaner::roundingStep(positions(s), s.cornerJoints, shapeWidth(s));
+        const QVector<QPointF> pts = positions(s);
+        return fractionOf(ShapeCleaner::cornerRadius(pts, s.cornerJoints, shapeWidth(s)),
+                          ShapeCleaner::jointCorners(pts, s.cornerJoints));
     }
-    const ShapeObject* shape = m_selectedObjects.size() == 1 ? polygonShape(m_selectedObjects.first()) : nullptr;
-    return shape && shape->kind != ShapeObject::RoundRect ? shape->roundness : -1;
+    const ShapeObject* shape = roundableShape(m_selectedObjects);
+    return shape ? fractionOf(shape->radius(), shape->corners()) : -1.0;
 }
 
-void DocumentViewport::setCornerStep(int step)
+void DocumentViewport::beginCornerRadius()
 {
-    if (!m_document || step < 0 || step > 3 || step == cornerStep()) {
+    m_cornerBase.clear();
+    m_cornerRadiusShown = -1.0;
+    m_lineEndBefore = QJsonObject();
+    if (!m_document) {
         return;
     }
     if (m_lassoSelection.isValid()) {
-        bakeLassoTransform();
-        const VectorStroke& s = m_lassoSelection.selectedStrokes.first();
-        rebuildLassoShape(ShapeCleaner::jointCorners(positions(s), s.cornerJoints),
-                          ShapeCleaner::stepRadius(step, shapeWidth(s)));
-        commitLassoLine();   // One undo step; the shape stays selected
+        if (lassoShapeCorners(nullptr)) {
+            bakeLassoTransform();
+            const VectorStroke& s = m_lassoSelection.selectedStrokes.first();
+            const QVector<QPointF> pts = positions(s);
+            m_cornerBase = ShapeCleaner::jointCorners(pts, s.cornerJoints);
+            m_cornerRadius = ShapeCleaner::cornerRadius(pts, s.cornerJoints, shapeWidth(s));
+            m_cornerStrokeBefore = s;   // put back when the slider ends where it began
+            m_cornerBakedBefore = m_lassoSelection.baked;
+        }
         return;
     }
-    ShapeObject* shape = polygonShape(m_selectedObjects.first());
-    m_lineEndBefore = shape->toJson();
-    shape->roundness = step;
-    finishConnectorEndDrag(shape);   // One ObjectStateChange
-    update();
+    if (ShapeObject* shape = roundableShape(m_selectedObjects)) {
+        m_lineEndBefore = shape->toJson();   // For the one undo step
+    }
+}
+
+void DocumentViewport::previewCornerRadius(qreal fraction)
+{
+    const qreal f = qBound(0.0, fraction, 1.0);
+    if (!m_cornerBase.isEmpty()) {
+        if (m_lassoSelection.selectedStrokes.size() == 1) {
+            m_cornerRadiusShown = f * f * largestRadius(m_cornerBase);
+            rebuildLassoShape(m_cornerBase, m_cornerRadiusShown);
+        }
+        return;
+    }
+    ShapeObject* shape = roundableShape(m_selectedObjects);
+    if (shape && !m_lineEndBefore.isEmpty()) {
+        shape->setCornerRadius(f * f * largestRadius(shape->corners()));
+        update();
+    }
+}
+
+void DocumentViewport::commitCornerRadius()
+{
+    if (!m_cornerBase.isEmpty()) {
+        const bool moved = m_cornerRadiusShown >= 0.0;
+        const bool changed = moved && qAbs(m_cornerRadiusShown - m_cornerRadius) > 1e-6;
+        m_cornerBase.clear();
+        m_cornerRadiusShown = -1.0;
+        if (changed && m_lassoSelection.isValid()) {
+            commitLassoLine();   // One undo step; the shape stays selected
+        } else if (moved && m_lassoSelection.selectedStrokes.size() == 1) {
+            // Back where it began: no undo step, and no pending change either
+            // (a preview marked the selection baked; undo would leave it floating).
+            m_lassoSelection.selectedStrokes.first() = m_cornerStrokeBefore;
+            m_lassoSelection.baked = m_cornerBakedBefore;
+            m_lassoSelection.boundingBox = calculateSelectionBoundingBox();
+            m_lassoSelection.transformOrigin = m_lassoSelection.boundingBox.center();
+            invalidateSelectionCache();
+            update();
+        }
+        return;
+    }
+    if (!m_lineEndBefore.isEmpty()) {
+        finishConnectorEndDrag(roundableShape(m_selectedObjects));   // One ObjectStateChange, none if unchanged
+        update();
+    }
 }
 
 void DocumentViewport::bakeLassoTransform()
@@ -215,8 +295,7 @@ void DocumentViewport::beginLassoCorner(const QPointF& viewportPos)
     lassoShapeCorners(&m_cornerBase);
     const VectorStroke& s = m_lassoSelection.selectedStrokes.first();
     // The rounding it has, at its own radius, all through the drag.
-    m_cornerRadius = ShapeCleaner::stepRadius(
-        qMax(0, ShapeCleaner::roundingStep(positions(s), s.cornerJoints, shapeWidth(s))), shapeWidth(s));
+    m_cornerRadius = qMax(0.0, ShapeCleaner::cornerRadius(positions(s), s.cornerJoints, shapeWidth(s)));
 }
 
 void DocumentViewport::moveLassoCorner(const QPointF& p)

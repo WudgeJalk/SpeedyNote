@@ -43,6 +43,7 @@ bool DrawingSettings::reload()
     s.roughPercent = number("shapes/roughPercent", 12, 0, 40);
     s.equalPercent = number("shapes/equalPercent", 12, 0, 40);
     s.angleSnap = number("shapes/angleSnap", 12, 0, 30);
+    s.trapezoidAngle = number("shapes/trapezoidAngle", 25, 12, 45);
     s.levelAngle = number("shapes/levelAngle", 5, 0, 20);
     s.laserMode = number("laser/mode", 1, 0, 1);
     s.laserHoldMs = number("laser/holdMs", 1500, 0, 10000);

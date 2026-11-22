@@ -4,13 +4,15 @@
 #include "core/DocumentViewport.h"  // Phase 3.1: New viewport architecture
 #include "core/Document.h"          // Phase 3.1: Document class
 #include "core/Page.h"              // Phase P.4.6: For thumbnail rendering
+#include "core/Paper.h"             // Step N: page designs drawn by code
 #include "layers/VectorLayer.h"     // Phase P.4.6: For thumbnail rendering
 #include <QPainter>                 // Phase P.4.6: For thumbnail rendering
 #include "ui/sidebars/LayerPanel.h" // Phase S1: Moved to sidebars folder
 #include "ui/sidebars/OutlinePanel.h" // Phase E.2: PDF outline panel
 #include "ui/sidebars/LeftSidebarContainer.h" // Phase S3: Left sidebar container
 #include "ui/sidebars/PagePanel.h" // Page Panel: Task 5.1
-#include "ui/DebugOverlay.h"        // Debug overlay (toggle with F12)
+#include "ui/ThumbnailRenderer.h"   // Step N4: first-page thumbnails
+#include "ui/DebugOverlay.h"       // Debug overlay (toggle with F12)
 #include "ui/StyleLoader.h"         // QSS stylesheet loader
 // Phase D: Subtoolbar includes
 #include "ui/subtoolbars/PenSubToolbar.h"
@@ -31,6 +33,10 @@
 #include "core/NotebookLibrary.h" // Phase P.4.6: For saving thumbnails
 #include "ui/dialogs/PdfSourcesDialog.h"
 #include "ui/dialogs/PageRangeSelectDialog.h"
+#include "ui/dialogs/SaveErrorBox.h"
+#include "ui/dialogs/VersionsDialog.h"
+#include "ui/dialogs/NewNoteDialog.h"
+#include "core/AutoSaver.h"
 #include "sharing/NotebookExporter.h" // Phase 1: Export notebooks as .snbx
 #include "ui/widgets/PdfSearchBar.h"  // PDF text search bar
 #include "pdf/PdfSearchEngine.h"      // PDF text search engine
@@ -343,7 +349,34 @@ MainWindow::MainWindow(QWidget *parent)
 
     // Phase 3.1.1: Initialize DocumentManager
     m_documentManager = new DocumentManager(this);
-    
+
+    // Step R1: notes save themselves. A pointer down or a text being typed in
+    // any pane delays every save (one Document can be shown in two panes).
+    m_autoSaver = new AutoSaver(m_documentManager, [this]() {
+        bool busy = false;
+        m_splitViewManager->forEachTabManager([&busy](TabManager* tm, SplitViewManager::Pane) {
+            for (int i = 0; i < tm->tabCount() && !busy; ++i) {
+                if (DocumentViewport* vp = tm->viewportAt(i)) busy = vp->isEditInProgress();
+            }
+        });
+        return busy;
+    }, this);
+    connect(m_autoSaver, &AutoSaver::stateChanged, this,
+            [this](Document* doc, AutoSaver::State state, const QString&) {
+        if (state == AutoSaver::Saved && !m_documentManager->hasUnsavedChanges(doc)) {
+            m_splitViewManager->forEachTabManager([doc](TabManager* tm, SplitViewManager::Pane) {
+                for (int i = 0; i < tm->tabCount(); ++i) {
+                    if (tm->documentAt(i) == doc) tm->markTabModified(i, false);
+                }
+            });
+        }
+        refreshSaveSign();
+    });
+    // Step R3: the list of open tabs survives a crash.
+    connect(m_splitViewManager, &SplitViewManager::totalTabCountChanged, this, [this]() {
+        if (isVisible() && !m_closeRunning) saveSessionTabs();
+    });
+
     // Connect SplitViewManager signals (routes through active pane)
     connect(m_splitViewManager, &SplitViewManager::activeViewportChanged, this, [this](DocumentViewport* vp) {
         // MAC.1: Update ShortcutManager's active document scope so PagedOnly /
@@ -639,17 +672,14 @@ MainWindow::MainWindow(QWidget *parent)
         autosavePositionOnlyChange(doc, vp);
 
         const bool isUsingTemp = m_documentManager->isUsingTempBundle(doc);
-        bool needsSavePrompt = false;
+        const bool needsSavePrompt = doc->modified
+            || (isUsingTemp && DocumentManager::tempNoteHasWork(doc));
 
-        if (doc->isEdgeless()) {
-            bool hasContent = doc->tileCount() > 0 || doc->tileIndexCount() > 0;
-            needsSavePrompt = doc->modified || (isUsingTemp && hasContent);
-        } else {
-            bool hasContent = doc->pageCount() > 0;
-            needsSavePrompt = doc->modified || (isUsingTemp && hasContent);
-        }
-        
-        if (needsSavePrompt) {
+        if (m_autoSaver->isEnabled() && !doc->bundlePath().isEmpty()) {
+            if (!closeWithAutosave(doc)) {
+                return;
+            }
+        } else if (needsSavePrompt) {
             QString docType = doc->isEdgeless() ? tr("canvas") : tr("document");
             QMessageBox::StandardButton reply = QMessageBox::question(
                 this,
@@ -668,9 +698,7 @@ MainWindow::MainWindow(QWidget *parent)
                 bool canSaveInPlace = !existingPath.isEmpty() && !isUsingTemp;
                 
                 if (canSaveInPlace) {
-                    if (!m_documentManager->saveDocument(doc)) {
-                        QMessageBox::critical(this, tr("Save Error"),
-                            tr("Failed to save document to:\n%1").arg(existingPath));
+                    if (!saveInPlaceOrAsk(doc)) {
                         return;
                     }
                 } else {
@@ -1061,6 +1089,19 @@ void MainWindow::setupUi() {
         dlg.exec();
     });
 
+    // Step R4: an earlier version of the note opens as a new note.
+    QAction *versionsAction = overflowMenu->addAction(tr("Restore an Earlier Version..."));
+    connect(versionsAction, &QAction::triggered, this, [this]() {
+        DocumentViewport* vp = currentViewport();
+        Document* doc = vp ? vp->document() : nullptr;
+        if (!doc) return;
+        doc->waitForPendingSave();  // read the files once no save is writing them
+        VersionsDialog dialog(doc, vp->currentPageIndex(), this);
+        if (dialog.exec() == QDialog::Accepted) {
+            openRecoveredNote(dialog.copyPath(), /*recovered=*/false);
+        }
+    });
+
     // MAC.6: body extracted to MainWindow::lockAllOcrText() so the macOS OCR
     // menu (which can't access this private inline lambda) shares one
     // implementation with the overflow menu via QMetaObject::invokeMethod.
@@ -1167,6 +1208,30 @@ void MainWindow::setupUi() {
         }
     });
     connect(m_navigationBar, &NavigationBar::saveClicked, this, &MainWindow::saveDocument);
+    // The red sign of a failed autosave: same choices as any failed save.
+    connect(m_navigationBar, &NavigationBar::saveStateClicked, this, [this]() {
+        DocumentViewport* vp = currentViewport();
+        Document* doc = vp ? vp->document() : nullptr;
+        QString detail;
+        if (!doc || !m_autoSaver || m_autoSaver->state(doc, &detail) != AutoSaver::Failed) {
+            return;
+        }
+        QString reason;
+        m_autoSaver->flush(doc, &reason);  // try once more first: the cause may be gone
+        if (!m_documentManager->hasUnsavedChanges(doc)) {
+            return;
+        }
+        switch (SaveErrorBox::ask(this, doc->displayName(), reason)) {
+        case SaveErrorBox::Retry:
+            saveDocument();
+            break;
+        case SaveErrorBox::SaveCopy:
+            if (saveNewDocumentWithDialog(doc)) updateWindowTitle();
+            break;
+        default:
+            break;
+        }
+    });
     connect(m_navigationBar, &NavigationBar::addClicked, this, [this]() {
         // Phase P.4.3: Show dropdown menu for new document options
         showAddMenu();
@@ -1382,7 +1447,7 @@ void MainWindow::setupUi() {
     }
     QDir().mkpath(tempDir);  // Recreate clean directory
 
-    // NOTE: Do NOT call addNewTab() here!
+    // NOTE: Do NOT call createNote() here!
     // When launched from Launcher, the FAB actions (createNewPaged, createNewEdgeless, etc.)
     // explicitly call the appropriate method to create a tab.
     // When launched with a file argument, openFileInNewTab() creates the tab.
@@ -1509,8 +1574,8 @@ void MainWindow::wireQActionDispatchers()
     // ----- file.* -----
     wire("file.save",         [](MainWindow* w){ w->saveDocument(); });
     wire("file.save_as",      [](MainWindow* w){ w->saveDocumentAs(); });
-    wire("file.new_paged",    [](MainWindow* w){ w->addNewTab(); });
-    wire("file.new_edgeless", [](MainWindow* w){ w->addNewEdgelessTab(); });
+    wire("file.new_paged",    [](MainWindow* w){ w->newNote(false); });
+    wire("file.new_edgeless", [](MainWindow* w){ w->newNote(true); });
     wire("file.open_pdf",     [](MainWindow* w){ w->openPdfDocument(); });
     wire("file.open_notebook",[](MainWindow* w){ w->loadFolderDocument(); });
     wire("file.export",       [](MainWindow* w){
@@ -3942,12 +4007,18 @@ bool MainWindow::saveNewDocumentWithDialog(Document* doc)
     doc->name = fileInfo.baseName();
     
     // Save using DocumentManager
-    if (!m_documentManager->saveDocumentAs(doc, filePath)) {
-        QMessageBox::critical(this, tr("Save Error"),
-            tr("Failed to save document to:\n%1").arg(filePath));
-        return false;
+    while (!m_documentManager->saveDocumentAs(doc, filePath)) {
+        switch (SaveErrorBox::ask(this, doc->name, m_documentManager->lastSaveError())) {
+        case SaveErrorBox::Retry:
+            continue;
+        case SaveErrorBox::SaveCopy:
+            return saveNewDocumentWithDialog(doc);
+        case SaveErrorBox::Cancel:
+        case SaveErrorBox::Discard:
+            return false;
+        }
     }
-    
+
     // Phase P.4.6: Save thumbnail to NotebookLibrary
     {
         QPixmap thumbnail;
@@ -3981,6 +4052,73 @@ bool MainWindow::saveNewDocumentWithDialog(Document* doc)
     }
 #endif
     
+    return true;
+}
+
+bool MainWindow::saveInPlaceOrAsk(Document* doc)
+{
+    // No automatic retry here: the user decides, and the old file stays meanwhile.
+    while (!m_documentManager->saveDocument(doc)) {
+        switch (SaveErrorBox::ask(this, doc->displayName(), m_documentManager->lastSaveError())) {
+        case SaveErrorBox::Retry:
+            continue;
+        case SaveErrorBox::SaveCopy:
+            return saveNewDocumentWithDialog(doc);
+        case SaveErrorBox::Cancel:
+        case SaveErrorBox::Discard:
+            return false;
+        }
+    }
+    return true;
+}
+
+bool MainWindow::closeWithAutosave(Document* doc)
+{
+    // Autosave on (Step R1): a note that has a place is saved without a
+    // question; only a failed save asks. A note without a place asks to be kept.
+    if (m_documentManager->isUsingTempBundle(doc)) {
+        if (!DocumentManager::tempNoteHasWork(doc)) {
+            return true;  // nothing written in it: its temp bundle just goes
+        }
+        QMessageBox box(QMessageBox::Question, tr("Keep this note?"),
+                        tr("\"%1\" was never saved to a place. It is kept safe until you "
+                           "close it. Keep it?").arg(doc->displayName()),
+                        QMessageBox::NoButton, this);
+        QPushButton* keep = box.addButton(tr("Save to..."), QMessageBox::AcceptRole);
+        QPushButton* drop = box.addButton(tr("Delete"), QMessageBox::DestructiveRole);
+        box.addButton(QMessageBox::Cancel);
+        box.setDefaultButton(keep);
+        box.exec();
+        if (box.clickedButton() == drop) return true;
+        if (box.clickedButton() != keep || !saveNewDocumentWithDialog(doc)) return false;
+    } else {
+        QString error;
+        while (!m_autoSaver->flush(doc, &error)) {
+            switch (SaveErrorBox::ask(this, doc->displayName(), error, /*offerDiscard=*/true)) {
+            case SaveErrorBox::Retry:
+                continue;
+            case SaveErrorBox::SaveCopy:
+                if (!saveNewDocumentWithDialog(doc)) return false;
+                break;
+            case SaveErrorBox::Cancel:
+                return false;
+            case SaveErrorBox::Discard:
+                return true;
+            }
+            break;  // saved to another place
+        }
+    }
+
+    // Plan B2: make imported PDF sources part of the bundle when it closes.
+    if (doc->needsMaterialization() && !doc->bundlePath().isEmpty()) {
+        if (m_searchEngine) m_searchEngine->cancelAndWait();
+        if (!doc->saveBundle(doc->bundlePath(), /*finalize=*/true)) {
+            QMessageBox::critical(this, tr("Save Error"),
+                tr("PDF sources could not be finalized. Repair the "
+                   "unavailable sources before closing."));
+            return false;
+        }
+    }
     return true;
 }
 
@@ -4030,18 +4168,21 @@ void MainWindow::saveDocument()
             
     if (!existingPath.isEmpty() && !isUsingTemp) {
         // ✅ Document was previously saved to permanent location - save in-place
-        if (!m_documentManager->saveDocument(doc)) {
-            QMessageBox::critical(this, tr("Save Error"),
-                tr("Failed to save document to:\n%1").arg(existingPath));
-        return;
-    }
-
+        if (!saveInPlaceOrAsk(doc)) {
+            return;
+        }
         // Update tab title (clear modified flag)
         int currentIndex = tabManager()->currentIndex();
         if (currentIndex >= 0) {
             tabManager()->markTabModified(currentIndex, false);
         }
-        
+        // "Save to another place" from the error box moved the note.
+        const QString savedPath = m_documentManager->documentPath(doc);
+        if (savedPath != existingPath) {
+            if (currentIndex >= 0) tabManager()->setTabTitle(currentIndex, doc->name);
+            return;  // saveNewDocumentWithDialog already stored the thumbnail
+        }
+
         // Phase P.4.6: Save thumbnail to NotebookLibrary
         {
             QPixmap thumbnail;
@@ -4918,149 +5059,64 @@ void MainWindow::forceUIRefresh() {
 
 
     
-void MainWindow::addNewTab() {
-    // Phase 3.1.1: Simplified addNewTab using DocumentManager and TabManager
-    if (!tabManager() || !m_documentManager) {
-        qWarning() << "addNewTab: TabManager or DocumentManager not initialized";
-        return;
+void MainWindow::newNote(bool edgeless, const QString& folderHint, bool forceShow)
+{
+    NewNoteSpec spec;
+    if (NewNoteDialog::ask(this, edgeless, folderHint, &spec, forceShow)) {
+        createNote(spec);
     }
-    
-    // Create a new blank document
-    Document* doc = m_documentManager->createDocument();
-    if (!doc) {
-        qWarning() << "addNewTab: Failed to create document";
-        return;
-    }
-    
-    // Apply default page size and background settings from user preferences
-    {
-        QSettings settings("SpeedyNote", "App");
-        
-        // Load page size (default: US Letter at 96 DPI)
-        qreal pageWidth = settings.value("page/width", 816).toReal();
-        qreal pageHeight = settings.value("page/height", 1056).toReal();
-        QSizeF defaultPageSize(pageWidth, pageHeight);
-        
-        // Load background settings (dark-mode-aware defaults)
-        // Default: Grid with 32px spacing (32 divides evenly into 1024px tiles)
-        bool dark = isDarkMode();
-        Page::BackgroundType defaultStyle = static_cast<Page::BackgroundType>(
-            settings.value("background/type", static_cast<int>(Page::BackgroundType::Grid)).toInt());
-        QColor defaultBgColor = QColor(settings.value("background/color", dark ? "#2b2b2b" : "#ffffff").toString());
-        QColor defaultGridColor = QColor(settings.value("background/gridColor", dark ? "#404040" : "#c8c8c8").toString());
-        int defaultGridSpacing = settings.value("background/gridSpacing", 32).toInt();
-        int defaultLineSpacing = settings.value("background/lineSpacing", 32).toInt();
-        
-        // Update document defaults for future pages
-        doc->defaultPageSize = defaultPageSize;
-        doc->defaultBackgroundType = defaultStyle;
-        doc->defaultBackgroundColor = defaultBgColor;
-        doc->defaultGridColor = defaultGridColor;
-        doc->defaultGridSpacing = defaultGridSpacing;
-        doc->defaultLineSpacing = defaultLineSpacing;
-        
-        // Also apply to the first page (already created by Document::createNew).
-        // Use setPageSize() so both the Page object AND the layout metadata
-        // (used by pageSizeAt() / viewport layout) are updated together.
-        if (doc->pageCount() > 0) {
-            doc->setPageSize(0, defaultPageSize);
-            Page* firstPage = doc->page(0);
-            if (firstPage) {
-                firstPage->backgroundType = defaultStyle;
-                firstPage->backgroundColor = defaultBgColor;
-                firstPage->gridColor = defaultGridColor;
-                firstPage->gridSpacing = defaultGridSpacing;
-                firstPage->lineSpacing = defaultLineSpacing;
-            }
-        }
-    }
-    
-    // Create a new tab with DocumentViewport
-    QString tabTitle = doc->displayName();
-    int tabIndex = tabManager()->createTab(doc, tabTitle);
-    
-    // Note: zoomToWidth() is called automatically by DocumentViewport::setDocument()
-    // for new paged documents, which also handles horizontal centering.
 }
 
-void MainWindow::addNewEdgelessTab()
+Document* MainWindow::createNote(const NewNoteSpec& spec)
 {
-    // Phase E7: Create a new edgeless (infinite canvas) document
     if (!tabManager() || !m_documentManager) {
-        qWarning() << "addNewEdgelessTab: TabManager or DocumentManager not initialized";
-        return;
+        qWarning() << "createNote: TabManager or DocumentManager not initialized";
+        return nullptr;
     }
-    
-    // Create a new edgeless document
-    Document* doc = m_documentManager->createEdgelessDocument();
+    Document* doc = spec.edgeless ? m_documentManager->createEdgelessDocument(spec.name)
+                                  : m_documentManager->createDocument(spec.name);
     if (!doc) {
-        qWarning() << "addNewEdgelessTab: Failed to create edgeless document";
-        return;
+        qWarning() << "createNote: Failed to create document";
+        return nullptr;
     }
-    
-    // Apply default background settings from user preferences (dark-mode-aware defaults)
-    // Default: Grid with 32px spacing (32 divides evenly into 1024px tiles)
-    {
-        QSettings settings("SpeedyNote", "App");
-        bool dark = isDarkMode();
-        Page::BackgroundType defaultStyle = static_cast<Page::BackgroundType>(
-            settings.value("background/type", static_cast<int>(Page::BackgroundType::Grid)).toInt());
-        QColor defaultBgColor = QColor(settings.value("background/color", dark ? "#2b2b2b" : "#ffffff").toString());
-        QColor defaultGridColor = QColor(settings.value("background/gridColor", dark ? "#404040" : "#c8c8c8").toString());
-        int defaultGridSpacing = settings.value("background/gridSpacing", 32).toInt();
-        int defaultLineSpacing = settings.value("background/lineSpacing", 32).toInt();
-        
-        // Update document defaults for tiles
-        doc->defaultBackgroundType = defaultStyle;
-        doc->defaultBackgroundColor = defaultBgColor;
-        doc->defaultGridColor = defaultGridColor;
-        doc->defaultGridSpacing = defaultGridSpacing;
-        doc->defaultLineSpacing = defaultLineSpacing;
+    QString error;
+    if (!NewNote::apply(doc, spec, &error)) {   // the note keeps plain paper
+        QMessageBox::warning(this, tr("New Note"), error);
     }
-    
-    // Create a new tab with DocumentViewport
-    QString tabTitle = doc->displayName();
-    int tabIndex = tabManager()->createTab(doc, tabTitle);
-    
-#ifdef SPEEDYNOTE_DEBUG
-    qDebug() << "Created new edgeless tab at index" << tabIndex << "with document:" << tabTitle;
-#endif
-    
-    // For edgeless, center on origin (0,0)
-    QTimer::singleShot(0, this, [this, tabIndex]() {
-        if (tabManager()) {
-            DocumentViewport* viewport = tabManager()->viewportAt(tabIndex);
-            if (viewport) {
-                // Center on origin - start with a small negative pan so origin is visible
+
+    // Saved at its place at once, so the note exists where the user made it.
+    const QString path = NewNote::bundlePathFor(spec);
+    doc->name = QFileInfo(path).completeBaseName();
+    bool saved = false;
+    for (;;) {
+        const bool folderOk = QDir().mkpath(spec.folder);
+        saved = folderOk && m_documentManager->saveDocumentAs(doc, path);
+        if (saved) break;
+        const QString reason = folderOk ? m_documentManager->lastSaveError()
+            : tr("The folder %1 could not be made.").arg(QDir::toNativeSeparators(spec.folder));
+        const SaveErrorBox::Choice choice = SaveErrorBox::ask(this, doc->name, reason);
+        if (choice == SaveErrorBox::Retry) continue;
+        // Another place (it stores the thumbnail itself), or none: the note
+        // stays open without a place, kept safe in <AppData>/unsaved.
+        if (choice == SaveErrorBox::SaveCopy) saveNewDocumentWithDialog(doc);
+        break;
+    }
+    if (saved) {
+        // The save put it on the start screen; its card shows this picture.
+        const QPixmap thumbnail = doc->isEdgeless() ? renderEdgelessThumbnail(doc) : renderPage0Thumbnail(doc);
+        if (!thumbnail.isNull()) NotebookLibrary::instance()->saveThumbnail(path, thumbnail);
+    }
+
+    const int tabIndex = tabManager()->createTab(doc, doc->displayName());
+    if (doc->isEdgeless()) {
+        // Start near the origin, where the canvas begins.
+        QTimer::singleShot(0, this, [this, tabIndex]() {
+            if (DocumentViewport* viewport = tabManager() ? tabManager()->viewportAt(tabIndex) : nullptr)
                 viewport->setPanOffset(QPointF(-100, -100));
-            }
-        }
-    });
-    
-    // REMOVED MW7.2: updateDialDisplay removed - dial functionality deleted
-}
-
-void MainWindow::addNewTabAt(const QString& bundlePath, bool edgeless)
-{
-    if (edgeless) {
-        addNewEdgelessTab();
-    } else {
-        addNewTab();
+        });
     }
-    DocumentViewport* viewport = tabManager() ? tabManager()->currentViewport() : nullptr;
-    Document* doc = viewport ? viewport->document() : nullptr;
-    if (!doc || !m_documentManager) return;
-
-    doc->name = QFileInfo(bundlePath).completeBaseName();
-    if (!m_documentManager->saveDocumentAs(doc, bundlePath)) {
-        QMessageBox::critical(this, tr("Save Error"),
-            tr("Failed to save document to:\n%1").arg(bundlePath));
-        return;
-    }
-    NotebookLibrary::instance()->addToRecent(bundlePath);
-    const int index = tabManager()->currentIndex();
-    tabManager()->setTabTitle(index, doc->name);
-    tabManager()->markTabModified(index, false);
+    // zoomToWidth() runs in DocumentViewport::setDocument() for a new paged note.
+    return doc;
 }
 
 void MainWindow::loadFolderDocument()
@@ -5571,24 +5627,51 @@ void MainWindow::setUseCustomAccentColor(bool use) {
 }
 
 void MainWindow::applyBackgroundSettings(Page::BackgroundType type, const QColor& bgColor,
-                                         const QColor& gridColor, int gridSpacing, int lineSpacing) {
+                                         const QColor& gridColor, int gridSpacing, int lineSpacing,
+                                         const QString& paperIdIn, const QString& customImageIn) {
     // Apply to current document
     DocumentViewport* viewport = currentViewport();
     if (!viewport) {
         return;
     }
-    
+
     Document* doc = viewport->document();
     if (!doc) {
         return;
     }
-    
+
+    // A paper sets its fallback type and spacing (what an older version draws).
+    // An endless canvas takes only endless papers and no picture.
+    QString paperId = paperIdIn;
+    QString customImage = doc->isEdgeless() ? QString() : customImageIn;
+    if (const Paper::PaperDef* paper = Paper::find(paperId)) {
+        int spacing = 0;
+        Paper::fallbackFor(paperId, &type, &spacing);
+        if (spacing > 0) gridSpacing = lineSpacing = spacing;
+        if (doc->isEdgeless() && !paper->endless) paperId.clear();
+    }   // an unknown id (from a newer version) stays: it draws its fallback
+    if (!customImage.isEmpty()) {
+        type = Page::BackgroundType::Custom;
+        paperId.clear();
+    }
+
     // Update document defaults for future pages
     doc->defaultBackgroundType = type;
     doc->defaultBackgroundColor = bgColor;
     doc->defaultGridColor = gridColor;
     doc->defaultGridSpacing = gridSpacing;
     doc->defaultLineSpacing = lineSpacing;
+    doc->defaultPaperId = paperId;
+    doc->defaultCustomImage = customImage;
+    const QString bundlePath = doc->bundlePath();
+    auto applyPaper = [&](Page* p) {
+        p->paperId = paperId;
+        if (p->customImage != customImage) {
+            p->customImage = customImage;
+            p->customBackground = QPixmap();
+            p->loadCustomBackground(bundlePath);
+        }
+    };
     
     // Apply to all existing pages in the document
     // IMPORTANT: Skip pages with PDF backgrounds - they should never be overwritten
@@ -5607,6 +5690,10 @@ void MainWindow::applyBackgroundSettings(Page::BackgroundType type, const QColor
                 page->gridColor = gridColor;
                 page->gridSpacing = gridSpacing;
                 page->lineSpacing = lineSpacing;
+                applyPaper(page);
+                // Each page file keeps its own background: without this, a page
+                // unloaded or reopened came back with its old paper.
+                doc->markPageDirty(i);
             }
         }
     }
@@ -5625,6 +5712,7 @@ void MainWindow::applyBackgroundSettings(Page::BackgroundType type, const QColor
                     tile->gridColor = gridColor;
                     tile->gridSpacing = gridSpacing;
                     tile->lineSpacing = lineSpacing;
+                    tile->paperId = paperId;
                 }
             }
         }
@@ -6342,9 +6430,15 @@ void MainWindow::setupActionBars()
                 updateShapeEditButtons(vp);
             }
         });
-        connect(bar, &ActionBar::cornerStepChosen, this, [this](int step) {
+        connect(bar, &ActionBar::cornerRadiusBegin, this, [this]() {
+            if (DocumentViewport* vp = currentViewport()) vp->beginCornerRadius();
+        });
+        connect(bar, &ActionBar::cornerRadiusPreview, this, [this](qreal fraction) {
+            if (DocumentViewport* vp = currentViewport()) vp->previewCornerRadius(fraction);
+        });
+        connect(bar, &ActionBar::cornerRadiusCommit, this, [this]() {
             if (DocumentViewport* vp = currentViewport()) {
-                vp->setCornerStep(step);
+                vp->commitCornerRadius();
                 updateShapeEditButtons(vp);
             }
         });
@@ -6448,9 +6542,9 @@ void MainWindow::setupActionBars()
 void MainWindow::updateShapeEditButtons(DocumentViewport* vp)
 {
     const bool can = vp && vp->canEditPoints();
-    const int step = can ? vp->cornerStep() : -1;
+    const qreal fraction = can ? vp->cornerFraction() : -1.0;
     for (ActionBar* bar : {static_cast<ActionBar*>(m_lassoActionBar), static_cast<ActionBar*>(m_objectSelectActionBar)}) {
-        if (bar) bar->setShapeEdit(can, can && vp->editPoints(), step);
+        if (bar) bar->setShapeEdit(can, can && vp->editPoints(), fraction);
     }
     updateActionBarPosition();
 }
@@ -7975,6 +8069,19 @@ void MainWindow::updateWindowTitle()
     if (m_navigationBar) {
         m_navigationBar->setFilename(displayName.isEmpty() ? tr("Untitled") : displayName);
     }
+    refreshSaveSign();
+}
+
+void MainWindow::refreshSaveSign()
+{
+    if (!m_navigationBar || !m_autoSaver) {
+        return;
+    }
+    DocumentViewport* vp = currentViewport();
+    Document* doc = vp ? vp->document() : nullptr;
+    QString tip;
+    const AutoSaver::State state = doc ? m_autoSaver->state(doc, &tip) : AutoSaver::Off;
+    m_navigationBar->setSaveState(state, tip);
 }
 
 // MAC.6: Lock every unlocked OCR-text object on the active page (paged docs)
@@ -8128,7 +8235,7 @@ void MainWindow::applyDocumentOcrLanguage(Document* doc, const QString& lang)
 {
     if (doc) {
         doc->ocrLanguage = lang;
-        doc->modified = true;
+        doc->markModified();
     }
 
     QString effective = resolveOcrLanguage(doc);
@@ -8752,277 +8859,17 @@ void MainWindow::autosavePositionOnlyChange(Document* doc, DocumentViewport* vp)
 
 // ============================================================================
 
+// The thumbnails of the start screen (the drawing lives in ThumbnailRenderer).
 QPixmap MainWindow::renderPage0Thumbnail(Document* doc)
 {
-    // Phase P.4.6: Render page-0 thumbnail for saving to NotebookLibrary
-    if (!doc || doc->isEdgeless() || doc->pageCount() == 0) {
-        return QPixmap();
-    }
-    
-    // Target thumbnail size for launcher display
-    static constexpr int THUMBNAIL_WIDTH = 180;
-    static constexpr qreal MAX_DPR = 2.0;  // Cap at 2x for reasonable file size
-    
-    // Get page size from metadata
-    QSizeF pageSize = doc->pageSizeAt(0);
-    if (pageSize.isEmpty()) {
-        pageSize = QSizeF(612, 792);  // Default US Letter
-    }
-    
-    // Calculate dimensions
-    qreal aspectRatio = pageSize.height() / pageSize.width();
-    int thumbnailHeight = static_cast<int>(THUMBNAIL_WIDTH * aspectRatio);
-    qreal dpr = qMin(devicePixelRatioF(), MAX_DPR);
-    
-    int physicalWidth = static_cast<int>(THUMBNAIL_WIDTH * dpr);
-    int physicalHeight = static_cast<int>(thumbnailHeight * dpr);
-    
-    // Create pixmap
-    QPixmap thumbnail(physicalWidth, physicalHeight);
-    thumbnail.setDevicePixelRatio(dpr);
-    thumbnail.fill(Qt::white);
-    
-    QPainter painter(&thumbnail);
-    painter.setRenderHint(QPainter::Antialiasing, true);
-    painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-    
-    // Calculate scale factor
-    qreal scale = static_cast<qreal>(THUMBNAIL_WIDTH) / pageSize.width();
-    painter.scale(scale, scale);
-    
-    // Get the page (may trigger lazy load)
-    Page* page = doc->page(0);
-    if (!page) {
-        qWarning() << "renderPage0Thumbnail: page(0) returned nullptr";
-        painter.end();
-        return thumbnail;  // Return white placeholder
-    }
-    
-    // Defensive check: verify page has layers (should always have at least 1)
-    int layerCount = page->layerCount();
-    if (layerCount <= 0) {
-        qWarning() << "renderPage0Thumbnail: page has no layers, skipping layer rendering";
-    }
-    
-    // Render PDF background if available (resolve the page's own PDF source)
-    QPixmap pdfBackground;
-    if (page->backgroundType == Page::BackgroundType::PDF && page->pdfPageNumber >= 0
-        && doc->providerForSource(page->pdfSourceId)) {
-        qreal pdfDpi = (THUMBNAIL_WIDTH * dpr) / (pageSize.width() / 72.0);
-        pdfDpi = qMin(pdfDpi, 150.0);  // Cap at 150 DPI
-
-        QImage pdfImage = doc->renderPdfPageToImage(page->pdfSourceId, page->pdfPageNumber, pdfDpi);
-        if (!pdfImage.isNull()) {
-            pdfBackground = QPixmap::fromImage(pdfImage);
-        }
-    }
-    
-    // Render background
-    page->renderBackground(painter, pdfBackground.isNull() ? nullptr : &pdfBackground, 1.0);
-    
-    // Render vector layers (with bounds check)
-    for (int layerIdx = 0; layerIdx < layerCount; ++layerIdx) {
-        VectorLayer* layer = page->layer(layerIdx);
-        if (layer && layer->visible) {
-            layer->render(painter);
-        }
-    }
-    
-    // Render inserted objects
-    page->renderObjects(painter, 1.0);
-    
-    painter.end();
-    return thumbnail;
+    if (!doc || doc->isEdgeless()) return QPixmap();
+    return ThumbnailRenderer::renderFirstPage(doc, 180, qMin(devicePixelRatioF(), 2.0));
 }
 
 QPixmap MainWindow::renderEdgelessThumbnail(Document* doc)
 {
-    if (!doc || !doc->isEdgeless()) {
-        return QPixmap();
-    }
-    
-    // Target thumbnail size (same as paged thumbnails)
-    static constexpr int THUMBNAIL_WIDTH = 180;
-    static constexpr int THUMBNAIL_HEIGHT = 180;  // Square for edgeless (no page aspect ratio)
-    static constexpr qreal MAX_DPR = 2.0;
-    
-    qreal dpr = qMin(devicePixelRatioF(), MAX_DPR);
-    int physicalWidth = static_cast<int>(THUMBNAIL_WIDTH * dpr);
-    int physicalHeight = static_cast<int>(THUMBNAIL_HEIGHT * dpr);
-    
-    int tileSize = Document::EDGELESS_TILE_SIZE;
-    
-    // Determine the center point for the thumbnail viewport.
-    // Primary: last_position (where the user was last looking).
-    // Fallback: center of the first indexed tile if last_position has no nearby tiles.
-    QPointF center = doc->edgelessLastPosition();
-    
-    // Define a virtual viewport: 1 tile centered on the position.
-    // A single tile keeps content legible at small thumbnail sizes.
-    qreal viewExtent = tileSize * 1.0;
-    QRectF viewRect(center.x() - viewExtent / 2.0, center.y() - viewExtent / 2.0,
-                    viewExtent, viewExtent);
-    
-    // Find tiles that intersect this viewport (with margin for strokes at edges).
-    // tilesInRect() returns ALL coordinate positions in the range, even empty ones,
-    // so we filter to keep only coordinates where an actual tile exists.
-    static constexpr int STROKE_MARGIN = 100;
-    QRectF marginRect = viewRect.adjusted(-STROKE_MARGIN, -STROKE_MARGIN,
-                                          STROKE_MARGIN, STROKE_MARGIN);
-    QVector<Document::TileCoord> allTiles;
-    {
-        QVector<Document::TileCoord> candidates = doc->tilesInRect(marginRect);
-        for (const auto& coord : candidates) {
-            if (doc->getTile(coord.first, coord.second)) {
-                allTiles.append(coord);
-            }
-        }
-    }
-    
-    // Fallback: if no tiles with content near last_position, try the first loaded tile
-    if (allTiles.isEmpty()) {
-        QVector<Document::TileCoord> allCoords = doc->allTileCoords();
-        if (!allCoords.isEmpty()) {
-            // Use first tile and re-center viewport on it
-            auto firstCoord = allCoords.first();
-            center = QPointF(firstCoord.first * tileSize + tileSize / 2.0,
-                             firstCoord.second * tileSize + tileSize / 2.0);
-            viewRect = QRectF(center.x() - viewExtent / 2.0, center.y() - viewExtent / 2.0,
-                              viewExtent, viewExtent);
-            marginRect = viewRect.adjusted(-STROKE_MARGIN, -STROKE_MARGIN,
-                                           STROKE_MARGIN, STROKE_MARGIN);
-            QVector<Document::TileCoord> fallbackCandidates = doc->tilesInRect(marginRect);
-            for (const auto& coord : fallbackCandidates) {
-                if (doc->getTile(coord.first, coord.second)) {
-                    allTiles.append(coord);
-                }
-            }
-        }
-    }
-    
-    // Create the thumbnail pixmap
-    QPixmap thumbnail(physicalWidth, physicalHeight);
-    thumbnail.setDevicePixelRatio(dpr);
-    thumbnail.fill(doc->defaultBackgroundColor);
-    
-    QPainter painter(&thumbnail);
-    painter.setRenderHint(QPainter::Antialiasing, true);
-    painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-    
-    // Calculate scale: map viewExtent doc units to THUMBNAIL_WIDTH logical pixels
-    qreal scale = static_cast<qreal>(THUMBNAIL_WIDTH) / viewExtent;
-    
-    // Transform: translate so viewRect.topLeft maps to (0,0), then scale
-    painter.scale(scale, scale);
-    painter.translate(-viewRect.left(), -viewRect.top());
-    
-    // Pre-calculate visible tile range for background pass
-    int minVisibleTx = static_cast<int>(std::floor(viewRect.left() / tileSize));
-    int maxVisibleTx = static_cast<int>(std::floor(viewRect.right() / tileSize));
-    int minVisibleTy = static_cast<int>(std::floor(viewRect.top() / tileSize));
-    int maxVisibleTy = static_cast<int>(std::floor(viewRect.bottom() / tileSize));
-    
-    // ===== PASS 1: Render backgrounds for visible tiles =====
-    // Render all tile positions in the view, even empty ones (they get default background)
-    for (int tx = minVisibleTx; tx <= maxVisibleTx; ++tx) {
-        for (int ty = minVisibleTy; ty <= maxVisibleTy; ++ty) {
-            QRectF tileRect(tx * tileSize, ty * tileSize, tileSize, tileSize);
-            Page* tile = doc->getTile(tx, ty);
-            
-            if (tile) {
-                Page::renderBackgroundPattern(
-                    painter, tileRect,
-                    tile->backgroundColor, tile->backgroundType,
-                    tile->gridColor, tile->gridSpacing, tile->lineSpacing,
-                    1.0  // No zoom compensation needed for static thumbnail
-                );
-            } else {
-                Page::renderBackgroundPattern(
-                    painter, tileRect,
-                    doc->defaultBackgroundColor, doc->defaultBackgroundType,
-                    doc->defaultGridColor, doc->defaultGridSpacing, doc->defaultLineSpacing,
-                    1.0
-                );
-            }
-        }
-    }
-    
-    // If no tiles with content exist, we're done (thumbnail shows just the background)
-    if (allTiles.isEmpty()) {
-        painter.end();
-        return thumbnail;
-    }
-    
-    // ===== PASS 2: Render objects with default affinity (-1) =====
-    // These render below all stroke layers
-    const auto& layers = doc->edgelessLayers();
-    auto renderObjectsWithAffinity = [&](int affinity) {
-        // Check if the tied layer is visible (affinity K ties to Layer K+1)
-        int tiedLayerIndex = affinity + 1;
-        if (tiedLayerIndex >= 0 && tiedLayerIndex < static_cast<int>(layers.size())) {
-            if (!layers[tiedLayerIndex].visible) return;
-        }
-        
-        for (const auto& coord : allTiles) {
-            Page* tile = doc->getTile(coord.first, coord.second);
-            if (!tile) continue;
-            
-            auto it = tile->objectsByAffinity.find(affinity);
-            if (it == tile->objectsByAffinity.end() || it->second.empty()) continue;
-            
-            QPointF tileOrigin(coord.first * tileSize, coord.second * tileSize);
-            
-            // Sort by z-order
-            std::vector<InsertedObject*> objs = it->second;
-            std::sort(objs.begin(), objs.end(),
-                      [](InsertedObject* a, InsertedObject* b) {
-                          return a->zOrder < b->zOrder;
-                      });
-            
-            for (InsertedObject* obj : objs) {
-                if (!obj->visible) continue;
-                painter.save();
-                painter.translate(tileOrigin);
-                obj->render(painter, 1.0);
-                painter.restore();
-            }
-        }
-    };
-    
-    renderObjectsWithAffinity(-1);
-    
-    // ===== PASS 3: Interleaved layer strokes and objects =====
-    int maxLayerCount = 0;
-    for (const auto& coord : allTiles) {
-        Page* tile = doc->getTile(coord.first, coord.second);
-        if (tile) {
-            maxLayerCount = qMax(maxLayerCount, tile->layerCount());
-        }
-    }
-    
-    for (int layerIdx = 0; layerIdx < maxLayerCount; ++layerIdx) {
-        // PASS 3a: Render this layer's strokes from all tiles
-        for (const auto& coord : allTiles) {
-            Page* tile = doc->getTile(coord.first, coord.second);
-            if (!tile) continue;
-            if (layerIdx >= tile->layerCount()) continue;
-            
-            VectorLayer* layer = tile->layer(layerIdx);
-            if (!layer || !layer->visible) continue;
-            
-            QPointF tileOrigin(coord.first * tileSize, coord.second * tileSize);
-            painter.save();
-            painter.translate(tileOrigin);
-            layer->render(painter);
-            painter.restore();
-        }
-        
-        // PASS 3b: Render objects with affinity = layerIdx
-        renderObjectsWithAffinity(layerIdx);
-    }
-    
-    painter.end();
-    return thumbnail;
+    if (!doc || !doc->isEdgeless()) return QPixmap();
+    return ThumbnailRenderer::renderFirstPage(doc, 180, qMin(devicePixelRatioF(), 2.0));
 }
 
 void MainWindow::toggleLauncher() {
@@ -9071,12 +8918,18 @@ void MainWindow::showAddMenu() {
     // New Edgeless Canvas
     QAction* newEdgelessAction = menu.addAction(tr("New Edgeless Canvas"));
     newEdgelessAction->setShortcut(ShortcutManager::instance()->keySequenceForAction("file.new_edgeless"));
-    connect(newEdgelessAction, &QAction::triggered, this, &MainWindow::addNewEdgelessTab);
-    
+    connect(newEdgelessAction, &QAction::triggered, this, [this]() { newNote(true); });
+
     // New Paged Notebook
     QAction* newPagedAction = menu.addAction(tr("New Paged Notebook"));
     newPagedAction->setShortcut(ShortcutManager::instance()->keySequenceForAction("file.new_paged"));
-    connect(newPagedAction, &QAction::triggered, this, &MainWindow::addNewTab);
+    connect(newPagedAction, &QAction::triggered, this, [this]() { newNote(false); });
+
+    // Always the New note window, even when it is turned off.
+    QAction* newWithOptions = menu.addAction(tr("New Note with Options..."));
+    connect(newWithOptions, &QAction::triggered, this, [this]() {
+        newNote(QSettings("SpeedyNote", "App").value("newNote/edgeless", false).toBool(), QString(), true);
+    });
     
     // Separator
     menu.addSeparator();
@@ -9856,18 +9709,19 @@ void MainWindow::closeEvent(QCloseEvent *event) {
 
                 autosavePositionOnlyChange(doc, tm->viewportAt(i));
 
-                bool needsSavePrompt = false;
-                bool isUsingTemp = m_documentManager->isUsingTempBundle(doc);
-                
-                if (doc->isEdgeless()) {
-                    bool hasContent = doc->tileCount() > 0 || doc->tileIndexCount() > 0;
-                    needsSavePrompt = doc->modified || (isUsingTemp && hasContent);
-                } else {
-                    bool hasContent = doc->pageCount() > 0;
-                    needsSavePrompt = doc->modified || (isUsingTemp && hasContent);
-                }
-                
-                if (needsSavePrompt) {
+                const bool isUsingTemp = m_documentManager->isUsingTempBundle(doc);
+                const bool needsSavePrompt = doc->modified
+                    || (isUsingTemp && DocumentManager::tempNoteHasWork(doc));
+
+                if (m_autoSaver->isEnabled() && !doc->bundlePath().isEmpty()) {
+                    // Only a note without a place, or a failed save, asks.
+                    if (isUsingTemp && DocumentManager::tempNoteHasWork(doc) && bar) {
+                        bar->setCurrentIndex(i);
+                    }
+                    if (!closeWithAutosave(doc)) {
+                        return false;
+                    }
+                } else if (needsSavePrompt) {
                     if (bar) bar->setCurrentIndex(i);
 
                     QString docType = doc->isEdgeless() ? tr("canvas") : tr("document");
@@ -9890,9 +9744,9 @@ void MainWindow::closeEvent(QCloseEvent *event) {
                         bool canSaveInPlace = !existingPath.isEmpty() && !isUsingTemp;
                         
                         if (canSaveInPlace) {
-                            if (!m_documentManager->saveDocument(doc)) {
-                                QMessageBox::critical(this, tr("Save Error"),
-                                    tr("Failed to save document to:\n%1\n\nQuit anyway?").arg(existingPath));
+                            // Cancel stops the quit: the changes stay open.
+                            if (!saveInPlaceOrAsk(doc)) {
+                                return false;
                             }
                         } else {
                             if (!saveNewDocumentWithDialog(doc)) {
@@ -10221,7 +10075,17 @@ void MainWindow::cleanupSharedResources()
 #endif
 }
 
-bool MainWindow::closeDocumentById(const QString& documentId, bool discardChanges)
+// Two paths to one folder (case and separators aside, where the system ignores them).
+static bool sameFolder(const QString& a, const QString& b)
+{
+    const QString ca = QFileInfo(a).canonicalFilePath();
+    const QString cb = QFileInfo(b).canonicalFilePath();
+    if (!ca.isEmpty() && !cb.isEmpty()) return ca == cb;
+    return QDir::cleanPath(a) == QDir::cleanPath(b);
+}
+
+bool MainWindow::closeDocumentById(const QString& documentId, bool discardChanges,
+                                   const QString& bundlePath)
 {
     if (!m_splitViewManager) return true;
 
@@ -10231,15 +10095,15 @@ bool MainWindow::closeDocumentById(const QString& documentId, bool discardChange
         if (found) return;
         for (int i = 0; i < tm->tabCount(); ++i) {
             Document* doc = tm->documentAt(i);
-            if (doc && doc->id == documentId) {
+            // A copy of a note keeps its id: only the note in that folder is closed.
+            if (doc && doc->id == documentId
+                && (bundlePath.isEmpty() || sameFolder(doc->bundlePath(), bundlePath))) {
                 found = true;
                 if (!discardChanges) {
                     if (m_documentManager && m_documentManager->hasUnsavedChanges(doc)) {
                         QString existingPath = m_documentManager->documentPath(doc);
                         if (!existingPath.isEmpty()) {
-                            if (!m_documentManager->saveDocument(doc)) {
-                                QMessageBox::critical(this, tr("Save Error"),
-                                    tr("Failed to save document before closing."));
+                            if (!saveInPlaceOrAsk(doc)) {
                                 result = false;
                                 return;
                             }
@@ -10306,7 +10170,19 @@ void MainWindow::openFileInNewTab(const QString &filePath)
                             : m_splitViewManager->rightTabBar();
                         if (bar) bar->setCurrentIndex(i);
                         m_splitViewManager->setActivePane(pane);
-                        m_documentManager->setDocumentPath(existingDoc, filePath);
+                        // Same id, other folder that still holds its note: a copy
+                        // (made in Explorer, or by an older Duplicate). Pointing the
+                        // open note at it would make autosave write into the copy.
+                        const QString openPath = existingDoc->bundlePath();
+                        if (!openPath.isEmpty() && QFileInfo::exists(openPath + "/document.json")
+                            && !sameFolder(openPath, filePath)) {
+                            QMessageBox::information(this, tr("Note Already Open"),
+                                tr("\"%1\" is a copy of \"%2\", which is open. Close \"%2\" "
+                                   "first to open the copy.")
+                                    .arg(fileInfo.completeBaseName(), existingDoc->displayName()));
+                        } else {
+                            m_documentManager->setDocumentPath(existingDoc, filePath);  // moved or renamed
+                        }
                         found = true;
                         return;
                     }
@@ -10377,6 +10253,24 @@ void MainWindow::openFileInNewTab(const QString &filePath)
                  << doc->pageCount() << "pages from" << filePath;
     }
     */
+}
+
+void MainWindow::openRecoveredNote(const QString& bundlePath, bool recovered)
+{
+    if (!m_documentManager || !tabManager()) {
+        return;
+    }
+    Document* doc = m_documentManager->adoptTempBundle(bundlePath);
+    if (!doc) {
+        QMessageBox::warning(this, tr("Open Error"),
+            tr("This note could not be opened. It stays in:\n%1").arg(bundlePath));
+        return;
+    }
+    const int tabIndex = tabManager()->createTab(
+        doc, recovered ? tr("%1 (recovered)").arg(doc->displayName()) : doc->displayName());
+    if (tabIndex >= 0 && !doc->isEdgeless()) {
+        centerViewportContent(tabIndex);
+    }
 }
 
 void MainWindow::showOpenPdfDialog()

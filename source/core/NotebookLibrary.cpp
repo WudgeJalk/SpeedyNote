@@ -3,6 +3,7 @@
 #include <QStandardPaths>
 #include <QDir>
 #include <QFile>
+#include <QSaveFile>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
@@ -111,6 +112,7 @@ void NotebookLibrary::addToRecent(const QString& bundlePath)
     // Determine type from mode field
     QString mode = obj["mode"].toString();
     nb.isEdgeless = (mode == "edgeless");
+    nb.cover = obj["cover"].toObject();
     
     // Check if PDF-based
     QString pdfPath = obj["pdf_path"].toString();
@@ -163,6 +165,7 @@ bool NotebookLibrary::updateBundlePath(const QString& oldPath, const QString& ne
             if (nameValue.isString()) {
                 notebook->name = nameValue.toString();
             }
+            notebook->cover = document.object().value("cover").toObject();
         } else {
             qWarning() << "NotebookLibrary: JSON parse error in" << manifestPath;
         }
@@ -545,15 +548,33 @@ QStringList NotebookLibrary::searchStarredFolders(const QString& query) const
 
 // === Thumbnails ===
 
+QString NotebookLibrary::thumbnailIdFor(const QString& bundlePath) const
+{
+    QString id;
+    if (const NotebookInfo* nb = findNotebook(bundlePath)) {
+        id = nb->documentId;
+    } else {
+        // A note of the Library never opened here: the id is in its manifest.
+        QFile manifest(bundlePath + "/document.json");
+        if (manifest.open(QIODevice::ReadOnly)) {
+            const QJsonObject obj = QJsonDocument::fromJson(manifest.readAll()).object();
+            id = obj.value("notebook_id").toString();
+            if (id.isEmpty()) id = obj.value("id").toString();
+        }
+    }
+    // The id becomes a file name: a damaged or hostile manifest must not leave the cache.
+    if (id.contains('/') || id.contains('\\') || id.contains("..")) return QString();
+    return id;
+}
+
 QString NotebookLibrary::thumbnailPathFor(const QString& bundlePath) const
 {
-    // Find the notebook to get its documentId
-    const NotebookInfo* nb = findNotebook(bundlePath);
-    if (!nb || nb->documentId.isEmpty()) {
+    const QString id = thumbnailIdFor(bundlePath);
+    if (id.isEmpty()) {
         return QString();
     }
-    
-    QString cachePath = m_thumbnailCachePath + "/" + nb->documentId + ".png";
+
+    QString cachePath = m_thumbnailCachePath + "/" + id + ".png";
     
     // Only return path if file exists
     if (QFileInfo::exists(cachePath)) {
@@ -569,17 +590,16 @@ void NotebookLibrary::saveThumbnail(const QString& bundlePath, const QPixmap& th
         return;
     }
     
-    // Find the notebook to get its documentId
-    const NotebookInfo* nb = findNotebook(bundlePath);
-    if (!nb || nb->documentId.isEmpty()) {
+    const QString id = thumbnailIdFor(bundlePath);
+    if (id.isEmpty()) {
         qWarning() << "NotebookLibrary: Cannot save thumbnail - notebook not found or no ID";
         return;
     }
-    
+
     // Ensure cache directory exists
     QDir().mkpath(m_thumbnailCachePath);
-    
-    QString cachePath = m_thumbnailCachePath + "/" + nb->documentId + ".png";
+
+    QString cachePath = m_thumbnailCachePath + "/" + id + ".png";
     
     if (!thumbnail.save(cachePath, "PNG")) {
         qWarning() << "NotebookLibrary: Failed to save thumbnail to" << cachePath;
@@ -595,14 +615,13 @@ void NotebookLibrary::saveThumbnail(const QString& bundlePath, const QPixmap& th
 
 void NotebookLibrary::invalidateThumbnail(const QString& bundlePath)
 {
-    // Find the notebook to get its documentId
-    const NotebookInfo* nb = findNotebook(bundlePath);
-    if (!nb || nb->documentId.isEmpty()) {
+    const QString id = thumbnailIdFor(bundlePath);
+    if (id.isEmpty()) {
         return;
     }
-    
-    QString cachePath = m_thumbnailCachePath + "/" + nb->documentId + ".png";
-    
+
+    QString cachePath = m_thumbnailCachePath + "/" + id + ".png";
+
     if (QFile::exists(cachePath)) {
         QFile::remove(cachePath);
         emit thumbnailUpdated(bundlePath);
@@ -675,6 +694,7 @@ void NotebookLibrary::save()
         nbObj["isPdfBased"] = nb.isPdfBased;
         nbObj["isEdgeless"] = nb.isEdgeless;
         nbObj["pdfFileName"] = nb.pdfFileName;
+        if (!nb.cover.isEmpty()) nbObj["cover"] = nb.cover;
         notebooksArray.append(nbObj);
     }
     root["notebooks"] = notebooksArray;
@@ -693,14 +713,13 @@ void NotebookLibrary::save()
     }
     root["recentFolders"] = recentFoldersArray;
     
-    // Write to file
-    QFile file(m_libraryFilePath);
-    if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-        QJsonDocument doc(root);
-        file.write(doc.toJson(QJsonDocument::Indented));
-        file.close();
-    } else {
-        qWarning() << "NotebookLibrary: Failed to save to" << m_libraryFilePath;
+    // Atomic write: a crash keeps the previous list whole.
+    QSaveFile file(m_libraryFilePath);
+    const QByteArray data = QJsonDocument(root).toJson(QJsonDocument::Indented);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)
+        || file.write(data) != data.size() || !file.commit()) {
+        qWarning() << "NotebookLibrary: Failed to save to" << m_libraryFilePath
+                   << file.errorString();
     }
 }
 
@@ -788,7 +807,8 @@ void NotebookLibrary::load()
         nb.isPdfBased = nbObj["isPdfBased"].toBool();
         nb.isEdgeless = nbObj["isEdgeless"].toBool();
         nb.pdfFileName = nbObj["pdfFileName"].toString();
-        
+        nb.cover = nbObj["cover"].toObject();
+
         m_notebooks.append(nb);
     }
     

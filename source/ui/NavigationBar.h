@@ -5,6 +5,7 @@
 #include <QColor>
 #include <QPushButton>
 #include "ToolbarButtons.h"
+#include "../core/AutoSaver.h"
 
 class QLabel;
 class QIcon;
@@ -76,6 +77,10 @@ public:
     /// Swap the maximise button between "maximise" and "restore".
     void setWindowMaximized(bool maximized);
 
+    /// The small autosave sign next to the name (Step R1): a check, a loader,
+    /// a red alert, or nothing (Off). @p tip is its tooltip.
+    void setSaveState(AutoSaver::State state, const QString &tip);
+
 signals:
     void searchClicked();  // Find in the open document
     void minimizeClicked();
@@ -89,6 +94,7 @@ signals:
     
     // Center
     void filenameClicked();  // Toggle tab container visibility
+    void saveStateClicked(); // The autosave sign
     
     // Right side
     void fullscreenToggled(bool checked);
@@ -118,6 +124,9 @@ private:
     // Center
     QPushButton *m_filenameButton;
     QString m_fullFilename;  // Store full name for tooltip
+    ActionButton *m_saveStateButton;
+    AutoSaver::State m_saveState = AutoSaver::Off;
+    void applySaveStateIcon();
     
     // Right buttons
     ToggleButton *m_fullscreenButton;

@@ -7,6 +7,7 @@
 #include "DocumentViewport.h"
 #include "ShortcutManager.h"  // Pen buttons can run any registered command
 #include "DarkModeUtils.h"
+#include "Paper.h"                  // Page designs drawn by code
 #include "DrawingSettings.h"        // Eraser filter
 #include "PenHaptics.h"             // Paper feel and clicks of a haptic pen
 #include "ObjectConstraints.h"      // Page containment for inserted objects
@@ -290,7 +291,10 @@ DocumentViewport::DocumentViewport(QWidget* parent)
         // No tablet hover event received - stylus must have left
         if (m_pointerInViewport && !m_pointerActive) {
             m_pointerInViewport = false;
-            
+            if (m_offPageHoverCursor) {
+                updateHighlighterCursor();   // The hand stays with the empty space it marks
+            }
+
             // Trigger repaint to hide eraser cursor
             // Use elliptical region to match circular cursor shape
             // Use toAlignedRect() to properly round floating-point to integer coords
@@ -3888,22 +3892,8 @@ void DocumentViewport::mouseMoveEvent(QMouseEvent* event)
             update(dirtyRegion);
         }
         
-        // Advertise the empty space around the pages as a pan target. This
-        // takes precedence over the tool cursors while hovering there, and the
-        // tool cursor is restored on the way back onto a page.
-        const bool offPageHover =
-            s_panOutsidePagesEnabled && m_document && !m_document->isEdgeless()
-            && !m_isPanToolDragging
-            && isPointOutsideAllPages(m_lastPointerPos);
-        if (offPageHover != m_offPageHoverCursor) {
-            m_offPageHoverCursor = offPageHover;
-            if (offPageHover) {
-                setCursor(Qt::OpenHandCursor);
-            } else {
-                updateHighlighterCursor();
-            }
-        }
-        
+        const bool offPageHover = updateOffPageHoverCursor(m_lastPointerPos);
+
         // Phase D.1: Update cursor for PDF link hover in Highlighter tool
         if (!offPageHover && m_currentTool == ToolType::Highlighter) {
             updateLinkCursor(m_lastPointerPos);
@@ -4438,11 +4428,14 @@ void DocumentViewport::focusOutEvent(QFocusEvent* event)
     // set, they swallow the next press as a continuation of a dead drag.
     cancelOffPagePan();
     m_isPanToolDragging = false;
+    if (m_offPageHoverCursor) {
+        updateHighlighterCursor();
+    }
 
     if (hasActiveObjectPointerGesture()) {
         cancelObjectPointerGesture();
     }
-    
+
     QWidget::focusOutEvent(event);
 }
 
@@ -4567,7 +4560,10 @@ void DocumentViewport::enterEvent(QEvent* event)
 void DocumentViewport::leaveEvent(QEvent* event)
 {
     m_pointerInViewport = false;
-    
+    if (m_offPageHoverCursor) {
+        updateHighlighterCursor();   // The hand stays with the empty space it marks
+    }
+
     // Trigger repaint to hide eraser cursor when pointer leaves viewport
     // Use elliptical region to match circular cursor shape
     // Use toAlignedRect() to properly round floating-point to integer coords
@@ -4663,10 +4659,14 @@ void DocumentViewport::tabletEvent(QTabletEvent* event)
         initEraserJni();
 #endif
         QPointF newPos = SN_EVENT_POS(event);
-        
+
         // Check if stylus is within widget bounds
         // Unlike mouse, tablet doesn't trigger leaveEvent when stylus moves outside
         m_pointerInViewport = rect().contains(newPos.toPoint());
+
+        // The pen hovering never reaches mouseMoveEvent (the tablet event is
+        // accepted), so a hand a mouse left behind stayed while the pen wrote.
+        updateOffPageHoverCursor(newPos);
         
         // Restart hover timer - if no tablet event for 100ms, stylus left
         // This handles the case where stylus hovers to another widget
@@ -15316,8 +15316,32 @@ bool DocumentViewport::pointerOverUndraggableAnnotation(const QPointF& viewportP
     return true;
 }
 
+bool DocumentViewport::updateOffPageHoverCursor(const QPointF& viewportPos)
+{
+    // Advertise the empty space around the pages as a pan target. This takes
+    // precedence over the tool cursors while hovering there, and the tool
+    // cursor is restored on the way back onto a page. The mouse and the pen
+    // both come here: a hand left by one is taken back by the other.
+    const bool offPageHover =
+        s_panOutsidePagesEnabled && m_document && !m_document->isEdgeless()
+        && !m_isPanToolDragging
+        && isPointOutsideAllPages(viewportPos);
+    if (offPageHover != m_offPageHoverCursor) {
+        if (offPageHover) {
+            m_offPageHoverCursor = true;
+            setCursor(Qt::OpenHandCursor);
+        } else {
+            updateHighlighterCursor();
+        }
+    }
+    return offPageHover;
+}
+
 void DocumentViewport::updateHighlighterCursor()
 {
+    // Whatever this sets replaces the off-page hand, so the next hover over
+    // the empty space has to set it again.
+    m_offPageHoverCursor = false;
     if (m_currentTool == ToolType::Pan) {
         setCursor(m_isPanToolDragging ? Qt::ClosedHandCursor : Qt::OpenHandCursor);
         return;
@@ -18594,6 +18618,10 @@ bool DocumentViewport::deletePagesWithUndo(const QList<int>& indices)
         UndoAction::DeletedPageSnapshot snap;
         snap.index = idx;
         snap.pageJson = page->toJson();
+        // Undo needs the page's PDF: a save must not drop it (empty id = the main PDF).
+        if (page->backgroundType == Page::BackgroundType::PDF) {
+            m_document->retainPdfSourceForUndo(page->pdfSourceId);
+        }
         if (m_document->removePage(idx)) {
             action.deletedPages.append(snap);
         }
@@ -18916,6 +18944,10 @@ void DocumentViewport::undo()
     // Ctrl+Z undoes the adjusting rather than whatever came before it.
     commitHighlightAdjust();
     if (m_undoStack.isEmpty() || !m_document) return;
+    // A selection kept after a commit (line ends, corners, roundness) holds the
+    // strokes as they are now; once undone it would float over the old ones.
+    // With nothing pending it is only a view of the layer: let go of it.
+    if (m_lassoSelection.isValid() && !m_lassoSelection.hasTransform()) clearLassoSelection();
 
     UndoAction action = m_undoStack.pop();
     if (action.type == UndoAction::ObjectStateChange) { applyObjectStateChange(action, true); return; }
@@ -19379,6 +19411,7 @@ void DocumentViewport::redo()
     // active session makes this redo a no-op by design.
     commitHighlightAdjust();
     if (m_redoStack.isEmpty() || !m_document) return;
+    if (m_lassoSelection.isValid() && !m_lassoSelection.hasTransform()) clearLassoSelection();   // As in undo()
 
     UndoAction action = m_redoStack.pop();
     if (action.type == UndoAction::ObjectStateChange) { applyObjectStateChange(action, false); return; }
@@ -20263,9 +20296,15 @@ void DocumentViewport::renderPage(QPainter& painter, Page* page, int pageIndex)
     
     // 1. Fill with page background color
     painter.fillRect(pageRect, paperColorForPage(page));
-    
-    // 2. Render background based on type
-    switch (page->backgroundType) {
+
+    // 2. Render background: a known paper first (its type is only the fallback
+    // an older version draws), else by type.
+    const bool paper = page->backgroundType != Page::BackgroundType::PDF
+                       && page->backgroundType != Page::BackgroundType::Custom
+                       && Paper::find(page->paperId);
+    if (paper) {
+        Paper::paint(painter, page->paperId, pageRect, page->gridColor);
+    } else switch (page->backgroundType) {
         case Page::BackgroundType::None:
             // Just the background color (already filled)
             break;
@@ -20298,7 +20337,9 @@ void DocumentViewport::renderPage(QPainter& painter, Page* page, int pageIndex)
             break;
             
         case Page::BackgroundType::Custom:
-            // Draw custom background image
+            // Draw custom background image (a page made after the paper was picked
+            // has only the file name until here)
+            page->loadCustomBackground(m_document->bundlePath());
             if (!page->customBackground.isNull()) {
                 painter.drawPixmap(pageRect.toRect(), page->customBackground);
             }
@@ -20525,7 +20566,8 @@ void DocumentViewport::renderEdgelessMode(QPainter& painter, const QRect& dirtyR
                 tile->gridColor,
                 tile->gridSpacing,
                 tile->lineSpacing,
-                1.0 / m_zoomLevel  // Constant pen width in screen pixels
+                1.0 / m_zoomLevel,  // Constant pen width in screen pixels
+                tile->paperId, true
             );
         } else {
             // Empty tile coordinate: use document defaults
@@ -20537,7 +20579,8 @@ void DocumentViewport::renderEdgelessMode(QPainter& painter, const QRect& dirtyR
                 m_document->defaultGridColor,
                 m_document->defaultGridSpacing,
                 m_document->defaultLineSpacing,
-                1.0 / m_zoomLevel  // Constant pen width in screen pixels
+                1.0 / m_zoomLevel,  // Constant pen width in screen pixels
+                m_document->defaultPaperId, true
             );
         }
     }

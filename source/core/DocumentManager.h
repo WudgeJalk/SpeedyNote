@@ -21,6 +21,7 @@
 #include <QMap>
 #include <QStringList>
 #include <QSettings>
+#include <QDateTime>
 #include <memory>
 
 class Document;
@@ -88,6 +89,35 @@ public:
      */
     void cleanupTempBundle(Document* doc);
 
+    // ===== Notes without a place (Step R3) =====
+    // A new note lives in a temporary bundle in <AppData>/unsaved/ until the
+    // user picks a place. Autosave writes there, so a crash cannot lose it.
+
+    /// Where temporary bundles live: <AppDataLocation>/unsaved.
+    static QString unsavedDir();
+    /// Tests only: put temporary bundles in another folder (empty = default).
+    static void setUnsavedDirForTests(const QString& dir);
+
+    /// True when a note without a place holds work: an endless note with
+    /// tiles, or a paged note changed since it was made.
+    static bool tempNoteHasWork(const Document* doc);
+
+    struct LeftoverNote {
+        QString path;
+        QString name;
+        QDateTime lastChange;
+    };
+    /// Temporary bundles left by a crash that hold work, newest first: in
+    /// unsavedDir() and in the system temp folder (older versions put them there).
+    static QVector<LeftoverNote> leftoverTempBundles();
+
+    /// Opens a leftover temporary bundle as a note without a place (still
+    /// temporary: closing it with Delete removes it). Null when it does not load.
+    Document* adoptTempBundle(const QString& path);
+
+    /// A new, not yet created path in unsavedDir() for a note without a place.
+    static QString newTempBundlePath(bool edgeless);
+
     /**
      * @brief Auto-save all modified documents (for Android background save).
      * @return Number of documents saved.
@@ -134,6 +164,9 @@ public:
      * Adds the path to recent documents on success.
      */
     bool saveDocumentAs(Document* doc, const QString& path);
+
+    /// Plain reason of the last failed saveDocument/saveDocumentAs, for the user.
+    QString lastSaveError() const { return m_lastSaveError; }
 
     /**
      * @brief Close a document and release its resources.
@@ -292,6 +325,7 @@ private:
     QMap<Document*, QString> m_documentPaths;     // Document → file path
     QMap<Document*, bool> m_modifiedFlags;        // Document → has unsaved changes
     QMap<Document*, QString> m_tempBundlePaths;   // Document → temp bundle path (for unsaved edgeless)
+    QString m_lastSaveError;                      // See lastSaveError()
 
     // Recent documents
     QStringList m_recentPaths;
@@ -313,6 +347,8 @@ private:
     
     // Create a unique temp bundle path for a document (edgeless or paged)
     QString createTempBundlePath(Document* doc);
+    // Give a new document its temp bundle and write it once.
+    void initTempBundle(Document* doc);
     
     // Create a permanent auto-save path in app storage (for Android)
     QString createAutoSavePath(Document* doc);

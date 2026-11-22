@@ -93,6 +93,17 @@ private:
     QWidget *toolsTab;
     QDoubleSpinBox *wheelScrollSpeedSpin;
     QCheckBox *panOutsidePagesCheck = nullptr;
+    // Page tab: show the New note window (Step N1, newNote/ask)
+    QCheckBox *newNoteAskCheck = nullptr;
+    // Page tab, "Saving" group (Step R1)
+    QCheckBox *autosaveCheck = nullptr;
+    QSpinBox *autosaveIdleSpin = nullptr;
+    QSpinBox *autosaveMaxSpin = nullptr;
+    // Same group: earlier versions (Step R4)
+    QCheckBox *backupCheck = nullptr;
+    QSpinBox *backupMinutesSpin = nullptr;
+    QSpinBox *backupCountSpin = nullptr;
+    QSpinBox *backupDaysSpin = nullptr;
     QCheckBox *ocrCjkGridModeCheck = nullptr;
     QComboBox *eraserUndoGroupingCombo = nullptr;
     void createToolsTab();
@@ -115,6 +126,7 @@ private:
     QSpinBox *roughPercentSpin = nullptr;
     QSpinBox *equalPercentSpin = nullptr;
     QSpinBox *angleSnapSpin = nullptr;
+    QSpinBox *trapezoidAngleSpin = nullptr;
     QSpinBox *levelAngleSpin = nullptr;
     QCheckBox *handArrowsCheck = nullptr;
     QComboBox *handArrowHeadCombo = nullptr;

@@ -36,7 +36,8 @@ struct DrawingSettings {
     int roughPercent = 12;            ///< "shapes/roughPercent": a line this near an exact shape becomes it (% of its size, 0 = off)
     int equalPercent = 12;            ///< "shapes/equalPercent": lengths this close are made equal (circle, square)
     int angleSnap = 12;               ///< "shapes/angleSnap": sides this close to parallel or square are made so (degrees)
-    int levelAngle = 5;               ///< "shapes/levelAngle": a shape this close to level is made level (degrees)
+    int trapezoidAngle = 25;          ///< "shapes/trapezoidAngle": a box becomes a trapezoid only past this (degrees)
+    int levelAngle = 5;              ///< "shapes/levelAngle": a shape this close to level is made level (degrees)
 
     // Laser pointer. The mode is chosen in the laser bar, the rest in Settings > Drawing.
     int laserMode = 1;                ///< "laser/mode": 0 point (a dot), 1 line (a trail)

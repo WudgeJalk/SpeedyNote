@@ -3,7 +3,9 @@
 #include "core/Page.h"
 #include "core/ShortcutManager.h"
 #include "core/DocumentViewport.h"
+#include "core/AutoSaver.h"
 #include "ui/widgets/LengthSpinBox.h"
+#include "ui/widgets/PaperCombo.h"
 #include "ui/widgets/ColorListRow.h"
 #include "ui/actionbars/ActionBarContainer.h"
 #include "ui/dialogs/DialogSizing.h"
@@ -217,8 +219,15 @@ ControlPanelDialog::ControlPanelDialog(MainWindow *mainWindow, QWidget *parent)
         tabWidget->insertTab(i, scroll, text);
         if (page == stylusTab) stylusTab = scroll;  // switchToStylusTab() shows the tab
     }
+    // The dialog's layout still holds the minimum the tabs had before they
+    // scrolled (sizeHint() above cached it); the first pass at show time would
+    // grow the dialog to it, past the screen.
+    tabWidget->updateGeometry();
     tabWidget->setCurrentIndex(0);
     DialogSizing::openAtSize(this, natural);
+    // F5: a scroll over a list or a number box scrolls the page; it changes
+    // the box only once the box was clicked.
+    DialogSizing::wheelNeedsFocus(this);
     
     // Load current settings into UI
     loadSettings();
@@ -287,8 +296,9 @@ void ControlPanelDialog::loadSettings()
     qreal defaultHeight = settings.value("page/height", 1056).toReal();
     QSizeF savedSize(defaultWidth, defaultHeight);
     
-    // Find the matching preset (or default to US Letter if no match)
-    int pageSizeIndex = 5;  // Default: US Letter (index 5)
+    // Find the matching preset. A size of your own (from the New note window)
+    // gets its own entry, so OK here does not turn it into US Letter.
+    int pageSizeIndex = -1;
     for (int i = 0; i < pageSizeCombo->count(); ++i) {
         QSizeF presetSize = pageSizeCombo->itemData(i).toSizeF();
         if (qFuzzyCompare(presetSize.width(), savedSize.width()) &&
@@ -297,16 +307,18 @@ void ControlPanelDialog::loadSettings()
             break;
         }
     }
+    if (pageSizeIndex < 0) {
+        pageSizeCombo->addItem(tr("Custom (%1)").arg(LengthUnit::sizeText(savedSize.width(), savedSize.height())),
+                               savedSize);
+        pageSizeIndex = pageSizeCombo->count() - 1;
+    }
     pageSizeCombo->setCurrentIndex(pageSizeIndex);
     onPageSizePresetChanged(pageSizeIndex);
     
     // Load background settings
     // Default: Grid (enum value 3)
     int bgType = settings.value("background/type", static_cast<int>(Page::BackgroundType::Grid)).toInt();
-    int comboIndex = styleCombo->findData(bgType);
-    if (comboIndex >= 0) {
-        styleCombo->setCurrentIndex(comboIndex);
-    }
+    PaperCombo::select(styleCombo, settings.value("background/paper").toString(), bgType);
     
     // Dark-mode-aware fallback colours for background and grid
     bool darkMode = palette().color(QPalette::Window).lightness() < 128;
@@ -353,7 +365,7 @@ void ControlPanelDialog::loadSettings()
 QString ControlPanelDialog::backgroundSignature() const
 {
     return QStringLiteral("%1|%2|%3|%4|%5")
-        .arg(styleCombo->currentData().toInt())
+        .arg(styleCombo->currentData().toString())   // a type number or a paper id
         .arg(selectedBgColor.name(), selectedGridColor.name())
         .arg(gridSpacingSpin->value())
         .arg(lineSpacingSpin->value());
@@ -372,9 +384,15 @@ void ControlPanelDialog::applyChanges()
     // Note: Page size is NOT applied to current document - only affects new documents
     
     // Apply background settings to QSettings (for new documents)
-    // Use the data value (enum value), not the combo index
-    int bgTypeValue = styleCombo->currentData().toInt();
+    // Use the data value (enum value), not the combo index. A paper stores its
+    // id plus its fallback type, which code that knows no paper still reads.
+    const QString paperId = PaperCombo::paperId(styleCombo);
+    Page::BackgroundType bgType = static_cast<Page::BackgroundType>(styleCombo->currentData().toInt());
+    Paper::fallbackFor(paperId, &bgType, nullptr);
+    int bgTypeValue = static_cast<int>(bgType);
     settings.setValue("background/type", bgTypeValue);
+    if (paperId.isEmpty()) settings.remove("background/paper");
+    else settings.setValue("background/paper", paperId);
     settings.setValue("background/color", selectedBgColor.name());
     settings.setValue("background/gridColor", selectedGridColor.name());
     settings.setValue("background/gridSpacing", gridSpacingSpin->value());
@@ -391,7 +409,8 @@ void ControlPanelDialog::applyChanges()
             selectedBgColor,
             selectedGridColor,
             gridSpacingSpin->value(),
-            lineSpacingSpin->value()
+            lineSpacingSpin->value(),
+            paperId
         );
     }
     
@@ -436,6 +455,23 @@ void ControlPanelDialog::applyChanges()
 
     if (ocrCjkGridModeCheck)
         settings.setValue("ocrCjkGridMode", ocrCjkGridModeCheck->isChecked());
+
+    if (newNoteAskCheck) settings.setValue("newNote/ask", newNoteAskCheck->isChecked());
+
+    if (autosaveCheck) {
+        settings.setValue("autosave/enabled", autosaveCheck->isChecked());
+        settings.setValue("autosave/idleSeconds", autosaveIdleSpin->value());
+        settings.setValue("autosave/maxMinutes", autosaveMaxSpin->value());
+        if (AutoSaver *saver = mainWindowRef->findChild<AutoSaver *>()) {
+            saver->reloadSettings();
+        }
+    }
+    if (backupCheck) {  // read at each save (NoteVersions::policyFromSettings)
+        settings.setValue("backup/enabled", backupCheck->isChecked());
+        settings.setValue("backup/minutes", backupMinutesSpin->value());
+        settings.setValue("backup/count", backupCountSpin->value());
+        settings.setValue("backup/days", backupDaysSpin->value());
+    }
 
     applyDrawingTab();
 
@@ -1001,6 +1037,17 @@ void ControlPanelDialog::createBackgroundTab() {
     descLabel->setStyleSheet("color: gray; font-size: 11px; margin-bottom: 15px;");
     layout->addWidget(descLabel);
     
+    // ========== NEW NOTES (Step N1) ==========
+    newNoteAskCheck = new QCheckBox(tr("Show the New note window"), backgroundTab);
+    newNoteAskCheck->setChecked(QSettings("SpeedyNote", "App").value("newNote/ask", true).toBool());
+    layout->addWidget(newNoteAskCheck);
+    QLabel *newNoteHint = new QLabel(tr("Off: a new note uses your last choices at once. "
+                                        "+ > New Note with Options... always shows it."), backgroundTab);
+    newNoteHint->setWordWrap(true);
+    newNoteHint->setStyleSheet("color: gray; font-size: 11px;");
+    layout->addWidget(newNoteHint);
+    layout->addSpacing(10);
+
     // ========== PAGE SIZE SECTION ==========
     QLabel *pageSectionLabel = new QLabel(tr("Default Page Size"), backgroundTab);
     pageSectionLabel->setStyleSheet("font-weight: bold; margin-top: 5px;");
@@ -1081,8 +1128,15 @@ void ControlPanelDialog::createBackgroundTab() {
     styleCombo->addItem(tr("None"), static_cast<int>(Page::BackgroundType::None));     // 0
     styleCombo->addItem(tr("Grid"), static_cast<int>(Page::BackgroundType::Grid));     // 3
     styleCombo->addItem(tr("Lines"), static_cast<int>(Page::BackgroundType::Lines));   // 4
+    PaperCombo::addPapers(styleCombo, false);   // then every paper drawn by code
     styleLayout->addWidget(styleCombo, 1);
     layout->addLayout(styleLayout);
+    QLabel *paperHint = new QLabel(tr("A paper with its own lines ignores the spacing below. "
+                                      "An endless canvas uses only Dotted, Lined, Squared and staves."),
+                                   backgroundTab);
+    paperHint->setWordWrap(true);
+    paperHint->setStyleSheet("color: gray; font-size: 11px;");
+    layout->addWidget(paperHint);
     
     layout->addSpacing(10);
     
@@ -1143,14 +1197,95 @@ void ControlPanelDialog::createBackgroundTab() {
     lineSpacingLayout->addWidget(lineSpacingSpin);
     lineSpacingLayout->addStretch();
     layout->addLayout(lineSpacingLayout);
-    
+    // The spacing belongs to Grid and Lines; a paper brings its own.
+    connect(styleCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
+        const bool classic = PaperCombo::paperId(styleCombo).isEmpty();
+        gridSpacingSpin->setEnabled(classic);
+        lineSpacingSpin->setEnabled(classic);
+    });
+
     // Note about 32px default
     QLabel *noteLabel = new QLabel(tr("Note: 32px spacing is recommended as it divides evenly into "
                                       "the 1024px tile size used by the edgeless canvas."), backgroundTab);
     noteLabel->setWordWrap(true);
     noteLabel->setStyleSheet("color: gray; font-size: 10px; margin-top: 15px;");
     layout->addWidget(noteLabel);
-    
+
+    // ========== SAVING (Step R1) ==========
+    {
+        QSettings settings("SpeedyNote", "App");
+        QGroupBox *savingGroup = new QGroupBox(tr("Saving"), backgroundTab);
+        QFormLayout *savingLayout = new QFormLayout(savingGroup);
+        auto addHint = [savingGroup, savingLayout](const QString &text) {
+            QLabel *hint = new QLabel(text, savingGroup);
+            hint->setWordWrap(true);
+            hint->setStyleSheet("color: gray; font-size: 11px;");
+            savingLayout->addRow(hint);
+        };
+
+        autosaveCheck = new QCheckBox(tr("Save notes by themselves while you work"), savingGroup);
+        autosaveCheck->setChecked(settings.value("autosave/enabled", true).toBool());
+        savingLayout->addRow(autosaveCheck);
+        addHint(tr("Off: notes are saved only when you press Save, and closing a note asks."));
+
+        autosaveIdleSpin = new QSpinBox(savingGroup);
+        autosaveIdleSpin->setRange(1, 60);
+        autosaveIdleSpin->setSuffix(tr(" s"));
+        autosaveIdleSpin->setValue(settings.value("autosave/idleSeconds", 5).toInt());
+        savingLayout->addRow(tr("Save after a pause of:"), autosaveIdleSpin);
+        addHint(tr("Save this many seconds after your last change."));
+
+        autosaveMaxSpin = new QSpinBox(savingGroup);
+        autosaveMaxSpin->setRange(1, 30);
+        autosaveMaxSpin->setSuffix(tr(" min"));
+        autosaveMaxSpin->setValue(settings.value("autosave/maxMinutes", 2).toInt());
+        savingLayout->addRow(tr("Save at least every:"), autosaveMaxSpin);
+        addHint(tr("While you keep writing, save at least this often."));
+
+        auto syncEnabled = [this]() {
+            autosaveIdleSpin->setEnabled(autosaveCheck->isChecked());
+            autosaveMaxSpin->setEnabled(autosaveCheck->isChecked());
+        };
+        connect(autosaveCheck, &QCheckBox::toggled, this, syncEnabled);
+        syncEnabled();
+
+        // Earlier versions (Step R4), see core/NoteVersions.h.
+        backupCheck = new QCheckBox(tr("Keep earlier versions of each page"), savingGroup);
+        backupCheck->setChecked(settings.value("backup/enabled", true).toBool());
+        savingLayout->addRow(backupCheck);
+        addHint(tr("Before a page is saved over, its old copy is kept in the note's folder. "
+                   "Open one with \"Restore an Earlier Version...\" in the note's menu."));
+
+        backupMinutesSpin = new QSpinBox(savingGroup);
+        backupMinutesSpin->setRange(1, 240);
+        backupMinutesSpin->setSuffix(tr(" min"));
+        backupMinutesSpin->setValue(settings.value("backup/minutes", 15).toInt());
+        savingLayout->addRow(tr("New version at most every:"), backupMinutesSpin);
+        addHint(tr("Keep a new version of a page at most every this many minutes."));
+
+        backupCountSpin = new QSpinBox(savingGroup);
+        backupCountSpin->setRange(1, 100);
+        backupCountSpin->setValue(settings.value("backup/count", 10).toInt());
+        savingLayout->addRow(tr("Versions kept per page:"), backupCountSpin);
+        addHint(tr("The oldest goes when there are more. Disk use: at most this many copies "
+                   "of each page you change."));
+
+        backupDaysSpin = new QSpinBox(savingGroup);
+        backupDaysSpin->setRange(1, 365);
+        backupDaysSpin->setSuffix(tr(" days"));
+        backupDaysSpin->setValue(settings.value("backup/days", 30).toInt());
+        savingLayout->addRow(tr("Keep versions for:"), backupDaysSpin);
+        addHint(tr("Older versions are deleted; the newest one of each page stays."));
+
+        auto syncBackup = [this]() {
+            for (QSpinBox *spin : {backupMinutesSpin, backupCountSpin, backupDaysSpin})
+                spin->setEnabled(backupCheck->isChecked());
+        };
+        connect(backupCheck, &QCheckBox::toggled, this, syncBackup);
+        syncBackup();
+        layout->addWidget(savingGroup);
+    }
+
     layout->addStretch();
     
     // Initialize colors

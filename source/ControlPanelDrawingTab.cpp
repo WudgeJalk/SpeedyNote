@@ -154,6 +154,11 @@ void ControlPanelDialog::createDrawingTab()
             tr("Circle or square when sides differ by under:"));
     addSpin(angleSnapSpin, 0, 30, drawing.angleSnap, tr("°"),
             tr("Parallel or square sides within:"));
+    addSpin(trapezoidAngleSpin, 12, 45, drawing.trapezoidAngle, tr("°"),
+            tr("Trapezoid only when two opposite sides differ by over:"));
+    shapesLayout->addRow(hintLabel(
+        tr("A box becomes a trapezoid only when two opposite sides differ by more than this angle."),
+        shapesGroup));
     addSpin(levelAngleSpin, 0, 20, drawing.levelAngle, tr("°"),
             tr("Level a shape within:"));
     handArrowsCheck = new QCheckBox(tr("Hand-drawn arrows"), shapesGroup);
@@ -358,6 +363,7 @@ void ControlPanelDialog::applyDrawingTab()
     settings.setValue("shapes/roughPercent", roughPercentSpin->value());
     settings.setValue("shapes/equalPercent", equalPercentSpin->value());
     settings.setValue("shapes/angleSnap", angleSnapSpin->value());
+    settings.setValue("shapes/trapezoidAngle", trapezoidAngleSpin->value());
     settings.setValue("shapes/levelAngle", levelAngleSpin->value());
     settings.setValue("laser/holdMs", laserHoldSpin->value());
     settings.setValue("laser/fadeMs", laserFadeSpin->value());

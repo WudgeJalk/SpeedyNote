@@ -103,6 +103,9 @@ NotebookExporter::ExportResult NotebookExporter::exportPackage(
     while (it.hasNext()) {
         QString filePath = it.next();
         QString relativePath = bundleDir.relativeFilePath(filePath);
+        if (relativePath.startsWith("versions/")) {
+            continue;  // earlier versions (Step R4) stay with the original note
+        }
         QString zipEntryPath = notebookName + "/" + relativePath;
         QByteArray zipEntryPathUtf8 = zipEntryPath.toUtf8();
         
@@ -265,8 +268,12 @@ NotebookExporter::ExportResult NotebookExporter::exportFolderPackage(
     while (it.hasNext()) {
         const QString path = it.next();
         const QFileInfo info = it.fileInfo();
-        const QByteArray entry = (rootName + "/" + QDir(root).relativeFilePath(path)
-                                  + (info.isDir() ? "/" : "")).toUtf8();
+        const QString entryName = rootName + "/" + QDir(root).relativeFilePath(path)
+                                + (info.isDir() ? "/" : "");
+        if (entryName.contains(".snb/versions/")) {
+            continue;  // earlier versions of a note (Step R4) are not packed
+        }
+        const QByteArray entry = entryName.toUtf8();
         QByteArray data;
         if (!info.isDir()) {
             QFile file(path);

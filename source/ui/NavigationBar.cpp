@@ -4,6 +4,8 @@
 #include <QIcon>
 #include <QFontMetrics>
 #include <QPalette>
+#include <QPainter>
+#include <QPixmap>
 #include <QDebug>
 
 NavigationBar::NavigationBar(QWidget *parent)
@@ -67,7 +69,12 @@ void NavigationBar::setupUi()
     m_filenameButton->setToolTip(tr("Click to toggle tab bar"));
     // Style will be set in updateTheme()
     mainLayout->addWidget(m_filenameButton);
-    
+
+    m_saveStateButton = new ActionButton(this);
+    m_saveStateButton->setFixedSize(28, 36);
+    m_saveStateButton->hide();  // Off until MainWindow sets a state
+    mainLayout->addWidget(m_saveStateButton);
+
     mainLayout->addStretch(1);
     
     // === Right side buttons ===
@@ -172,7 +179,9 @@ void NavigationBar::connectSignals()
     // Center
     connect(m_filenameButton, &QPushButton::clicked,
             this, &NavigationBar::filenameClicked);
-    
+    connect(m_saveStateButton, &QPushButton::clicked,
+            this, &NavigationBar::saveStateClicked);
+
     // Right side
     connect(m_fullscreenButton, &QPushButton::toggled,
             this, &NavigationBar::fullscreenToggled);
@@ -247,7 +256,9 @@ void NavigationBar::updateTheme(bool darkMode, const QColor &accentColor)
     m_shareButton->setDarkMode(darkMode);
     m_rightSidebarButton->setDarkMode(darkMode);
     m_menuButton->setDarkMode(darkMode);
-    
+    m_saveStateButton->setDarkMode(darkMode);
+    applySaveStateIcon();
+
     // Style filename button to match theme
     QString textColor = darkMode ? "#ffffff" : "#000000";
     m_filenameButton->setStyleSheet(QString(
@@ -282,5 +293,35 @@ void NavigationBar::setFullscreenChecked(bool checked)
 {
     const QSignalBlocker blocker(m_fullscreenButton);
     m_fullscreenButton->setChecked(checked);
+}
+
+void NavigationBar::setSaveState(AutoSaver::State state, const QString &tip)
+{
+    m_saveStateButton->setToolTip(tip);
+    m_saveStateButton->setAccessibleName(tip);
+    if (state == m_saveState) {
+        return;
+    }
+    m_saveState = state;
+    applySaveStateIcon();
+}
+
+void NavigationBar::applySaveStateIcon()
+{
+    m_saveStateButton->setVisible(m_saveState != AutoSaver::Off);
+    if (m_saveState == AutoSaver::Failed) {
+        // Red whatever the theme: it must be seen.
+        m_saveStateButton->setThemedIcon(QString());
+        QPixmap red(QStringLiteral(":/resources/icons/warning.png"));
+        QPainter painter(&red);
+        painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+        painter.fillRect(red.rect(), QColor(0xFF, 0x4D, 0x4F));
+        painter.end();
+        m_saveStateButton->setIcon(QIcon(red));
+    } else {
+        m_saveStateButton->setThemedIcon(m_saveState == AutoSaver::Saving ? QStringLiteral("saving")
+                                                                          : QStringLiteral("check"));
+    }
+    m_saveStateButton->setIconSize(QSize(18, 18));
 }
 

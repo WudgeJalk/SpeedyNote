@@ -47,10 +47,11 @@ public:
 
     void cancelWriting()
     {
-        // Nothing to discard, so the partially written target has to go. Unlike
-        // QSaveFile this cannot restore a previous version; there is none left.
+        // Nothing to discard. Unlike QSaveFile this cannot restore a previous
+        // version, but removing the half file would be worse: a missing
+        // document.json makes the note unopenable, while a broken one falls
+        // back to its newest earlier version (Document::loadBundle).
         close();
-        remove();
     }
 };
 

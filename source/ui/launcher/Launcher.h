@@ -93,9 +93,9 @@ signals:
 
     /**
      * @brief Emitted when the Library page makes a new note in a section.
-     * @param bundlePath Where the new .snb must be saved.
+     * @param folder The section: where the New note window starts.
      */
-    void createNewNoteAt(const QString& bundlePath, bool edgeless);
+    void createNewNoteIn(const QString& folder, bool edgeless);
 
     /**
      * @brief Emitted when user wants to open a PDF for annotation.

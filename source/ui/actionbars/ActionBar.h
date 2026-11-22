@@ -53,15 +53,18 @@ public:
     /// next to the selection.
     void setOrientation(Qt::Orientation orientation);
 
-    /// The shape buttons ("Edit points" and the corner rounding), for bars that
-    /// added them. @p canEditPoints false hides both; @p step -1 hides the rounding.
-    void setShapeEdit(bool canEditPoints, bool editPointsOn, int step);
+    /// The shape buttons ("Edit points" and the corner roundness), for bars that
+    /// added them. @p canEditPoints false hides both; @p fraction < 0 hides the
+    /// roundness, else it is where its slider opens (0 sharp .. 1 round).
+    void setShapeEdit(bool canEditPoints, bool editPointsOn, qreal fraction);
 
 signals:
     /// "Edit points" turned on or off.
     void editPointsToggled(bool on);
-    /// A corner rounding was chosen: 0 sharp, 1 small, 2 medium, 3 large.
-    void cornerStepChosen(int step);
+    /// The roundness slider: pressed, moved (0 sharp .. 1 round), released.
+    void cornerRadiusBegin();
+    void cornerRadiusPreview(qreal fraction);
+    void cornerRadiusCommit();
 
 protected:
     /**
@@ -115,7 +118,7 @@ protected:
 private:
     ActionBarButton* m_editPointsButton = nullptr;
     ActionBarButton* m_cornersButton = nullptr;
-    int m_cornerStep = -1;
+    qreal m_cornerFraction = -1.0;
 };
 
 #endif // ACTIONBAR_H

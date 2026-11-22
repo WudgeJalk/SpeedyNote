@@ -106,9 +106,8 @@ VectorStroke ShapeObject::outlineStroke() const
         }
     } else {
         // A fixed radius: a resize must not change how round the corners are.
-        const qreal radius = kind == RoundRect ? qMax(16.0, 4 * lineWidth)
-                                               : ShapeCleaner::stepRadius(roundness, lineWidth);
-        pts = ShapeCleaner::polyline(corners(), true, radius, lineWidth);
+        pts = ShapeCleaner::polyline(corners(), true, kind == RoundRect ? qMax(16.0, 4 * lineWidth) : radius(),
+                                     lineWidth);
     }
 
     VectorStroke stroke;
@@ -123,6 +122,23 @@ VectorStroke ShapeObject::outlineStroke() const
     }
     stroke.updateBoundingBox();
     return stroke;
+}
+
+qreal ShapeObject::radius() const
+{
+    return cornerRadius >= 0.0 ? cornerRadius : ShapeCleaner::stepRadius(roundness, lineWidth);
+}
+
+void ShapeObject::setCornerRadius(qreal r)
+{
+    cornerRadius = qMax(0.0, r);
+    roundness = 0;
+    for (int step = 1; step <= 3; ++step) {
+        if (qAbs(ShapeCleaner::stepRadius(step, lineWidth) - cornerRadius)
+            < qAbs(ShapeCleaner::stepRadius(roundness, lineWidth) - cornerRadius)) {
+            roundness = step;
+        }
+    }
 }
 
 qreal ShapeObject::crossAt(const QPointF& a, const QPointF& b, const QPointF& c, const QPointF& d)
@@ -176,7 +192,7 @@ bool ShapeObject::containsPoint(const QPointF& pt) const
 ShapeObject::OutlineKey ShapeObject::outlineKey() const
 {
     return OutlineKey{position, size, rotation, kind, color.rgba(), lineWidth, lineStyle, roundness,
-                      cornerPoints, StrokeStyle::generation()};
+                      cornerPoints, StrokeStyle::generation(), cornerRadius};
 }
 
 const VectorStroke& ShapeObject::outline() const
@@ -201,6 +217,7 @@ QJsonObject ShapeObject::toJson() const
     // "rounded": false is what builds before the steps read as sharp.
     if (roundness == 0) obj["rounded"] = false;
     else if (roundness != 1) obj["roundness"] = roundness;
+    if (cornerRadius >= 0.0) obj["cornerRadius"] = cornerRadius;
     if (!cornerPoints.isEmpty()) {
         QJsonArray points;
         for (const QPointF& p : cornerPoints) points << p.x() << p.y();
@@ -218,6 +235,7 @@ void ShapeObject::loadFromJson(const QJsonObject& obj)
     lineStyle = StrokeStyle::lineStyleFromName(obj["line"].toString());
     roundness = obj.contains("roundness") ? qBound(0, obj["roundness"].toInt(1), 3)
                                           : (obj["rounded"].toBool(true) ? 1 : 0);
+    cornerRadius = obj.contains("cornerRadius") ? qMax(0.0, obj["cornerRadius"].toDouble()) : -1.0;
     cornerPoints.clear();
     const QJsonArray points = obj["corners"].toArray();
     for (int i = 0; i + 1 < points.size(); i += 2) {

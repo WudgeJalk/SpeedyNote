@@ -84,7 +84,10 @@ private:
     // colour/spacing never silently rewrites it to "None".
     int loadedBgTypeValue = 0;
     bool bgTypeInCombo = true;
+    int lastPaperIndex = 0;   ///< back to it when "Add a paper..." is cancelled
+    int loadedPaperIndex = -1;   ///< untouched: apply keeps the note's paper as it is
     void createPageTab();
+    void onPaperActivated(int index);
 
     // === OCR tab ===
     QWidget* ocrTab = nullptr;

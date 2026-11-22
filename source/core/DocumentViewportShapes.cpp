@@ -149,11 +149,12 @@ bool DocumentViewport::cleanCurrentStroke(bool snap)
     params.roughPercent = settings.roughPercent;
     params.equalPercent = settings.equalPercent;
     params.angleSnapDeg = settings.angleSnap;
+    params.trapezoidDeg = settings.trapezoidAngle;
     params.levelDeg = settings.levelAngle;
     // A line that draws its own head: the shaft is cleaned and gets the head.
     const QPointF penAt = raw.last();
     int tip = -1;
-    const int arrow = m_currentTool == ToolType::Pen && settings.handArrows
+    const int arrow = cleansLines(m_currentTool) && settings.handArrows
         ? handHead(ShapeCleaner::splitOneStrokeArrow(raw, params.width, 1.0 / m_zoomLevel, &tip).arrow)
         : StrokeStyle::None;
     if (arrow != StrokeStyle::None) {
@@ -215,7 +216,7 @@ bool DocumentViewport::liftShapeStroke()
     if ((m_freeShapeMode || m_currentTool == ToolType::Shape) && !m_strokeCleaned) {
         cleanCurrentStroke(true);
     }
-    if (m_currentTool != ToolType::Pen || !DrawingSettings::get().handArrows) {
+    if (!cleansLines(m_currentTool) || !DrawingSettings::get().handArrows) {
         return false;
     }
     if (makeHandArrow()) {
@@ -245,7 +246,7 @@ void DocumentViewport::rememberShaft(int pageIndex, Document::TileCoord tile, in
                                      const QString& id)
 {
     m_lastShaft = ShaftRef();
-    if (m_currentTool == ToolType::Pen && !id.isEmpty()) {
+    if (cleansLines(m_currentTool) && !id.isEmpty()) {
         m_lastShaft = {id, pageIndex, tile, layerIndex};
     }
 }
@@ -266,6 +267,10 @@ bool DocumentViewport::makeHandArrow(bool apply)
         return false;
     }
     const VectorStroke shaft = layer->strokes().last();
+    // A marker head does not finish a pen line, nor the other way round.
+    if (shaft.isMarker() != m_currentStroke.isMarker()) {
+        return false;
+    }
 
     // The head is in page coordinates (edgeless: document); bring the shaft there.
     const QPointF origin = edgeless ? QPointF(tile.first, tile.second) * Document::EDGELESS_TILE_SIZE
@@ -808,6 +813,7 @@ void DocumentViewport::restyleSelectedShape()
         shape->lineStyle = m_shapeStyle.lineStyle;
         if ((shape->roundness > 0) != m_shapeStyle.rounded) {
             shape->roundness = m_shapeStyle.rounded ? 1 : 0;   // A rounding chosen in the panel stays
+            shape->cornerRadius = -1.0;
         }
     } else if (auto* line = dynamic_cast<ConnectorObject*>(obj)) {
         if (m_shapeKind > kFreeShape && m_shapeKind < kFirstFixedShape) {

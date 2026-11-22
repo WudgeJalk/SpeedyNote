@@ -49,6 +49,7 @@ public:
         run(testConnectors, "testConnectors");
         run(testConnectorRoutes, "testConnectorRoutes");
         run(testCornersAndArrowTips, "testCornersAndArrowTips");
+        run(testRoughBoxes, "testRoughBoxes");
         printf("\n=== Results: %s ===\n\n", failed == 0 ? "all passed" : "FAILED");
         return failed == 0;
     }
@@ -210,12 +211,13 @@ private:
         if (corners.size() != 4 || !samePoint(corners[2], t.map(square[2]))) {
             return fail("turned and stretched, the corners must still be found");
         }
-        // Rounding steps read back from the drawn corners.
-        for (int step = 0; step <= 3; ++step) {
+        // The radius reads back from the drawn corners, the slider's too.
+        for (const qreal radius : {0.0, ShapeCleaner::stepRadius(1, 2.0), 17.5, ShapeCleaner::stepRadius(3, 2.0)}) {
             QVector<int> j;
-            const QVector<QPointF> p = ShapeCleaner::polyline(square, true, ShapeCleaner::stepRadius(step, 2.0), 2.0, &j);
-            if (ShapeCleaner::roundingStep(p, j, 2.0) != step) {
-                return fail("each rounding step must be read back");
+            const QVector<QPointF> p = ShapeCleaner::polyline(square, true, radius, 2.0, &j);
+            if (qAbs(ShapeCleaner::cornerRadius(p, j, 2.0) - radius) > 0.01) {
+                printf("(radius %.2f read %.2f) ", radius, ShapeCleaner::cornerRadius(p, j, 2.0));
+                return fail("each corner radius must be read back");
             }
         }
         if (!ShapeCleaner::jointCorners(round, {1, 2}).isEmpty() || !ShapeCleaner::jointCorners(round, {}).isEmpty()) {
@@ -544,8 +546,11 @@ private:
                                              turned(bc, 102, 47, 25), turned(bc, -98, 44, 25)}),
                                 params(2, false), &closed);
         QVector<QPointF> k = cornersOf(c);
+        // The outline may start on either end of the long side (its ends overlap).
         if (!closed || k.size() != 4 || qAbs(between(k[1] - k[0], k[2] - k[1]) - 90.0) > 0.01
-            || between(k[1] - k[0], k[3] - k[2]) > 0.01 || qAbs(between(k[1] - k[0], QPointF(1, 0)) - 25.0) > 2.0) {
+            || between(k[1] - k[0], k[3] - k[2]) > 0.01
+            || qMin(qAbs(between(k[1] - k[0], QPointF(1, 0)) - 25.0), qAbs(between(k[2] - k[1], QPointF(1, 0)) - 25.0))
+                   > 2.0) {
             printf("(%d corners) ", int(k.size()));
             return fail("a tilted box must become a tilted rectangle");
         }
@@ -629,6 +634,167 @@ private:
             || QLineF(c.last(), arc.last()).length() > 4.0) {
             printf("(radius %.2f..%.2f) ", lo, hi);
             return fail("a rough arc must become an exact arc");
+        }
+        return true;
+    }
+
+    /// A seeded random stream, the same on every compiler.
+    struct Rng {
+        quint64 s;
+        qreal next() { s = s * 6364136223846793005ULL + 1442695040888963407ULL; return qreal(s >> 11) / 9007199254740992.0; }
+        qreal in(qreal a, qreal b) { return a + (b - a) * next(); }
+    };
+
+    /// A quick hand-drawn closed outline through @p corners: bowed, wobbly
+    /// sides, corners cut round, few points (a fast pen), a tail where the pen
+    /// landed, and an end that runs past the start, runs back over the first
+    /// side, or stops short of it.
+    static QVector<QPointF> roughOutline(const QVector<QPointF>& corners, Rng& r)
+    {
+        const int k = corners.size();
+        qreal side = 0;
+        for (int i = 0; i < k; ++i) side += QLineF(corners[i], corners[(i + 1) % k]).length();
+        side /= k;
+        const qreal step = r.in(3.0, 25.0);
+        const qreal wobble = r.in(0.3, 3.0);
+        const qreal phase = r.in(0, 6.28);
+        const auto unitOf = [](QPointF v) { return v / std::hypot(v.x(), v.y()); };
+        QVector<QPointF> out;
+        const auto addLine = [&](QPointF a, QPointF b, qreal bow) {
+            const qreal len = QLineF(a, b).length();
+            const int n = qMax(1, int(std::ceil(len / step)));
+            const QPointF d = b - a;
+            const QPointF nrm = len > 0 ? QPointF(-d.y() / len, d.x() / len) : QPointF();
+            for (int i = 1; i <= n; ++i) {
+                const qreal t = qreal(i) / n;
+                out << a + d * t
+                       + nrm * (bow * len * 4 * t * (1 - t)
+                                + wobble * std::sin(phase + (out.size() + i) * 0.9) * std::sin(t * M_PI));
+            }
+        };
+        const QPointF c0 = corners[0];
+        const qreal tailKind = r.next();
+        const qreal tailLen = r.in(0.0, 0.10) * side;
+        if (tailKind < 0.35) {   // a hook from any side
+            const qreal a = r.in(0, 6.28);
+            out << c0 + QPointF(std::cos(a), std::sin(a)) * tailLen;
+            addLine(out.last(), c0, 0);
+        } else if (tailKind < 0.6) {   // started early, on the last side's line
+            out << c0 + unitOf(c0 - corners[k - 1]) * tailLen;
+            addLine(out.last(), c0, 0);
+        } else {
+            out << c0;
+        }
+        const qreal cut = r.in(0.0, 0.10) * side;
+        for (int i = 0; i < k; ++i) {
+            const QPointF a = corners[i], b = corners[(i + 1) % k], next = corners[(i + 2) % k];
+            const QPointF u = unitOf(b - a);
+            const bool last = i == k - 1;
+            addLine(out.last(), last ? b : b - u * cut, r.in(-0.05, 0.05));
+            if (!last && cut > 0) {
+                const QPointF p0 = b - u * cut, p2 = b + unitOf(next - b) * cut;
+                for (int s = 1; s <= 3; ++s) {
+                    const qreal t = s / 3.0;
+                    out << (1 - t) * (1 - t) * p0 + 2 * t * (1 - t) * b + t * t * p2;
+                }
+            }
+        }
+        const qreal endKind = r.next();
+        const qreal len0 = QLineF(corners[0], corners[1]).length();
+        if (endKind < 0.35) {   // runs on past the start
+            addLine(out.last(), c0 + unitOf(corners[0] - corners[k - 1]) * r.in(0.02, 0.15) * len0, 0);
+        } else if (endKind < 0.7) {   // turns and runs back over the first side
+            const QPointF u = unitOf(corners[1] - corners[0]);
+            addLine(out.last(), c0 + u * r.in(0.02, 0.15) * len0 + QPointF(-u.y(), u.x()) * r.in(-3, 3), 0);
+        } else {   // stops a little short
+            const qreal gap = r.in(0.0, 0.08) * side;
+            while (out.size() > 2 && QLineF(out.last(), c0).length() < gap) out.removeLast();
+            out << c0 + unitOf(corners[k - 1] - corners[0]) * gap;
+        }
+        return out;
+    }
+
+    /// The corners of the cleaned outline (sharp corners), or none.
+    static QVector<QPointF> cleanedCorners(const QVector<QPointF>& raw, const ShapeCleaner::Params& p)
+    {
+        bool closed = false;
+        QVector<int> joints;
+        const QVector<QPointF> c = ShapeCleaner::clean(raw, p, &closed, &joints);
+        return closed ? ShapeCleaner::jointCorners(c, joints) : QVector<QPointF>();
+    }
+
+    /// 30 quick rough boxes become rectangles; true trapezoids and
+    /// parallelograms stay what they are.
+    static bool testRoughBoxes()
+    {
+        const ShapeCleaner::Params p = params(2, false);
+        int boxes = 0;
+        for (int seed = 0; seed < 30; ++seed) {
+            // Up to 20 degrees off level, any corner first, either way round;
+            // the corners a few % off, so opposite sides differ by up to about 15 degrees.
+            Rng r{quint64(seed) * 7919u + 17u};
+            const qreal w = r.in(90, 320), h = r.in(70, 240), rot = r.in(-20, 20);
+            const QPointF c(500, 400);
+            QVector<QPointF> q{turned(c, -w / 2, -h / 2, rot), turned(c, w / 2, -h / 2, rot),
+                               turned(c, w / 2, h / 2, rot), turned(c, -w / 2, h / 2, rot)};
+            const qreal jit = 0.06 * (w + h) / 2;
+            for (QPointF& pt : q) pt += QPointF(r.in(-jit, jit), r.in(-jit, jit));
+            const int first = int(r.next() * 4) % 4;
+            const bool reverse = r.next() < 0.5;
+            QVector<QPointF> order;
+            for (int i = 0; i < 4; ++i) order << q[(first + (reverse ? 4 - i : i)) % 4];
+            const QVector<QPointF> k = cleanedCorners(roughOutline(order, r), p);
+            bool square = k.size() == 4;
+            for (int j = 0; square && j < 4; ++j) {
+                square = qAbs(between(k[(j + 1) % 4] - k[j], k[(j + 3) % 4] - k[j]) - 90.0) <= 1.0;
+            }
+            boxes += square;
+        }
+        printf("(%d/30 boxes) ", boxes);
+        if (boxes < 28) {
+            return fail("quick rough boxes must become rectangles");
+        }
+        for (int seed = 0; seed < 5; ++seed) {
+            // Legs 30 to 40 degrees apart: a trapezoid, one pair exactly parallel.
+            Rng r{quint64(seed) * 104729u + 5u};
+            const qreal h = r.in(100, 200), w = r.in(180, 300), legs = r.in(30, 40), lean = r.in(-0.5, 0.5);
+            const qreal ta = std::tan(qDegreesToRadians(legs * (0.5 + lean)));
+            const qreal tb = std::tan(qDegreesToRadians(legs * (0.5 - lean)));
+            const QVector<QPointF> k = cleanedCorners(
+                roughOutline({{500 - w / 2 + h * ta, 400 - h / 2}, {500 + w / 2 - h * tb, 400 - h / 2},
+                              {500 + w / 2, 400 + h / 2}, {500 - w / 2, 400 + h / 2}}, r), p);
+            // The outline may start on any corner: either pair can be the parallel one.
+            const qreal a02 = k.size() == 4 ? between(k[1] - k[0], k[3] - k[2]) : 0.0;
+            const qreal a13 = k.size() == 4 ? between(k[2] - k[1], k[0] - k[3]) : 0.0;
+            if (k.size() != 4 || qMin(a02, a13) > 0.01 || qMax(a02, a13) < 20.0) {
+                printf("(trapezoid %d: %d corners) ", seed, int(k.size()));
+                return fail("a rough trapezoid must stay a trapezoid");
+            }
+            // Slanted 25 to 35 degrees: a parallelogram, not a rectangle.
+            Rng r2{quint64(seed) * 15485863u + 3u};
+            const qreal ph = r2.in(100, 180), pw = r2.in(160, 280), s = ph * std::tan(qDegreesToRadians(r2.in(25, 35)));
+            const QVector<QPointF> g = cleanedCorners(
+                roughOutline({{500 - pw / 2 + s / 2, 400 - ph / 2}, {500 + pw / 2 + s / 2, 400 - ph / 2},
+                              {500 + pw / 2 - s / 2, 400 + ph / 2}, {500 - pw / 2 - s / 2, 400 + ph / 2}}, r2), p);
+            if (g.size() != 4 || between(g[1] - g[0], g[3] - g[2]) > 0.01 || between(g[2] - g[1], g[0] - g[3]) > 0.01
+                || between(g[1] - g[0], g[2] - g[1]) > 80.0) {
+                printf("(parallelogram %d: %d corners) ", seed, int(g.size()));
+                return fail("a rough parallelogram must stay a parallelogram");
+            }
+        }
+        // One side 20 degrees off: a box by default, a trapezoid below that setting.
+        const QVector<QPointF> leaning = handPolygon({{100, 100}, {300, 100}, {354.6, 250}, {100, 250}});
+        QVector<QPointF> k = cleanedCorners(leaning, p);
+        if (k.size() != 4 || qAbs(between(k[1] - k[0], k[2] - k[1]) - 90.0) > 0.01) {
+            return fail("one side 20 degrees off must still give a rectangle");
+        }
+        ShapeCleaner::Params strict = p;
+        strict.trapezoidDeg = 15;
+        k = cleanedCorners(leaning, strict);
+        const qreal a02 = k.size() == 4 ? between(k[1] - k[0], k[3] - k[2]) : 0.0;
+        const qreal a13 = k.size() == 4 ? between(k[2] - k[1], k[0] - k[3]) : 0.0;
+        if (k.size() != 4 || qMin(a02, a13) > 0.01 || qMax(a02, a13) < 15.0) {
+            return fail("below the trapezoid setting the same box must be a trapezoid");
         }
         return true;
     }

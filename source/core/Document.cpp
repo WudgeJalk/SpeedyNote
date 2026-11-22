@@ -11,10 +11,14 @@
 #include "../pdf/PdfMaterializer.h"
 #include <QBuffer>
 #include <QCryptographicHash>
+#include <QDirIterator>
 #include <QImageReader>
 #include <QRegularExpression>
 #include "../platform/BundleFile.h"
 #include <QSettings>
+#include <QStorageInfo>
+#include <QScopeGuard>
+#include <QElapsedTimer>
 #include <QtConcurrent>
 #include <cmath>
 #include <algorithm>  // Phase 5.4: for std::sort, std::greater in merge
@@ -54,7 +58,128 @@ bool isDecodableImageAsset(const QString& path)
     return !reader.read().isNull();
 }
 
+// The plain reason shown to the user when a bundle file cannot be written.
+QString saveFailureReason(const QString& path, qint64 bytesNeeded)
+{
+    const QStorageInfo storage(QFileInfo(path).absolutePath());
+    if (storage.isValid() && storage.bytesAvailable() >= 0
+        && storage.bytesAvailable() < bytesNeeded + 1024 * 1024) {
+        return QCoreApplication::translate("Document", "The disk is full.");
+    }
+    return QCoreApplication::translate("Document",
+        "The folder is read-only, or a file is held by another program "
+        "(a sync tool can do this). Try again in a moment.");
+}
+
+// Writes `path` through `fill` into a temporary file, syncs it and renames it
+// over the old file. On any failure the old file stays as it was.
+bool commitWith(const QString& path, qint64 size,
+                const std::function<bool(QIODevice&)>& fill, QString* error)
+{
+    BundleFile file(path);
+    file.setDirectWriteFallback(false);
+    bool ok = file.open(QIODevice::WriteOnly) && fill(file);
+#ifdef SPEEDYNOTE_DEBUG
+    const int failAt = Document::s_failCommitAt.load();
+    if (failAt >= 0) {
+        Document::s_failCommitAt.store(failAt - 1);
+        if (failAt == 0 && ok) {
+            file.cancelWriting();
+            if (error) *error = QStringLiteral("Test fault hook.");
+            return false;
+        }
+    }
+#endif
+    if (ok) {
+        ok = file.commit();
+    } else if (file.isOpen()) {
+        file.cancelWriting();  // the destructor then drops the temporary file
+    }
+    if (!ok) {
+        qWarning() << "Cannot write" << path << ":" << file.errorString();
+        if (error) *error = saveFailureReason(path, size);
+    }
+    return ok;
+}
+
+// Copies one file of a bundle in chunks, published atomically like commitFile.
+bool copyFile(const QString& sourcePath, const QString& destPath, QString* error)
+{
+    QFile source(sourcePath);
+    if (!source.open(QIODevice::ReadOnly)) {
+        qWarning() << "Cannot read" << sourcePath << ":" << source.errorString();
+        if (error) {
+            *error = QCoreApplication::translate("Document", "A file of the note could not be read: %1.")
+                         .arg(QFileInfo(sourcePath).fileName());
+        }
+        return false;
+    }
+    if (!QDir().mkpath(QFileInfo(destPath).absolutePath())) {
+        if (error) *error = saveFailureReason(destPath, 0);
+        return false;
+    }
+    return commitWith(destPath, source.size(), [&source](QIODevice& out) {
+        constexpr qint64 chunkSize = 1024 * 1024;
+        while (!source.atEnd()) {
+            const QByteArray chunk = source.read(chunkSize);
+            if (chunk.isEmpty() && source.error() != QFileDevice::NoError) return false;
+            if (out.write(chunk) != chunk.size()) return false;
+        }
+        return true;
+    }, error);
+}
+
+// The OCR sidecar of a page or tile; empty when there is nothing to keep.
+QJsonObject ocrSidecarJson(const Page* page)
+{
+    if (page->ocrTextBlocks.isEmpty() && page->suppressedStrokeIds.isEmpty()
+        && page->dismissedOcrBlockKeys.isEmpty()) {
+        return {};
+    }
+    QJsonObject root;
+    root["version"] = 1;
+    if (!page->ocrTextBlocks.isEmpty())
+        root["engineId"] = page->ocrTextBlocks.first().engineId;
+
+    QJsonArray blocks;
+    for (const auto& block : page->ocrTextBlocks)
+        blocks.append(block.toJson());
+    root["blocks"] = blocks;
+
+    if (!page->suppressedStrokeIds.isEmpty()) {
+        QJsonArray suppressed;
+        for (const auto& id : page->suppressedStrokeIds)
+            suppressed.append(id);
+        root["suppressedStrokeIds"] = suppressed;
+    }
+
+    if (!page->dismissedOcrBlockKeys.isEmpty()) {
+        QJsonArray dismissed;
+        for (const auto& key : page->dismissedOcrBlockKeys)
+            dismissed.append(key);
+        root["dismissedBlockKeys"] = dismissed;
+    }
+    return root;
+}
+
+QString tileFileName(Document::TileCoord coord, const char* suffix)
+{
+    return QString("%1,%2%3").arg(coord.first).arg(coord.second).arg(QLatin1String(suffix));
+}
+
 }  // namespace
+
+#ifdef SPEEDYNOTE_DEBUG
+std::atomic<int> Document::s_failCommitAt{-1};
+#endif
+bool Document::s_keepDirtyLoaded = false;
+
+bool Document::commitFile(const QString& path, const QByteArray& data, QString* error)
+{
+    return commitWith(path, data.size(), [&data](QIODevice& out) {
+        return out.write(data) == data.size();
+    }, error);
+}
 
 #ifdef __GLIBC__
 #include <malloc.h>
@@ -84,6 +209,7 @@ Document::~Document()
 {
     // A worker must never outlive the Document or write into a bundle after
     // close-time orphan cleanup has completed.
+    waitForPendingSave();
     flushPendingImageWrites();
 
 #ifdef SPEEDYNOTE_DEBUG
@@ -112,6 +238,7 @@ void Document::setBundlePath(const QString& path)
     if (m_bundlePath == path) {
         return;
     }
+    waitForPendingSave();
     flushPendingImageWrites();
     m_bundlePath = path;
 }
@@ -732,7 +859,7 @@ void Document::retainPdfSourceForUndo(const QString& sourceId)
     if (source) m_undoRetainedPdfSourceIds.insert(source->id);
 }
 
-int Document::pruneUnreferencedSources()
+int Document::pruneUnreferencedSources(QStringList* bundledFilesToRemove)
 {
     const QStringList stale = unreferencedSourceIds();
     if (stale.isEmpty()) {
@@ -749,7 +876,11 @@ int Document::pruneUnreferencedSources()
         bool bundledFileRemoved = true;
         if (s && s->bundled && !s->bundledFile.isEmpty() && !m_bundlePath.isEmpty()) {
             const QString abs = QDir(m_bundlePath).absoluteFilePath(s->bundledFile);
-            if (QFile::exists(abs)) {
+            const QString rel = QDir(m_bundlePath).relativeFilePath(abs);
+            if (bundledFilesToRemove) {
+                // A save removes it only once the new manifest no longer names it.
+                if (!rel.startsWith(QLatin1String(".."))) bundledFilesToRemove->append(rel);
+            } else if (QFile::exists(abs)) {
                 bundledFileRemoved = QFile::remove(abs);
                 if (!bundledFileRemoved) {
                     qWarning() << "pruneUnreferencedSources: keeping source because its"
@@ -1740,6 +1871,9 @@ bool Document::savePage(int index)
     if (m_bundlePath.isEmpty()) {
         return false;
     }
+    if (index >= 0 && index < m_pageOrder.size() && pendingSaveHolds(m_pageOrder[index])) {
+        waitForPendingSave();  // the job writes this same file
+    }
 
     // Page JSON must never reference an asset whose background write has not
     // completed. A failed worker is retried synchronously from in-memory data.
@@ -1763,18 +1897,9 @@ bool Document::savePage(int index)
         return false;
     }
     
-    QString pagePath = m_bundlePath + "/pages/" + uuid + ".json";
-    BundleFile file(pagePath);
-    file.setDirectWriteFallback(false);
-    if (!file.open(QIODevice::WriteOnly)) {
-        qWarning() << "Cannot save page:" << pagePath;
-        return false;
-    }
-    
-    QJsonDocument jsonDoc(it->second->toJson());
-    const QByteArray pageData = jsonDoc.toJson(QJsonDocument::Compact);
-    if (file.write(pageData) != pageData.size() || !file.commit()) {
-        qWarning() << "Cannot commit page:" << pagePath;
+    const QString pagePath = m_bundlePath + "/pages/" + uuid + ".json";
+    NoteVersions::keepVersion(m_bundlePath, "pages/" + uuid + ".json", NoteVersions::policyFromSettings());
+    if (!commitFile(pagePath, QJsonDocument(it->second->toJson()).toJson(QJsonDocument::Compact))) {
         return false;
     }
     
@@ -1802,8 +1927,14 @@ void Document::evictPage(int index)
     if (index < 0 || index >= m_pageOrder.size()) {
         return;
     }
-    
+
     QString uuid = m_pageOrder[index];
+    // A page in a running save is dirty even though m_dirtyPages lost it, and
+    // a failed save must find it loaded. It goes on a later pass: waiting here
+    // would stall a scroll (rule 1).
+    if (pendingSaveHolds(uuid)) {
+        return;
+    }
     auto it = m_loadedPages.find(uuid);
     if (it == m_loadedPages.end()) {
         return;  // Not loaded, nothing to evict
@@ -1811,6 +1942,9 @@ void Document::evictPage(int index)
     
     // Save if dirty
     if (m_dirtyPages.count(uuid) > 0) {
+        if (s_keepDirtyLoaded && !m_bundlePath.isEmpty()) {
+            return;  // the next autosave writes it, off the GUI thread (rule 1)
+        }
         if (!savePage(index)) {
             qWarning() << "Failed to save page before eviction" << index;
             return;  // Keep the authoritative in-memory page.
@@ -2659,13 +2793,23 @@ std::unique_ptr<Page> Document::createDefaultPage()
     
     // Apply document defaults
     page->size = defaultPageSize;
-    page->backgroundType = defaultBackgroundType;
-    page->backgroundColor = defaultBackgroundColor;
-    page->gridColor = defaultGridColor;
-    page->gridSpacing = defaultGridSpacing;
-    page->lineSpacing = defaultLineSpacing;
-    
+    applyDefaultBackground(*page, false);
+
     return page;
+}
+
+void Document::applyDefaultBackground(Page& page, bool tile) const
+{
+    page.backgroundType = defaultBackgroundType;
+    page.backgroundColor = defaultBackgroundColor;
+    page.gridColor = defaultGridColor;
+    page.gridSpacing = defaultGridSpacing;
+    page.lineSpacing = defaultLineSpacing;
+    page.paperId = defaultPaperId;
+    if (!tile) {
+        page.customImage = defaultCustomImage;
+        page.loadCustomBackground(m_bundlePath);
+    }
 }
 
 void Document::loadAllEvictedTiles()
@@ -2719,7 +2863,7 @@ Page* Document::getTile(int tx, int ty) const
     
     // 2. If lazy loading enabled, try to load from disk
     // m_tiles is mutable, so this works on const Document
-    if (m_lazyLoadEnabled && m_tileIndex.count(coord) > 0) {
+    if (m_lazyLoadEnabled && m_tileIndex.count(coord) > 0 && m_unreadableTiles.count(coord) == 0) {
         if (loadTileFromDisk(coord)) {
             // Phase 5.6.5: No sync needed - loadTileFromDisk reconstructs layers from manifest
             return m_tiles.at(coord).get();
@@ -2746,17 +2890,22 @@ Page* Document::getOrCreateTile(int tx, int ty)
             // Phase 5.6.5: No sync needed - loadTileFromDisk reconstructs layers from manifest
             return m_tiles.at(coord).get();
         }
+        // Unreadable, and the user draws here: the new tile must not be saved
+        // over the old file, so that file is set aside and kept.
+        const QString tilePath = m_bundlePath + "/tiles/" + tileFileName(coord, ".json");
+        if (QFile::exists(tilePath)
+            && !QFile::rename(tilePath, tilePath + ".unreadable-"
+                                            + QString::number(QDateTime::currentMSecsSinceEpoch()))) {
+            qWarning() << "Cannot set aside the unreadable tile" << tilePath;
+        }
+        m_unreadableTiles.erase(coord);
     }
-    
+
     // 3. Create new tile
     auto tile = std::make_unique<Page>();
     tile->size = QSizeF(EDGELESS_TILE_SIZE, EDGELESS_TILE_SIZE);
-    tile->backgroundType = defaultBackgroundType;
-    tile->backgroundColor = defaultBackgroundColor;
-    tile->gridColor = defaultGridColor;
-    tile->gridSpacing = defaultGridSpacing;
-    tile->lineSpacing = defaultLineSpacing;
-    
+    applyDefaultBackground(*tile, true);
+
     // CR-8: Removed tile coord storage in pageIndex/pdfPageNumber - it was never read.
     // Tile coordinate is already the map key, no need to duplicate in Page.
     
@@ -3130,6 +3279,7 @@ QJsonObject Document::toJson() const
     
     // Default background settings
     obj["default_background"] = defaultBackgroundToJson();
+    if (!cover.isEmpty()) obj["cover"] = cover;   // Step N3, optional
 
     // OCR settings
     if (!ocrLanguage.isEmpty())
@@ -3268,6 +3418,7 @@ std::unique_ptr<Document> Document::fromJson(const QJsonObject& obj)
         doc->defaultGridSpacing = obj["background_density"].toInt(32);
         doc->defaultLineSpacing = obj["background_density"].toInt(32);
     }
+    doc->cover = obj["cover"].toObject();
 
     // OCR settings
     doc->ocrLanguage = obj["ocr_language"].toString();
@@ -3408,7 +3559,10 @@ QJsonObject Document::defaultBackgroundToJson() const
     bg["grid_color"] = defaultGridColor.name(QColor::HexRgb);  // Use 6-char hex (#RRGGBB) for clarity
     bg["grid_spacing"] = defaultGridSpacing;
     bg["line_spacing"] = defaultLineSpacing;
-    
+    // Optional (Step N): an older version keeps "type", the paper's fallback.
+    if (!defaultPaperId.isEmpty()) bg["paper"] = defaultPaperId;
+    if (!defaultCustomImage.isEmpty()) bg["custom_image"] = defaultCustomImage;
+
     // Only include page size for paged documents
     // Edgeless documents use tiles (1024x1024), not pages, so these fields are unused
     if (mode == Mode::Paged) {
@@ -3430,7 +3584,9 @@ void Document::loadDefaultBackgroundFromJson(const QJsonObject& obj)
     
     defaultGridSpacing = obj["grid_spacing"].toInt(32);
     defaultLineSpacing = obj["line_spacing"].toInt(32);
-    
+    defaultPaperId = obj["paper"].toString();
+    defaultCustomImage = obj["custom_image"].toString();
+
     if (obj.contains("page_width") && obj.contains("page_height")) {
         defaultPageSize = QSizeF(
             obj["page_width"].toDouble(816),
@@ -3505,11 +3661,68 @@ void Document::markTileDirty(TileCoord coord)
     markModified();
 }
 
+QJsonObject Document::tileJson(TileCoord coord, const Page* tile,
+                                QVector<QVector<VectorStroke>>* deferredStrokes) const
+{
+    if (!isEdgeless()) {
+        // Paged mode: full Page serialization (legacy behavior)
+        if (deferredStrokes) {
+            for (int i = 0; i < tile->layerCount(); ++i) deferredStrokes->append(tile->layer(i)->strokes());
+        }
+        return tile->toJson(/*withStrokes=*/deferredStrokes == nullptr);
+    }
+
+    // Phase 5.6.3: For edgeless mode, use compact format:
+    // - layers: array of {id, strokes} (layer properties stored in manifest)
+    // - objects: array of InsertedObjects (Phase O2)
+    // - coord_x, coord_y: tile coordinates for debugging
+    QJsonObject tileObj;
+    QJsonArray layersArray;
+    for (int i = 0; i < tile->layerCount(); ++i) {
+        const VectorLayer* layer = tile->layer(i);
+        if (layer && !layer->isEmpty()) {
+            QJsonObject layerObj;
+            layerObj["id"] = layer->id;
+            if (deferredStrokes) {
+                deferredStrokes->append(layer->strokes());
+            } else {
+                layerObj["strokes"] = VectorLayer::strokesToJson(layer->strokes());
+            }
+
+            layersArray.append(layerObj);
+        }
+    }
+    tileObj["layers"] = layersArray;
+
+    // Phase O2: Save objects to tile (BF.5)
+    // Objects are stored in tile-local coordinates; skip unlocked OCR objects
+    if (!tile->objects.empty()) {
+        QJsonArray objectsArray;
+        for (const auto& obj : tile->objects) {
+            if (obj->type() == QStringLiteral("ocr_text")) {
+                auto* ocr = static_cast<OcrTextObject*>(obj.get());
+                if (!ocr->ocrLocked)
+                    continue;
+            }
+            objectsArray.append(obj->toJson());
+        }
+        tileObj["objects"] = objectsArray;
+    }
+
+    // Store tile coordinate for debugging/verification
+    tileObj["coord_x"] = coord.first;
+    tileObj["coord_y"] = coord.second;
+    return tileObj;
+}
+
 bool Document::saveTile(TileCoord coord)
 {
     if (m_bundlePath.isEmpty()) {
         qWarning() << "Cannot save tile: bundle path not set";
         return false;
+    }
+    if (pendingSaveHolds(coord)) {
+        waitForPendingSave();  // the job writes this same file
     }
 
     flushPendingImageWrites();
@@ -3529,70 +3742,11 @@ bool Document::saveTile(TileCoord coord)
         return false;
     }
     
-    // Build tile file path
-    QString tilePath = tilesDir + "/" + 
-                       QString("%1,%2.json").arg(coord.first).arg(coord.second);
-    
-    BundleFile file(tilePath);
-    file.setDirectWriteFallback(false);
-    if (!file.open(QIODevice::WriteOnly)) {
-        qWarning() << "Cannot save tile: failed to open file" << tilePath;
-        return false;
-    }
-    
-    // Phase 5.6.3: For edgeless mode, use compact format:
-    // - layers: array of {id, strokes} (layer properties stored in manifest)
-    // - objects: array of InsertedObjects (Phase O2)
-    // - coord_x, coord_y: tile coordinates for debugging
-    QJsonObject tileObj;
-    Page* tile = it->second.get();
-    
-    if (isEdgeless()) {
-        QJsonArray layersArray;
-        for (int i = 0; i < tile->layerCount(); ++i) {
-            VectorLayer* layer = tile->layer(i);
-            if (layer && !layer->isEmpty()) {
-                QJsonObject layerObj;
-                layerObj["id"] = layer->id;
-                
-                QJsonArray strokesArray;
-                for (const auto& stroke : layer->strokes()) {
-                    strokesArray.append(stroke.toJson());
-                }
-                layerObj["strokes"] = strokesArray;
-                
-                layersArray.append(layerObj);
-            }
-        }
-        tileObj["layers"] = layersArray;
-        
-        // Phase O2: Save objects to tile (BF.5)
-        // Objects are stored in tile-local coordinates; skip unlocked OCR objects
-        if (!tile->objects.empty()) {
-            QJsonArray objectsArray;
-            for (const auto& obj : tile->objects) {
-                if (obj->type() == QStringLiteral("ocr_text")) {
-                    auto* ocr = static_cast<OcrTextObject*>(obj.get());
-                    if (!ocr->ocrLocked)
-                        continue;
-                }
-                objectsArray.append(obj->toJson());
-            }
-            tileObj["objects"] = objectsArray;
-        }
-        
-        // Store tile coordinate for debugging/verification
-        tileObj["coord_x"] = coord.first;
-        tileObj["coord_y"] = coord.second;
-    } else {
-        // Paged mode: use full Page serialization (legacy behavior)
-        tileObj = tile->toJson();
-    }
-    
-    QJsonDocument jsonDoc(tileObj);
-    const QByteArray tileData = jsonDoc.toJson(QJsonDocument::Compact);
-    if (file.write(tileData) != tileData.size() || !file.commit()) {
-        qWarning() << "Cannot commit tile:" << tilePath;
+    const QString tilePath = tilesDir + "/" + tileFileName(coord, ".json");
+    NoteVersions::keepVersion(m_bundlePath, "tiles/" + tileFileName(coord, ".json"),
+                              NoteVersions::policyFromSettings());
+    if (!commitFile(tilePath, QJsonDocument(tileJson(coord, it->second.get()))
+                                  .toJson(QJsonDocument::Compact))) {
         return false;
     }
     
@@ -3622,24 +3776,28 @@ bool Document::loadTileFromDisk(TileCoord coord) const
     QString tilePath = m_bundlePath + "/tiles/" + 
                        QString("%1,%2.json").arg(coord.first).arg(coord.second);
     
+    // CR-6 used to drop the coordinate from the index, and the next save wrote
+    // a manifest without the tile: a passing read failure (a sync tool, an
+    // offline file) removed it from the note. It stays named; it is only not
+    // tried again on every paint.
     QFile file(tilePath);
     if (!file.open(QIODevice::ReadOnly)) {
         qWarning() << "Cannot load tile: file not found" << tilePath;
-        // CR-6: Remove from index to prevent repeated failed loads
-        m_tileIndex.erase(coord);
+        m_unreadableTiles.insert(coord);
         return false;
     }
-    
+
     QByteArray data = file.readAll();
     file.close();
-    
+
     QJsonParseError parseError;
     QJsonDocument jsonDoc = QJsonDocument::fromJson(data, &parseError);
     if (parseError.error != QJsonParseError::NoError) {
         qWarning() << "Cannot load tile: JSON parse error" << parseError.errorString();
-        m_tileIndex.erase(coord);  // CR-6: Remove from index
+        m_unreadableTiles.insert(coord);
         return false;
     }
+    m_unreadableTiles.erase(coord);
     
     QJsonObject obj = jsonDoc.object();
     
@@ -3667,12 +3825,8 @@ bool Document::loadTileFromDisk(TileCoord coord) const
         // Create tile with default page settings
         auto tile = std::make_unique<Page>();
         tile->size = QSizeF(EDGELESS_TILE_SIZE, EDGELESS_TILE_SIZE);
-        tile->backgroundType = defaultBackgroundType;
-        tile->backgroundColor = defaultBackgroundColor;
-        tile->gridColor = defaultGridColor;
-        tile->gridSpacing = defaultGridSpacing;
-        tile->lineSpacing = defaultLineSpacing;
-        
+        applyDefaultBackground(*tile, true);
+
         // Clear default layer and reconstruct from manifest
         tile->vectorLayers.clear();
         for (const auto& layerDef : m_edgelessLayers) {
@@ -3732,7 +3886,7 @@ bool Document::loadTileFromDisk(TileCoord coord) const
         auto tile = Page::fromJson(obj);
         if (!tile) {
             qWarning() << "Cannot load tile: Page::fromJson failed";
-            m_tileIndex.erase(coord);  // CR-6: Remove from index
+            m_unreadableTiles.insert(coord);  // kept in the index (see above)
             return false;
         }
         
@@ -3769,6 +3923,11 @@ bool Document::loadTileFromDisk(TileCoord coord) const
 
 void Document::evictTile(TileCoord coord)
 {
+    // A tile in a running save is dirty even though m_dirtyTiles lost it; it
+    // goes on a later pass (see evictPage).
+    if (pendingSaveHolds(coord)) {
+        return;
+    }
     auto it = m_tiles.find(coord);
     if (it == m_tiles.end()) {
         return;  // Not loaded, nothing to evict
@@ -3776,6 +3935,9 @@ void Document::evictTile(TileCoord coord)
     
     // Save if dirty
     if (m_dirtyTiles.count(coord) > 0) {
+        if (s_keepDirtyLoaded && !m_bundlePath.isEmpty()) {
+            return;  // the next autosave writes it (see evictPage)
+        }
         if (!saveTile(coord)) {
             qWarning() << "Failed to save tile before eviction" << coord.first << coord.second;
             return;  // Keep the authoritative in-memory tile.
@@ -4064,10 +4226,17 @@ void Document::cleanupOrphanedAssets()
     // be deleted as "orphans", silently losing inserted images.
     bool incompleteScan = false;
 
+    // A paper of your own lives in assets/images too (Step N).
+    if (!defaultCustomImage.isEmpty()) referencedFiles.insert(defaultCustomImage);
+    // ... and the picture of the note's cover (Step N3).
+    const QString coverImage = cover.value("image").toString();
+    if (!coverImage.isEmpty()) referencedFiles.insert(coverImage);
+
     // Helper to scan a page's objects for image references
     auto collectFromPage = [&](Page* p) {
         if (!p) return;
-        
+        if (!p->customImage.isEmpty()) referencedFiles.insert(p->customImage);
+
         for (const auto& obj : p->objects) {
             if (auto* img = dynamic_cast<ImageObject*>(obj.get())) {
                 if (!img->imagePath.isEmpty()) {
@@ -4167,6 +4336,8 @@ void Document::cleanupOrphanedAssets()
                 continue;
             }
 
+            const QString paperImage = jsonDoc.object()["customImage"].toString();
+            if (!paperImage.isEmpty()) referencedFiles.insert(paperImage);
             QJsonArray objects = jsonDoc.object()["objects"].toArray();
             for (const auto& val : objects) {
                 QJsonObject obj = val.toObject();
@@ -4651,39 +4822,80 @@ QVector<LinkOutlineEntry> Document::enumerateLinkOutline() const
     return isEdgeless() ? flatten(m_tileOutline) : flatten(m_pageOutline);
 }
 
-bool Document::saveBundle(const QString& path, bool finalize)
+bool Document::saveBundle(const QString& path, bool finalize, QString* error)
+{
+    waitForPendingSave();
+    const std::shared_ptr<SaveJob> job = prepareSaveTo(path, finalize, error);
+    if (!job) {
+        return false;
+    }
+    const bool ok = writeSaveJob(*job, error);
+    finishSave(*job, ok);
+    return ok;
+}
+
+std::shared_ptr<Document::SaveJob> Document::prepareSave(QString* error)
+{
+    if (m_bundlePath.isEmpty()) {
+        if (error) {
+            *error = QCoreApplication::translate("Document", "The note has no place on disk yet.");
+        }
+        return nullptr;
+    }
+    return prepareSaveTo(m_bundlePath, /*finalize=*/false, error);
+}
+
+std::shared_ptr<Document::SaveJob> Document::startBackgroundSave(QThreadPool* pool, QString* error)
+{
+    waitForPendingSave();
+#ifdef SPEEDYNOTE_DEBUG
+    QElapsedTimer prepareTime;
+    prepareTime.start();
+#endif
+    std::shared_ptr<SaveJob> job = prepareSave(error);
+    if (!job) {
+        return nullptr;
+    }
+#ifdef SPEEDYNOTE_DEBUG
+    // Rule 1: this part runs on the GUI thread (toJson of the dirty pages only).
+    qDebug() << "Autosave prepare:" << prepareTime.elapsed() << "ms," << job->files.size() << "files";
+#endif
+    m_pendingSave = job;
+    m_pendingSaveFuture = QtConcurrent::run(pool, [job]() {
+        job->ok = writeSaveJob(*job, &job->error);
+        // Free the data here, not on the GUI thread (finishSave needs none of it).
+        job->files.clear();
+        job->strokes.clear();
+        job->manifest = QJsonObject();
+    });
+    return job;
+}
+
+void Document::waitForPendingSave()
+{
+    if (!m_pendingSave) {
+        return;
+    }
+    m_pendingSaveFuture.waitForFinished();
+    const std::shared_ptr<SaveJob> job = std::move(m_pendingSave);
+    m_pendingSave.reset();
+    finishSave(*job, job->ok);
+}
+
+std::shared_ptr<Document::SaveJob> Document::prepareSaveTo(const QString& path, bool finalize,
+                                                           QString* error)
 {
     // Save old bundle path before overwriting - needed for copying evicted tiles/pages
-    QString oldBundlePath = m_bundlePath;
+    const QString oldBundlePath = m_bundlePath;
     const bool savingToNewLocation = !oldBundlePath.isEmpty()
         && QDir::cleanPath(oldBundlePath) != QDir::cleanPath(path);
-    auto copyAtomically = [](const QString& sourcePath, const QString& destPath) {
-        QFile source(sourcePath);
-        if (!source.open(QIODevice::ReadOnly)) return false;
-        if (!QDir().mkpath(QFileInfo(destPath).absolutePath())) return false;
-
-        BundleFile dest(destPath);
-        dest.setDirectWriteFallback(false);
-        if (!dest.open(QIODevice::WriteOnly)) return false;
-        constexpr qint64 chunkSize = 1024 * 1024;
-        while (!source.atEnd()) {
-            const QByteArray chunk = source.read(chunkSize);
-            if (chunk.isEmpty() && source.error() != QFileDevice::NoError) {
-                dest.cancelWriting();
-                return false;
-            }
-            if (dest.write(chunk) != chunk.size()) {
-                dest.cancelWriting();
-                return false;
-            }
-        }
-        return dest.commit();
-    };
 
     // Complete writes against the old bundle before Save As changes the path
     // and before any page/tile JSON is serialized.
     flushPendingImageWrites();
     m_bundlePath = path;
+    // Every failure below leaves the document on its old bundle.
+    auto restorePath = qScopeGuard([this, oldBundlePath]() { m_bundlePath = oldBundlePath; });
 
 #ifdef Q_OS_HARMONY
     // A regular file can be sitting where the bundle directory needs to go: the
@@ -4697,77 +4909,76 @@ bool Document::saveBundle(const QString& path, bool finalize)
     }
 #endif
 
-    // Phase P.1.1: Write .snb_marker file to identify this as a SpeedyNote bundle
-    QString markerPath = path + "/.snb_marker";
-    if (!QFile::exists(markerPath)) {
-        QFile markerFile(markerPath);
-        if (markerFile.open(QIODevice::WriteOnly)) {
-            // Empty file - existence is enough to identify the bundle
-            markerFile.close();
+    // A folder moved or deleted behind our back: writing would rebuild a half
+    // note there (a manifest naming pages that are not in it).
+    if (!oldBundlePath.isEmpty() && !savingToNewLocation
+        && !QFileInfo::exists(path + "/document.json")) {
+        if (error) {
+            *error = QCoreApplication::translate("Document", "The note's folder was moved or deleted.");
         }
+        return nullptr;
     }
-    
+
     // Phase O1.6: Create assets directory for object files (images, etc.)
     if (!QDir().mkpath(path + "/assets/images")) {
         qWarning() << "Cannot create assets/images directory" << path;
-        return false;
+        if (error) *error = saveFailureReason(path, 0);
+        return nullptr;
+    }
+
+    // Phase P.1.1: .snb_marker identifies this folder as a SpeedyNote bundle.
+    // Best effort: document.json alone also marks a bundle.
+    const QString markerPath = path + "/.snb_marker";
+    if (!QFile::exists(markerPath)) {
+        commitFile(markerPath, QByteArray());
     }
 
     // Copy existing assets before saveUnsavedImages(). Otherwise every loaded
     // original-format image appears missing in the new bundle and is needlessly
     // re-encoded from its pixmap, while evicted pages can retain dangling paths
     // if the later best-effort copy fails.
+    // The whole assets/ tree: pictures, and the markdown notes of assets/notes,
+    // which nothing else carries (the old folder may be a temp bundle that goes).
     if (savingToNewLocation) {
-        const QString oldAssetsPath = oldBundlePath + "/assets/images";
-        const QString newAssetsPath = path + "/assets/images";
-        QDir oldAssetsDir(oldAssetsPath);
-        if (oldAssetsDir.exists()) {
-            const QStringList assetFiles = oldAssetsDir.entryList(QDir::Files);
-            for (const QString& fileName : assetFiles) {
-                const QString oldFilePath = oldAssetsPath + "/" + fileName;
-                const QString newFilePath = newAssetsPath + "/" + fileName;
-                if (!QFile::exists(newFilePath)
-                    && !copyAtomically(oldFilePath, newFilePath)) {
-                    qWarning() << "Failed to copy asset" << oldFilePath
-                               << "to" << newFilePath;
-                    m_bundlePath = oldBundlePath;
-                    return false;
-                }
+        const QString oldAssetsPath = oldBundlePath + "/assets";
+        QDirIterator it(oldAssetsPath, QDir::Files | QDir::Hidden, QDirIterator::Subdirectories);
+        while (it.hasNext()) {
+            const QString oldFilePath = it.next();
+            const QString newFilePath = path + "/assets/" + QDir(oldAssetsPath).relativeFilePath(oldFilePath);
+            if (!QFile::exists(newFilePath) && !copyFile(oldFilePath, newFilePath, error)) {
+                return nullptr;
             }
         }
     }
-    
+
     // Phase O2 (BF.2): Save any unsaved images to assets folder BEFORE saving page JSON.
-    // 
+    //
     // This is critical for images pasted into a NEW document before first save:
     // - When paste happens, bundlePath is empty, so saveToAssets() is skipped
     // - The image exists only as cachedPixmap with imagePath = ""
     // - Here we finally have a bundle path, so we can save images and set imagePath
     // - Then the serialized page JSON will have the correct imagePath reference
     if (saveUnsavedImages(path) < 0) {
-        m_bundlePath = oldBundlePath;
-        return false;
+        if (error) *error = saveFailureReason(path + "/assets/images", 0);
+        return nullptr;
     }
 
     // Plan A2 / Q7.2: drop any PDF source no page references anymore (e.g. after
     // deleting all pages backed by an imported source, or every primary-PDF page).
     // Done before the relative-path refresh and toJson() below so the serialized
     // pdf_sources[] and legacy pdf_path mirror reflect only live sources.
-    pruneUnreferencedSources();
+    QStringList prunedPdfFiles;
+    pruneUnreferencedSources(&prunedPdfFiles);
 
     // Save As must carry existing bundled fallbacks to the new bundle before
     // finalization decides that every referenced page is already materialized.
-    if (!oldBundlePath.isEmpty()
-        && QDir::cleanPath(oldBundlePath) != QDir::cleanPath(path)) {
+    if (savingToNewLocation) {
         for (const PdfSource& source : m_pdfSources) {
             if (!source.bundled || source.bundledFile.isEmpty()) continue;
-            const QString oldFile =
-                QDir(oldBundlePath).absoluteFilePath(source.bundledFile);
-            const QString newFile = QDir(path).absoluteFilePath(source.bundledFile);
-            if (!QFileInfo::exists(oldFile) || !copyAtomically(oldFile, newFile)) {
-                qWarning() << "Cannot copy bundled PDF during Save As:" << oldFile;
-                m_bundlePath = oldBundlePath;
-                return false;
+            if (!copyFile(QDir(oldBundlePath).absoluteFilePath(source.bundledFile),
+                          QDir(path).absoluteFilePath(source.bundledFile), error)) {
+                qWarning() << "Cannot copy bundled PDF during Save As:" << source.bundledFile;
+                return nullptr;
             }
         }
     }
@@ -4782,11 +4993,15 @@ bool Document::saveBundle(const QString& path, bool finalize)
         materializeSources(&materializeError);
         if (needsMaterialization()) {
             qWarning() << "Cannot finalize bundle PDF sources:" << materializeError;
-            m_bundlePath = oldBundlePath;
-            return false;
+            if (error) {
+                *error = materializeError.isEmpty()
+                    ? QCoreApplication::translate("Document", "The PDF sources could not be finalized.")
+                    : materializeError;
+            }
+            return nullptr;
         }
     }
-    
+
     // Refresh each PDF source's relative path against the bundle location so the
     // serialized pdf_sources[]/pdf_relative_path reflect the current save target.
     {
@@ -4797,36 +5012,72 @@ bool Document::saveBundle(const QString& path, bool finalize)
             }
         }
     }
-    
+
+    auto job = std::make_shared<SaveJob>();
+    job->bundlePath = path;
+    job->oldBundlePath = oldBundlePath;
+    job->edgeless = (mode == Mode::Edgeless);
+    if (!savingToNewLocation) job->removals = prunedPdfFiles;  // after the manifest, if it is written
+
     // Build manifest
     QJsonObject manifest = toJson();  // Metadata only
-    
-    // For edgeless mode: track all tile coordinates (shared between blocks)
-    std::set<TileCoord> allTileCoords;
-    
+
     // ========== MODE-SPECIFIC SAVE ==========
     if (mode == Mode::Edgeless) {
-        // Create tiles directory
-        if (!QDir().mkpath(path + "/tiles")) {
-            #ifdef SPEEDYNOTE_DEBUG
-                qDebug() << "Cannot create tiles directory" << path;
-            #endif
-            return false;
+        // Save As: carry the tiles (and their OCR) that are only on disk.
+        if (savingToNewLocation) {
+            for (const auto& coord : m_tileIndex) {
+                if (m_tiles.find(coord) != m_tiles.end()) continue;
+                for (const char* suffix : {".json", ".ocr.json"}) {
+                    const QString name = "/tiles/" + tileFileName(coord, suffix);
+                    if (QFile::exists(oldBundlePath + name)) {
+                        job->copies.append({oldBundlePath + name, path + name});
+                    }
+                }
+            }
         }
-        
+
+        // Tiles in memory: all of them on Save As, else the dirty and new ones.
+        for (const auto& pair : m_tiles) {
+            const TileCoord coord = pair.first;
+            if (!savingToNewLocation && m_dirtyTiles.count(coord) == 0
+                && m_tileIndex.count(coord) > 0) {
+                continue;
+            }
+            QVector<QVector<VectorStroke>> strokes;
+            job->files.append({"tiles/" + tileFileName(coord, ".json"),
+                               tileJson(coord, pair.second.get(), &strokes)});
+            job->strokes.append({job->files.size() - 1, strokes});
+            const QString ocrName = "tiles/" + tileFileName(coord, ".ocr.json");
+            const QJsonObject ocr = ocrSidecarJson(pair.second.get());
+            if (ocr.isEmpty()) {
+                job->removals.append(ocrName);
+            } else {
+                job->files.append({ocrName, ocr});
+            }
+            job->writtenTiles.insert(coord);
+        }
+
+        // Empty tiles leave the disk after the manifest stops naming them. A tile
+        // drawn again at the same place is written above and must stay.
+        for (const auto& coord : m_deletedTiles) {
+            if (job->writtenTiles.count(coord) > 0) continue;
+            job->removals.append("tiles/" + tileFileName(coord, ".json"));
+            job->removals.append("tiles/" + tileFileName(coord, ".ocr.json"));
+        }
+
         // Build tile index (union of disk tiles and memory tiles)
-        allTileCoords = m_tileIndex;
+        std::set<TileCoord> allTileCoords = m_tileIndex;
         for (const auto& pair : m_tiles) {
             allTileCoords.insert(pair.first);
         }
-        
         QJsonArray tileIndexArray;
         for (const auto& coord : allTileCoords) {
             tileIndexArray.append(QString("%1,%2").arg(coord.first).arg(coord.second));
         }
         manifest["tile_index"] = tileIndexArray;
         manifest["tile_size"] = EDGELESS_TILE_SIZE;
-        
+
         // Phase 5.6: Write layer definitions to manifest
         QJsonArray layersArray;
         for (const auto& layerDef : m_edgelessLayers) {
@@ -4834,13 +5085,13 @@ bool Document::saveBundle(const QString& path, bool finalize)
         }
         manifest["layers"] = layersArray;
         manifest["active_layer_index"] = m_edgelessActiveLayerIndex;
-        
+
         // Phase 4: Write position history to manifest
         QJsonObject lastPosObj;
         lastPosObj["x"] = m_edgelessLastPosition.x();
         lastPosObj["y"] = m_edgelessLastPosition.y();
         manifest["last_position"] = lastPosObj;
-        
+
         QJsonArray posHistoryArray;
         for (const QPointF& pos : m_edgelessPositionHistory) {
             QJsonObject posObj;
@@ -4849,34 +5100,84 @@ bool Document::saveBundle(const QString& path, bool finalize)
             posHistoryArray.append(posObj);
         }
         manifest["position_history"] = posHistoryArray;
-        
-#ifdef SPEEDYNOTE_DEBUG
-        qDebug() << "saveToBundle: Saved edgeless position" << m_edgelessLastPosition
-                 << "with" << m_edgelessPositionHistory.size() << "history entries";
-#endif
     } else {
         // ========== PAGED MODE SAVE (Phase O1.7.4) ==========
-        if (!QDir().mkpath(path + "/pages")) {
-            #ifdef SPEEDYNOTE_DEBUG
-                qDebug() << "Cannot create pages directory" << path;
-            #endif
-            return false;
+        for (const auto& [uuid, pagePtr] : m_loadedPages) {
+            // When saving to new location: save ALL in-memory pages (with content)
+            // When saving to same location: only save dirty pages
+            const bool needsSave = savingToNewLocation || m_dirtyPages.count(uuid) > 0;
+
+            // Skip pristine PDF pages - they can be synthesized from manifest
+            // A page is "pristine" if it has PDF background, no user content, and no bookmark
+            const bool isPristinePdfPage = (pagePtr->backgroundType == Page::BackgroundType::PDF)
+                                           && !pagePtr->hasContent()
+                                           && !pagePtr->isBookmarked;
+            if (isPristinePdfPage) {
+                // Tracked before the manifest is built, so it carries pdf_page.
+                if (m_pagePdfIndex.find(uuid) == m_pagePdfIndex.end()) {
+                    m_pagePdfIndex[uuid] = pagePtr->pdfPageNumber;
+                }
+                // Track the page's source for synthesis (non-primary only).
+                if (!pagePtr->pdfSourceId.isEmpty()) {
+                    m_pagePdfSource[uuid] = pagePtr->pdfSourceId;
+                }
+                // Delete any stale file from when page had content
+                if (needsSave) {
+                    job->removals.append("pages/" + uuid + ".json");
+                }
+                continue;  // Don't save file - synthesize on load
+            }
+
+            if (needsSave) {
+                // Rule 1: the strokes, the bulk of a page, are serialized by
+                // the writer from shared copies, not here on the GUI thread.
+                QVector<QVector<VectorStroke>> strokes;
+                const Page* page = pagePtr.get();
+                for (int i = 0; i < page->layerCount(); ++i) {
+                    strokes.append(page->layer(i)->strokes());
+                }
+                job->files.append({"pages/" + uuid + ".json", pagePtr->toJson(/*withStrokes=*/false)});
+                job->strokes.append({job->files.size() - 1, strokes});
+            }
         }
-        
+
+        // Save As: carry the pages that are only on disk, and every OCR file
+        // (a bundle save never writes page OCR files; OCR results do).
+        if (savingToNewLocation) {
+            for (const QString& uuid : m_pageOrder) {
+                const QString pageName = "/pages/" + uuid + ".json";
+                if (m_loadedPages.find(uuid) == m_loadedPages.end()
+                    && QFile::exists(oldBundlePath + pageName)) {
+                    job->copies.append({oldBundlePath + pageName, path + pageName});
+                }
+                const QString ocrName = "/pages/" + uuid + ".ocr.json";
+                if (QFile::exists(oldBundlePath + ocrName)) {
+                    job->copies.append({oldBundlePath + ocrName, path + ocrName});
+                }
+            }
+        }
+
+        // Removed pages leave the disk after the manifest stops naming them.
+        for (const QString& uuid : m_deletedPages) {
+            if (m_loadedPages.find(uuid) != m_loadedPages.end()) continue;  // alive again
+            job->removals.append("pages/" + uuid + ".json");
+            job->removals.append("pages/" + uuid + ".ocr.json");
+        }
+
         // Write page_order to manifest
         QJsonArray pageOrderArray;
         for (const QString& uuid : m_pageOrder) {
             pageOrderArray.append(uuid);
         }
         manifest["page_order"] = pageOrderArray;
-        
+
         // Write page_metadata to manifest (includes pdf_page for pristine PDF page synthesis)
         QJsonObject pageMetadataObj;
         for (const auto& [uuid, size] : m_pageMetadata) {
             QJsonObject metaObj;
             metaObj["width"] = size.width();
             metaObj["height"] = size.height();
-            
+
             // Include PDF page index if this is a PDF page
             auto pdfIt = m_pagePdfIndex.find(uuid);
             if (pdfIt != m_pagePdfIndex.end()) {
@@ -4887,12 +5188,12 @@ bool Document::saveBundle(const QString& path, bool finalize)
             if (srcIt != m_pagePdfSource.end() && !srcIt->second.isEmpty()) {
                 metaObj["pdf_source"] = srcIt->second;
             }
-            
+
             pageMetadataObj[uuid] = metaObj;
         }
         manifest["page_metadata"] = pageMetadataObj;
     }
-    
+
     // Phase SHARE: Write pdf_relative_path (primary mirror) for portability.
     // Per-source relative paths were already refreshed above and serialized into
     // pdf_sources[] by toJson().
@@ -4901,252 +5202,158 @@ bool Document::saveBundle(const QString& path, bool finalize)
             manifest["pdf_relative_path"] = primary->relativePath;
         }
     }
-    
-    // Write manifest
-    QString manifestPath = path + "/document.json";
-    BundleFile manifestFile(manifestPath);
-    manifestFile.setDirectWriteFallback(false);
-    if (!manifestFile.open(QIODevice::WriteOnly)) {
-        qWarning() << "Cannot write manifest" << manifestPath;
-        m_bundlePath = oldBundlePath;
+    job->manifest = manifest;
+
+    // The unsaved state now belongs to the job; finishSave() gives it back on failure.
+    job->dirtyPages.swap(m_dirtyPages);
+    job->deletedPages.swap(m_deletedPages);
+    job->dirtyTiles.swap(m_dirtyTiles);
+    job->deletedTiles.swap(m_deletedTiles);
+    job->manifestWasDirty = m_edgelessManifestDirty;
+    m_edgelessManifestDirty = false;
+    job->serial = m_editSerial;
+    job->versions = NoteVersions::policyFromSettings();
+
+    restorePath.dismiss();
+    return job;
+}
+
+bool Document::writeSaveJob(const SaveJob& job, QString* error)
+{
+    const QString base = job.bundlePath + QLatin1Char('/');
+    const QString contentDir = base + (job.edgeless ? "tiles" : "pages");
+    if (!QDir().mkpath(contentDir)) {
+        qWarning() << "Cannot create" << contentDir;
+        if (error) *error = saveFailureReason(contentDir, 0);
         return false;
     }
-    const QByteArray manifestData =
-        QJsonDocument(manifest).toJson(QJsonDocument::Indented);
-    if (manifestFile.write(manifestData) != manifestData.size()
-        || !manifestFile.commit()) {
-        qWarning() << "Cannot commit manifest" << manifestPath;
-        m_bundlePath = oldBundlePath;
+
+    // 1. Every file first. Until the manifest is replaced the old one is in
+    //    force: it never names a file this job adds, and each file it does name
+    //    is replaced whole, so a crash leaves each page old or new.
+    for (const auto& copy : job.copies) {
+        if (!copyFile(copy.first, copy.second, error)) return false;
+    }
+    int strokesAt = 0;  // job.strokes is in the order of job.files
+    for (int i = 0; i < job.files.size(); ++i) {
+        QJsonObject json = job.files[i].second;
+        if (strokesAt < job.strokes.size() && job.strokes[strokesAt].first == i) {
+            const QVector<QVector<VectorStroke>>& layers = job.strokes[strokesAt++].second;
+            QJsonArray layersJson = json.value("layers").toArray();
+            for (int l = 0; l < layersJson.size() && l < layers.size(); ++l) {
+                QJsonObject layer = layersJson[l].toObject();
+                layer["strokes"] = VectorLayer::strokesToJson(layers[l]);
+                layersJson[l] = layer;
+            }
+            json["layers"] = layersJson;
+        }
+        NoteVersions::keepVersion(job.bundlePath, job.files[i].first, job.versions);
+        if (!commitFile(base + job.files[i].first,
+                        QJsonDocument(json).toJson(QJsonDocument::Compact), error)) {
+            return false;
+        }
+    }
+
+    // 2. The manifest last: from here on every file it names is on disk.
+    NoteVersions::keepVersion(job.bundlePath, QStringLiteral("document.json"), job.versions);
+    if (!commitFile(base + "document.json",
+                    QJsonDocument(job.manifest).toJson(QJsonDocument::Indented), error)) {
         return false;
     }
-    
-    // ========== MODE-SPECIFIC FILE HANDLING ==========
-    if (mode == Mode::Edgeless) {
-        // Clear manifest dirty flag after save
-        m_edgelessManifestDirty = false;
-        
-        // ========== HANDLE TILES WHEN SAVING TO NEW LOCATION ==========
-        if (savingToNewLocation) {
-            // Copy evicted tiles from old bundle (tiles on disk but not in memory)
-            for (const auto& coord : m_tileIndex) {
-                // Skip tiles that are in memory - they'll be saved below
-                if (m_tiles.find(coord) != m_tiles.end()) {
-                    continue;
-                }
-                
-                QString tileFileName = QString("%1,%2.json").arg(coord.first).arg(coord.second);
-                QString oldTilePath = oldBundlePath + "/tiles/" + tileFileName;
-                QString newTilePath = path + "/tiles/" + tileFileName;
-                
-                // Copy tile file from old location to new location
-                if (QFile::exists(oldTilePath)) {
-                    if (copyAtomically(oldTilePath, newTilePath)) {
-#ifdef SPEEDYNOTE_DEBUG
-                        qDebug() << "Copied evicted tile" << coord.first << "," << coord.second;
-#endif
-                    } else {
-                        qWarning() << "Failed to copy tile" << oldTilePath << "to" << newTilePath;
-                        m_bundlePath = oldBundlePath;
-                        return false;
-                    }
-                }
-                
-                // Copy OCR sidecar file if it exists
-                QString ocrFileName = QString("%1,%2.ocr.json").arg(coord.first).arg(coord.second);
-                QString oldOcrPath = oldBundlePath + "/tiles/" + ocrFileName;
-                QString newOcrPath = path + "/tiles/" + ocrFileName;
-                if (QFile::exists(oldOcrPath)
-                    && !copyAtomically(oldOcrPath, newOcrPath)) {
-                    m_bundlePath = oldBundlePath;
-                    return false;
-                }
-            }
+
+    // 3. Removals once nothing names those files any more. A failure only
+    //    leaves an unused file behind.
+    for (const QString& rel : job.removals) {
+        const QString filePath = base + rel;
+        // A removed page's last content is always kept (Step R4).
+        NoteVersions::keepVersion(job.bundlePath, rel, job.versions, /*force=*/true);
+        if (QFile::exists(filePath) && !QFile::remove(filePath)) {
+            qWarning() << "Cannot remove" << filePath;
         }
-        
-        // Save tiles in memory
-        for (const auto& pair : m_tiles) {
-            TileCoord coord = pair.first;
-            // When saving to new location: save ALL in-memory tiles
-            // When saving to same location: only save dirty/new tiles
-            bool needsSave = savingToNewLocation || 
-                             m_dirtyTiles.count(coord) > 0 || 
-                             m_tileIndex.count(coord) == 0;
-            if (needsSave) {
-                if (!saveTile(coord)) {
-                    m_bundlePath = oldBundlePath;
-                    return false;
-                }
-            }
-        }
-        
-        // ========== DELETE EMPTY TILES FROM DISK ==========
-        for (const auto& coord : m_deletedTiles) {
-            QString tileFileName = QString("%1,%2.json").arg(coord.first).arg(coord.second);
-            QString tilePath = path + "/tiles/" + tileFileName;
-            if (QFile::exists(tilePath)) {
-                if (QFile::remove(tilePath)) {
-#ifdef SPEEDYNOTE_DEBUG
-                    qDebug() << "Deleted empty tile file:" << tileFileName;
-#endif
-                } else {
-                    #ifdef SPEEDYNOTE_DEBUG
-                        qDebug() << "Failed to delete empty tile file:" << tilePath;
-                    #endif
-                }
-            }
-            // Also delete OCR sidecar
-            QString ocrPath = path + "/tiles/" +
-                QString("%1,%2.ocr.json").arg(coord.first).arg(coord.second);
-            QFile::remove(ocrPath);
-        }
-        m_deletedTiles.clear();
-        m_dirtyTiles.clear();
-        m_tileIndex = allTileCoords;
-        
-#ifdef SPEEDYNOTE_DEBUG
-        qDebug() << "Saved edgeless bundle to" << path << "with" << allTileCoords.size() << "tiles";
-#endif
-    } else {
-        // ========== PAGED MODE FILE HANDLING (Phase O1.7.4) ==========
-        
-        // Copy evicted pages when saving to new location
-        if (savingToNewLocation) {
-            for (const QString& uuid : m_pageOrder) {
-                // Skip pages that are in memory - they'll be saved below
-                if (m_loadedPages.find(uuid) != m_loadedPages.end()) {
-                    continue;
-                }
-                
-                QString pageFileName = uuid + ".json";
-                QString oldPagePath = oldBundlePath + "/pages/" + pageFileName;
-                QString newPagePath = path + "/pages/" + pageFileName;
-                
-                if (QFile::exists(oldPagePath)) {
-                    if (copyAtomically(oldPagePath, newPagePath)) {
-#ifdef SPEEDYNOTE_DEBUG
-                        qDebug() << "Copied evicted page" << uuid;
-#endif
-                    } else {
-                        qWarning() << "Failed to copy page" << oldPagePath
-                                   << "to" << newPagePath;
-                        m_bundlePath = oldBundlePath;
-                        return false;
-                    }
-                }
-                
-                // Copy OCR sidecar file if it exists
-                QString oldOcrPath = oldBundlePath + "/pages/" + uuid + ".ocr.json";
-                QString newOcrPath = path + "/pages/" + uuid + ".ocr.json";
-                if (QFile::exists(oldOcrPath)
-                    && !copyAtomically(oldOcrPath, newOcrPath)) {
-                    m_bundlePath = oldBundlePath;
-                    return false;
-                }
-            }
-        }
-        
-        // Save pages in memory
-        for (const auto& [uuid, pagePtr] : m_loadedPages) {
-            // Skip pristine PDF pages - they can be synthesized from manifest
-            // A page is "pristine" if it has PDF background, no user content, and no bookmark
-            bool isPristinePdfPage = (pagePtr->backgroundType == Page::BackgroundType::PDF) 
-                                     && !pagePtr->hasContent()
-                                     && !pagePtr->isBookmarked;
-            if (isPristinePdfPage) {
-                // Ensure PDF page index is tracked for synthesis
-                if (m_pagePdfIndex.find(uuid) == m_pagePdfIndex.end()) {
-                    m_pagePdfIndex[uuid] = pagePtr->pdfPageNumber;
-                }
-                // Track the page's source for synthesis (non-primary only).
-                if (!pagePtr->pdfSourceId.isEmpty()) {
-                    m_pagePdfSource[uuid] = pagePtr->pdfSourceId;
-                }
-                
-                // Delete any stale file from when page had content
-                QString pagePath = path + "/pages/" + uuid + ".json";
-                if (QFile::exists(pagePath)) {
-                    QFile::remove(pagePath);
-#ifdef SPEEDYNOTE_DEBUG
-                    qDebug() << "Deleted stale file for pristine PDF page" << uuid;
-#endif
-                }
-                
-                continue;  // Don't save file - synthesize on load
-            }
-            
-            // When saving to new location: save ALL in-memory pages (with content)
-            // When saving to same location: only save dirty pages
-            bool needsSave = savingToNewLocation || m_dirtyPages.count(uuid) > 0;
-            if (needsSave) {
-                QString pagePath = path + "/pages/" + uuid + ".json";
-                BundleFile file(pagePath);
-                file.setDirectWriteFallback(false);
-                QJsonDocument doc(pagePtr->toJson());
-                const QByteArray pageData = doc.toJson(QJsonDocument::Compact);
-                if (file.open(QIODevice::WriteOnly)
-                    && file.write(pageData) == pageData.size()
-                    && file.commit()) {
-#ifdef SPEEDYNOTE_DEBUG
-                    qDebug() << "Saved page" << uuid;
-#endif
-                } else {
-                    qWarning() << "Failed to save page" << pagePath;
-                    m_bundlePath = oldBundlePath;
-                    return false;
-                }
-            }
-        }
-        
-        // ========== DELETE REMOVED PAGES FROM DISK ==========
-        for (const QString& uuid : m_deletedPages) {
-            QString pagePath = path + "/pages/" + uuid + ".json";
-            if (QFile::exists(pagePath)) {
-                if (QFile::remove(pagePath)) {
-#ifdef SPEEDYNOTE_DEBUG
-                    qDebug() << "Deleted page file:" << uuid;
-#endif
-                } else {
-                    qWarning() << "Failed to delete page file:" << pagePath;
-                }
-            }
-            // Also delete OCR sidecar
-            QString ocrPath = path + "/pages/" + uuid + ".ocr.json";
-            QFile::remove(ocrPath);
-        }
-        m_deletedPages.clear();
-        m_dirtyPages.clear();
-        
-#ifdef SPEEDYNOTE_DEBUG
-        qDebug() << "Saved paged bundle to" << path << "with" << m_pageOrder.size() << "pages";
-#endif
     }
-    
-    m_lazyLoadEnabled = true;
-    clearModified();
-    
+
+#ifdef SPEEDYNOTE_DEBUG
+    qDebug() << "Saved bundle" << job.bundlePath << "files:" << job.files.size()
+             << "copies:" << job.copies.size() << "removals:" << job.removals.size();
+#endif
     return true;
+}
+
+void Document::finishSave(const SaveJob& job, bool ok)
+{
+    if (!ok) {
+        // Disk still holds the last saved version: keep every change unsaved.
+        if (m_bundlePath == job.bundlePath) {
+            m_bundlePath = job.oldBundlePath;
+        }
+        for (const QString& uuid : job.dirtyPages) {
+            if (m_loadedPages.find(uuid) != m_loadedPages.end()) m_dirtyPages.insert(uuid);
+        }
+        for (const QString& uuid : job.deletedPages) {
+            if (m_loadedPages.find(uuid) == m_loadedPages.end() && !m_pageOrder.contains(uuid)) {
+                m_deletedPages.insert(uuid);
+            }
+        }
+        for (const TileCoord& coord : job.dirtyTiles) {
+            if (m_tiles.find(coord) != m_tiles.end()) m_dirtyTiles.insert(coord);
+        }
+        for (const TileCoord& coord : job.deletedTiles) {
+            if (m_tiles.find(coord) == m_tiles.end()) m_deletedTiles.insert(coord);
+        }
+        if (job.manifestWasDirty) {
+            m_edgelessManifestDirty = true;
+        }
+        return;
+    }
+
+    // Merge, never overwrite: tiles may have come and gone while the job ran.
+    for (const TileCoord& coord : job.writtenTiles) {
+        if (m_tiles.find(coord) != m_tiles.end()) {
+            m_tileIndex.insert(coord);
+            refreshLinkOutlineFor(coord);
+        } else {
+            m_deletedTiles.insert(coord);  // emptied while it was written
+        }
+    }
+
+    m_lazyLoadEnabled = true;
+    if (m_editSerial == job.serial && m_dirtyPages.empty() && m_dirtyTiles.empty()) {
+        clearModified();
+    }
 }
 
 std::unique_ptr<Document> Document::loadBundle(const QString& path)
 {
-    QString manifestPath = path + "/document.json";
-    QFile manifestFile(manifestPath);
-    if (!manifestFile.open(QIODevice::ReadOnly)) {
-        qWarning() << "Cannot open bundle manifest" << manifestPath;
+    // document.json, else (cut short by a kill where files are written in
+    // place, or damaged) its newest readable earlier version (Step R4).
+    QStringList candidates{path + "/document.json"};
+    const QString versionsDir = path + "/versions/document";
+    for (const QString& name : QDir(versionsDir).entryList({QStringLiteral("*.json")}, QDir::Files,
+                                                            QDir::Name | QDir::Reversed)) {
+        candidates.append(versionsDir + "/" + name);
+    }
+    QJsonObject obj;
+    for (const QString& manifestPath : candidates) {
+        QFile manifestFile(manifestPath);
+        if (!manifestFile.open(QIODevice::ReadOnly)) {
+            qWarning() << "Cannot open bundle manifest" << manifestPath;
+            continue;
+        }
+        QJsonParseError parseError;
+        const QJsonDocument jsonDoc = QJsonDocument::fromJson(manifestFile.readAll(), &parseError);
+        if (parseError.error != QJsonParseError::NoError || !jsonDoc.isObject()) {
+            qWarning() << "Bundle manifest parse error:" << manifestPath << parseError.errorString();
+            continue;
+        }
+        if (manifestPath != candidates.first()) {
+            qWarning() << "document.json cannot be read; opening its earlier version" << manifestPath;
+        }
+        obj = jsonDoc.object();
+        break;
+    }
+    if (obj.isEmpty()) {
         return nullptr;
     }
-    
-    QByteArray data = manifestFile.readAll();
-    manifestFile.close();
-    
-    QJsonParseError parseError;
-    QJsonDocument jsonDoc = QJsonDocument::fromJson(data, &parseError);
-    if (parseError.error != QJsonParseError::NoError) {
-        qWarning() << "Bundle manifest parse error:" << parseError.errorString();
-        return nullptr;
-    }
-    
-    QJsonObject obj = jsonDoc.object();
     
     // Phase P.1.1: Check bundle format version for forward compatibility
     int bundleVersion = obj["bundle_format_version"].toInt(1);
@@ -5764,46 +5971,19 @@ bool Document::savePageOcr(const QString& uuid, const Page* page)
 {
     if (m_bundlePath.isEmpty() || !page)
         return false;
+    if (m_pendingSave && m_pendingSave->deletedPages.count(uuid) > 0) {
+        waitForPendingSave();  // the job removes this file
+    }
 
-    QString ocrPath = m_bundlePath + "/pages/" + uuid + ".ocr.json";
-
-    if (page->ocrTextBlocks.isEmpty() && page->suppressedStrokeIds.isEmpty()
-        && page->dismissedOcrBlockKeys.isEmpty()) {
+    const QString ocrPath = m_bundlePath + "/pages/" + uuid + ".ocr.json";
+    const QJsonObject root = ocrSidecarJson(page);
+    if (root.isEmpty()) {
         QFile::remove(ocrPath);
         return true;
     }
 
     QDir().mkpath(m_bundlePath + "/pages");
-
-    QJsonObject root;
-    root["version"] = 1;
-    if (!page->ocrTextBlocks.isEmpty())
-        root["engineId"] = page->ocrTextBlocks.first().engineId;
-
-    QJsonArray blocks;
-    for (const auto& block : page->ocrTextBlocks)
-        blocks.append(block.toJson());
-    root["blocks"] = blocks;
-
-    if (!page->suppressedStrokeIds.isEmpty()) {
-        QJsonArray suppressed;
-        for (const auto& id : page->suppressedStrokeIds)
-            suppressed.append(id);
-        root["suppressedStrokeIds"] = suppressed;
-    }
-
-    if (!page->dismissedOcrBlockKeys.isEmpty()) {
-        QJsonArray dismissed;
-        for (const auto& key : page->dismissedOcrBlockKeys)
-            dismissed.append(key);
-        root["dismissedBlockKeys"] = dismissed;
-    }
-
-    QFile file(ocrPath);
-    if (!file.open(QIODevice::WriteOnly))
-        return false;
-    file.write(QJsonDocument(root).toJson(QJsonDocument::Compact));
-    return true;
+    return commitFile(ocrPath, QJsonDocument(root).toJson(QJsonDocument::Compact));
 }
 
 bool Document::loadPageOcr(Page* page, const QString& uuid) const
@@ -5849,48 +6029,22 @@ bool Document::saveTileOcr(TileCoord coord)
     auto it = m_tiles.find(coord);
     if (it == m_tiles.end())
         return false;
+    if (pendingSaveHolds(coord)) {
+        // The running job writes this file with older text. Waiting for it
+        // would stall the pen (rule 1): the next save writes it from memory.
+        markTileDirty(coord);
+        return true;
+    }
 
-    const Page* tile = it->second.get();
-    QString ocrPath = m_bundlePath + "/tiles/" +
-        QString("%1,%2.ocr.json").arg(coord.first).arg(coord.second);
-
-    if (tile->ocrTextBlocks.isEmpty() && tile->suppressedStrokeIds.isEmpty()
-        && tile->dismissedOcrBlockKeys.isEmpty()) {
+    const QString ocrPath = m_bundlePath + "/tiles/" + tileFileName(coord, ".ocr.json");
+    const QJsonObject root = ocrSidecarJson(it->second.get());
+    if (root.isEmpty()) {
         QFile::remove(ocrPath);
         return true;
     }
 
     QDir().mkpath(m_bundlePath + "/tiles");
-
-    QJsonObject root;
-    root["version"] = 1;
-    if (!tile->ocrTextBlocks.isEmpty())
-        root["engineId"] = tile->ocrTextBlocks.first().engineId;
-
-    QJsonArray blocks;
-    for (const auto& block : tile->ocrTextBlocks)
-        blocks.append(block.toJson());
-    root["blocks"] = blocks;
-
-    if (!tile->suppressedStrokeIds.isEmpty()) {
-        QJsonArray suppressed;
-        for (const auto& id : tile->suppressedStrokeIds)
-            suppressed.append(id);
-        root["suppressedStrokeIds"] = suppressed;
-    }
-
-    if (!tile->dismissedOcrBlockKeys.isEmpty()) {
-        QJsonArray dismissed;
-        for (const auto& key : tile->dismissedOcrBlockKeys)
-            dismissed.append(key);
-        root["dismissedBlockKeys"] = dismissed;
-    }
-
-    QFile file(ocrPath);
-    if (!file.open(QIODevice::WriteOnly))
-        return false;
-    file.write(QJsonDocument(root).toJson(QJsonDocument::Compact));
-    return true;
+    return commitFile(ocrPath, QJsonDocument(root).toJson(QJsonDocument::Compact));
 }
 
 bool Document::loadTileOcr(Page* tile, TileCoord coord) const

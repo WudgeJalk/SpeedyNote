@@ -9,6 +9,8 @@
 //   "order":    the names of its children (sections and notes, as on disk)
 //   "color":    the section colour ("#rrggbb"), optional
 //   "notebook": true at the notebook root
+//   "cover":    the notebook's cover (Step N3, see CoverPainter), optional;
+//               its picture is the file .speedynote-cover.<ext> in the folder
 // The file is optional: without it a folder lists alphabetically. Entries of
 // the order that are gone are dropped, folders not in it come last. Listing
 // reads only folder names and this file, never a note.
@@ -39,6 +41,10 @@ public:
     static QColor color(const QString& dir);          ///< invalid if none
     static bool setColor(const QString& dir, const QColor& color);  ///< invalid clears it
     static bool markNotebook(const QString& dir);
+    static QJsonObject cover(const QString& dir);     ///< empty if none
+    /// Saves cover in dir's META_FILE, keeping its other keys (empty clears it).
+    /// An absolute "image" is first copied into dir as .speedynote-cover.<ext>.
+    static bool setCover(const QString& dir, QJsonObject cover, QString* error = nullptr);
 
     /// Moves name just before beforeName in dir's order (last if beforeName is empty
     /// or not there) and saves the whole order.
@@ -61,6 +67,9 @@ public:
                         const QString& beforeName, QString* error);
     /// Copies a note into dir (renamed " (2)" on a clash) with a new notebook id.
     static QString copyNoteInto(const QString& notePath, const QString& dir, QString* error);
+    /// Copies a note to `target` (must not exist) with a new id and the name of
+    /// its folder. Nothing is left on failure. No section order is touched.
+    static QString copyNoteAs(const QString& notePath, const QString& target, QString* error);
     /// To the system recycle bin. False (and *error) where Qt cannot do it.
     static bool trash(const QString& path, QString* error);
 

@@ -18,6 +18,7 @@
 #include "../dialogs/BatchImportDialog.h"
 #endif
 #include "../widgets/ExportProgressWidget.h"
+#include "../widgets/LibraryPlacePicker.h"
 #include "../../MainWindow.h"
 #include "../../core/NotebookLibrary.h"
 #include "../../core/LibraryTree.h"
@@ -269,7 +270,7 @@ void Launcher::setupUi()
     // Setup view content (after views are created)
     setupTimeline();
     connect(m_libraryView, &LibraryView::noteOpenRequested, this, &Launcher::notebookSelected);
-    connect(m_libraryView, &LibraryView::newNoteRequested, this, &Launcher::createNewNoteAt);
+    connect(m_libraryView, &LibraryView::newNoteRequested, this, &Launcher::createNewNoteIn);
     setupStarred();
     setupSearch();
     
@@ -1064,7 +1065,17 @@ void Launcher::showNotebookContextMenu(const QString& bundlePath, const QPoint& 
     connect(duplicateAction, &QAction::triggered, this, [this, bundlePath]() {
         duplicateNotebook(bundlePath);
     });
-    
+
+    // Step N2: a loose note goes into a notebook (or a section) of the Library.
+    QAction* moveAction = menu.addAction(tr("Move to a Notebook..."));
+    moveAction->setToolTip(tr("Move this note into a notebook or a section of the Library."));
+    connect(moveAction, &QAction::triggered, this, [this, bundlePath, globalPos]() {
+        const QString here = QFileInfo(bundlePath).absolutePath();
+        const QString folder = LibraryPlacePicker::choose(this, globalPos, here);
+        if (folder.isEmpty() || QDir::cleanPath(folder) == QDir::cleanPath(here)) return;
+        LibraryView::moveNoteInto(this, bundlePath, folder);
+    });
+
     menu.addSeparator();
     
     // Export submenu (Phase 3: Batch Operations)
@@ -1229,7 +1240,7 @@ bool Launcher::deleteNotebooks(const QStringList& bundlePaths)
         // Use discardChanges=true because we're deleting - saving is pointless
         QString docId = Document::peekBundleId(bundlePath);
         if (!docId.isEmpty() && mainWindow) {
-            mainWindow->closeDocumentById(docId, true);  // discardChanges=true
+            mainWindow->closeDocumentById(docId, true, bundlePath);  // discardChanges=true
         }
         
         // Before removeFromRecent(), which is what maps this bundle to the document
@@ -1330,9 +1341,9 @@ void Launcher::renameNotebook(const QString& bundlePath)
     QString docId = Document::peekBundleId(bundlePath);
     if (!docId.isEmpty()) {
         MainWindow* mainWindow = MainWindow::findExistingMainWindow();
-        if (mainWindow) {
-            mainWindow->closeDocumentById(docId);
-            // Document was saved and closed if it was open - proceed with rename
+        // Saved and closed if it was open. Cancelled: the open note keeps its folder.
+        if (mainWindow && !mainWindow->closeDocumentById(docId, false, bundlePath)) {
+            return;
         }
     }
     
@@ -1355,74 +1366,21 @@ void Launcher::renameNotebook(const QString& bundlePath)
 
 void Launcher::duplicateNotebook(const QString& bundlePath)
 {
-    // Extract current name
-    QString currentName;
-    qsizetype lastSlash = bundlePath.lastIndexOf('/');
-    if (lastSlash >= 0) {
-        currentName = bundlePath.mid(lastSlash + 1);
-        if (currentName.endsWith(".snb", Qt::CaseInsensitive)) {
-            currentName.chop(4);
-        }
+    const QString currentName = LibraryTree::displayName(bundlePath);
+    const QString parentDir = QFileInfo(bundlePath).absolutePath();
+    QString newPath = parentDir + "/" + currentName + " (Copy).snb";
+    for (int copyNum = 2; QFileInfo::exists(newPath); ++copyNum) {
+        newPath = QString("%1/%2 (Copy %3).snb").arg(parentDir, currentName).arg(copyNum);
     }
-    
-    // Generate unique name
-    QDir parentDir(bundlePath);
-    parentDir.cdUp();
-    
-    QString newName = currentName + " (Copy)";
-    QString newPath = parentDir.absolutePath() + "/" + newName + ".snb";
-    int copyNum = 2;
-    
-    while (QDir(newPath).exists()) {
-        newName = QString("%1 (Copy %2)").arg(currentName).arg(copyNum++);
-        newPath = parentDir.absolutePath() + "/" + newName + ".snb";
-    }
-    
-    // Copy the directory recursively
-    QDir sourceDir(bundlePath);
-    if (!sourceDir.exists()) {
-        QMessageBox::warning(this, tr("Duplicate Failed"),
-                            tr("Source notebook not found."));
+    // A new id (two notes with one id open as one tab, and autosave would
+    // write into the wrong folder), its own name, nothing left on a failure.
+    QString error;
+    newPath = LibraryTree::copyNoteAs(bundlePath, newPath, &error);
+    if (newPath.isEmpty()) {
+        QMessageBox::warning(this, tr("Duplicate Failed"), error);
         return;
     }
-    
-    // Create destination directory
-    QDir destDir(newPath);
-    if (!destDir.mkpath(".")) {
-        QMessageBox::warning(this, tr("Duplicate Failed"),
-                            tr("Could not create destination directory."));
-        return;
-    }
-    
-    // Copy all files and subdirectories
-    bool success = true;
-    QDirIterator it(bundlePath, QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot, 
-                    QDirIterator::Subdirectories);
-    
-    while (it.hasNext()) {
-        QString sourcePath = it.next();
-        QString relativePath = sourcePath.mid(bundlePath.length());
-        QString destPath = newPath + relativePath;
-        
-        QFileInfo fi(sourcePath);
-        if (fi.isDir()) {
-            QDir().mkpath(destPath);
-        } else {
-            // Ensure parent directory exists
-            QDir().mkpath(QFileInfo(destPath).absolutePath());
-            if (!QFile::copy(sourcePath, destPath)) {
-                success = false;
-            }
-        }
-    }
-    
-    if (success) {
-        // Add to library
-        NotebookLibrary::instance()->addToRecent(newPath);
-    } else {
-        QMessageBox::warning(this, tr("Duplicate"),
-                            tr("Some files could not be copied."));
-    }
+    NotebookLibrary::instance()->addToRecent(newPath);
 }
 
 #if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)

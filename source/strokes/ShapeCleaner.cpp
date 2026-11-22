@@ -169,19 +169,31 @@ Analysis analyse(const QVector<QPointF>& raw, const Params& prm)
     a.p = resample(raw, step);
     QVector<QPointF>& p = a.p;
 
-    // The end may stop short of the start or run past it: the loop ends at
-    // the point of its last fifth that comes nearest to the start.
-    int cut = p.size() - 1;
-    for (int i = p.size() - 2; i >= p.size() * 4 / 5; --i) {
-        if (dist(p[i], p[0]) < dist(p[cut], p[0])) {
-            cut = i;
+    // The pen may land with a tail, and the end may stop short of the start or
+    // run past it: the loop is the part between the two points, one in each
+    // fifth at the ends, that come nearest each other. That cuts the tails at
+    // both ends; an overlap or a crossing closes where the line meets itself.
+    // (n/5)^2 checks, once at pen lift.
+    const int n = p.size();
+    int from = 0;
+    int to = n - 1;
+    qreal nearest = std::numeric_limits<qreal>::max();
+    for (int i = 0; i <= n / 5; ++i) {
+        for (int j = n - 1; j >= n - 1 - n / 5 && j > i; --j) {
+            const QPointF d = p[j] - p[i];
+            const qreal d2 = QPointF::dotProduct(d, d);
+            if (d2 < nearest) {
+                nearest = d2;
+                from = i;
+                to = j;
+            }
         }
     }
     const qreal closeDist = qMax(prm.closeMinDist, prm.closePercent / 100.0 * diag);
-    a.closed = p.size() >= 2 * kWindow + 2 && dist(p[cut], p[0]) <= closeDist
-               && length(p) > 2.0 * closeDist;
+    a.closed = n >= 2 * kWindow + 2 && dist(p[from], p[to]) <= closeDist
+               && length(p.mid(from, to - from + 1)) > 2.0 * closeDist;
     if (a.closed) {
-        p.resize(cut + 1);
+        p = p.mid(from, to - from + 1);
         // Fill the gap at the same spacing; the loop never repeats its start.
         const QPointF from = p.last();
         const QPointF to = p.first();
@@ -265,7 +277,7 @@ qreal tangentLength(const QPointF& prev, const QPointF& c, const QPointF& next, 
 /**
  * The dense line through @p pts. Each corner becomes a sharp point (a short
  * first step on both edges keeps Catmull-Rom from rounding it) or, with a
- * radius, a circular arc tangent to both edges, its points about 15 degrees
+ * radius, a circular arc tangent to both edges, its points about 7.5 degrees
  * apart so the renderer's smoothing stays on the arc. Curve points pass
  * through. @p joints gets the first and last index of each corner.
  */
@@ -309,7 +321,7 @@ QVector<QPointF> build(const QVector<QPointF>& pts, const QVector<bool>& corner,
             const qreal a0 = std::atan2(pin.y() - centre.y(), pin.x() - centre.x());
             const qreal sweep = std::remainder(std::atan2(pout.y() - centre.y(), pout.x() - centre.x()) - a0,
                                                2.0 * M_PI);
-            const int steps = qMax(2, static_cast<int>(std::ceil(qAbs(sweep) / qDegreesToRadians(15.0))));
+            const int steps = qMax(2, static_cast<int>(std::ceil(qAbs(sweep) / qDegreesToRadians(7.5))));
             j.pts = {pin};
             for (int s = 1; s < steps; ++s) {
                 const qreal a = a0 + sweep * s / steps;
@@ -524,8 +536,9 @@ QVector<QPointF> ellipsePoints(Ellipse e, const QPointF& start, const Params& pr
 }
 
 /// Corners of the closed loop as the meeting points of its straight sides,
-/// fitted to the drawn points; empty when it has fewer than 3.
-QVector<QPointF> polygonCorners(const QVector<QPointF>& p, QVector<int> c)
+/// fitted to the drawn points; empty when it has fewer than 3. A corner where
+/// the fitted sides turn less than @p minTurnDeg (a wobble, a stub) is dropped.
+QVector<QPointF> polygonCorners(const QVector<QPointF>& p, QVector<int> c, qreal minTurnDeg)
 {
     const int n = p.size();
     // A hook at a corner gives two corners close together: keep one.
@@ -539,20 +552,44 @@ QVector<QPointF> polygonCorners(const QVector<QPointF>& p, QVector<int> c)
             }
         }
     }
-    const int k = c.size();
-    if (k < 3) {
+    int k = 0;
+    QVector<QPointF> at, dir;
+    const auto fitSides = [&]() {
+        k = c.size();
+        at.resize(k);
+        dir.resize(k);
+        for (int j = 0; j < k; ++j) {
+            // The side without the points next to its corners, which a hand rounds.
+            const int len = (c[(j + 1) % k] - c[j] + n) % n;
+            const int skip = len / 8;
+            QVector<QPointF> side;
+            for (int i = skip; i <= len - skip; ++i) {
+                side << p[(c[j] + i) % n];
+            }
+            fitLine(side, at[j], dir[j]);
+            // Pointed the way the line runs, so a turn back reads as one.
+            if (QPointF::dotProduct(dir[j], p[(c[j] + len) % n] - p[c[j]]) < 0.0) {
+                dir[j] = -dir[j];
+            }
+        }
+    };
+    if (c.size() < 3) {
         return {};
     }
-    QVector<QPointF> at(k), dir(k);
+    fitSides();
+    // Drop the corners the fitted sides hardly turn at, then fit once more.
+    QVector<int> kept;
     for (int j = 0; j < k; ++j) {
-        // The side without the points next to its corners, which a hand rounds.
-        const int len = (c[(j + 1) % k] - c[j] + n) % n;
-        const int skip = len / 8;
-        QVector<QPointF> side;
-        for (int i = skip; i <= len - skip; ++i) {
-            side << p[(c[j] + i) % n];
+        if (turnDeg(dir[(j + k - 1) % k], dir[j]) >= minTurnDeg) {
+            kept << c[j];
         }
-        fitLine(side, at[j], dir[j]);
+    }
+    if (kept.size() < 3) {
+        return {};
+    }
+    if (kept.size() < k) {
+        c = kept;
+        fitSides();
     }
     QVector<QPointF> out(k);
     for (int j = 0; j < k; ++j) {
@@ -604,8 +641,13 @@ QVector<QPointF> regularPolygon(QVector<QPointF> c, const Params& prm, QVector<i
     }
     if (c.size() == 4) {
         const qreal snap = prm.angleSnapDeg;
-        const bool par02 = lineAngleDeg(dirs[0], dirs[2]) <= snap;
-        const bool par13 = lineAngleDeg(dirs[1], dirs[3]) <= snap;
+        bool par02 = lineAngleDeg(dirs[0], dirs[2]) <= snap;
+        bool par13 = lineAngleDeg(dirs[1], dirs[3]) <= snap;
+        // A quick box has one pair of sides off by more than the snap: still a
+        // box, unless that pair is clearly apart (a real trapezoid).
+        if (par02 != par13 && lineAngleDeg(dirs[par02 ? 1 : 0], dirs[par02 ? 3 : 2]) <= prm.trapezoidDeg) {
+            par02 = par13 = true;
+        }
         if (par02 && par13) {
             QPointF u = unit(dirs[0] - dirs[2]);   // opposite sides run opposite ways
             QPointF v = unit(dirs[1] - dirs[3]);
@@ -659,8 +701,28 @@ QVector<QPointF> perfectShape(const QVector<QPointF>& p, const QVector<int>& cor
     }
     const qreal tol = prm.roughPercent / 100.0 * size;
     const qreal ellipseErr = ellipseError(p, e);
-    const QVector<QPointF> poly = polygonCorners(p, corners);
-    const qreal polyErr = poly.isEmpty() ? std::numeric_limits<qreal>::max() : polygonError(p, poly);
+    QVector<QPointF> poly = polygonCorners(p, corners, prm.cornerAngleDeg);
+    qreal polyErr = poly.isEmpty() ? std::numeric_limits<qreal>::max() : polygonError(p, poly);
+    // A corner a quick hand rounds wide is a gentle curve at this scale; with
+    // every second point it is sharp enough to be found. Only for a line that
+    // already has corners: on a round one this would find a polygon. The
+    // better fit wins.
+    if (corners.size() >= 3) {
+        QVector<QPointF> half;
+        for (int i = 0; i < p.size(); i += 2) {
+            half << p[i];
+        }
+        QVector<int> wide = findCorners(half, true, prm.cornerAngleDeg);
+        for (int& c : wide) {
+            c *= 2;
+        }
+        const QVector<QPointF> widePoly = polygonCorners(p, wide, prm.cornerAngleDeg);
+        const qreal wideErr = widePoly.isEmpty() ? polyErr : polygonError(p, widePoly);
+        if (wideErr < polyErr) {
+            poly = widePoly;
+            polyErr = wideErr;
+        }
+    }
     // A round line with a stray corner stays round: a polygon must fit clearly better.
     if (polyErr <= tol && polyErr < 0.75 * ellipseErr) {
         return regularPolygon(poly, prm, joints);
@@ -778,30 +840,29 @@ QVector<QPointF> jointCorners(const QVector<QPointF>& pts, const QVector<int>& j
     return out;
 }
 
-int roundingStep(const QVector<QPointF>& pts, const QVector<int>& joints, qreal width)
+qreal cornerRadius(const QVector<QPointF>& pts, const QVector<int>& joints, qreal width)
 {
     const QVector<QPointF> c = jointCorners(pts, joints);
     const int k = c.size();
     if (k == 0) {
-        return -1;
+        return -1.0;
     }
-    // The step whose corners would touch the sides where these do.
-    int best = 0;
-    qreal bestError = std::numeric_limits<qreal>::max();
-    for (int step = 0; step <= 3; ++step) {
-        const qreal radius = stepRadius(step, width);
-        qreal error = 0.0;
-        for (int j = 0; j < k; ++j) {
-            qreal t = tangentLength(c[(j + k - 1) % k], c[j], c[(j + 1) % k], radius);
-            t = t > qMax(0.3 * width, 0.05) ? t : 0.0;   // as build() makes it
-            error += qAbs(t - dist(c[j], pts[joints[2 * j]]));
+    // tangentLength() turned round: the radius whose arc touches the sides
+    // where this corner's does. A corner cut short by a short side gives less.
+    qreal radius = 0.0;
+    for (int j = 0; j < k; ++j) {
+        const QPointF prev = c[(j + k - 1) % k];
+        const QPointF next = c[(j + 1) % k];
+        const qreal in = dist(prev, c[j]);
+        const qreal out = dist(c[j], next);
+        const qreal t = dist(c[j], pts[joints[2 * j]]);
+        if (in <= 0.0 || out <= 0.0 || t <= qMax(0.3 * width, 0.05)) {
+            continue;   // sharp, as build() makes it
         }
-        if (error < bestError - 1e-6) {
-            bestError = error;
-            best = step;
-        }
+        const qreal cosA = qBound(-1.0, QPointF::dotProduct(prev - c[j], next - c[j]) / (in * out), 1.0);
+        radius = qMax(radius, t * std::tan(0.5 * std::acos(cosA)));
     }
-    return best;
+    return radius;
 }
 
 QVector<QPointF> clean(const QVector<QPointF>& raw, const Params& prm, bool* closedOut, QVector<int>* joints)

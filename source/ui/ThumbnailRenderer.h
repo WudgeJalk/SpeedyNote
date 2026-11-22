@@ -75,7 +75,15 @@ public:
     void setMaxConcurrentRenders(int max);
     
     void setPdfDarkMode(bool enabled);
-    
+
+    /**
+     * @brief The picture of a note for the start screen and the Library:
+     * page 0 (width wide, the page's shape), or for an endless note one tile
+     * around its last position (width square). GUI thread: reads the live
+     * Document (it may load page 0 or the tiles there). Null if nothing to draw.
+     */
+    static QPixmap renderFirstPage(Document* doc, int width, qreal dpr);
+
 signals:
     /**
      * @brief Emitted when a thumbnail has been rendered.
@@ -120,7 +128,9 @@ private:
         QColor gridColor = QColor(200, 200, 200);
         int gridSpacing = 32;
         int lineSpacing = 32;
-        
+        QString paperId;            // Paper drawn by code (built in the worker)
+        QString customImagePath;    // A paper of your own (read in the worker as a QImage)
+
         // PDF background info (rendered in worker thread, not on main thread)
         Document* doc = nullptr;
         int pdfPageNumber = -1;

@@ -1,4 +1,5 @@
 #include "NotebookCardDelegate.h"
+#include "../../core/CoverPainter.h"
 #include "../../core/NotebookLibrary.h"
 #include "../ThemeColors.h"
 
@@ -104,8 +105,18 @@ void NotebookCardDelegate::paintNotebookCard(QPainter* painter, const QRect& rec
     QRect thumbRect(cardRect.left() + PADDING, cardRect.top() + PADDING,
                     cardRect.width() - 2 * PADDING, THUMBNAIL_HEIGHT);
     
-    QString thumbnailPath = index.data(ThumbnailPathRole).toString();
-    drawThumbnail(painter, thumbRect, thumbnailPath);
+    // A note with a cover (Step N3) shows it as a book; else page 1.
+    const NotebookInfo info = index.data(NotebookInfoRole).value<NotebookInfo>();
+    if (!info.cover.isEmpty()) {
+        QPainterPath thumbPath;
+        thumbPath.addRoundedRect(thumbRect, THUMBNAIL_CORNER_RADIUS, THUMBNAIL_CORNER_RADIUS);
+        painter->fillPath(thumbPath, ThemeColors::thumbnailBg(m_darkMode));
+        const qreal h = thumbRect.height() - 8;
+        const QRectF book(thumbRect.center().x() - h * 0.375, thumbRect.top() + 4, h * 0.75, h);
+        CoverPainter::paint(*painter, book, info.cover, info.displayName(), info.bundlePath + "/assets/images");
+    } else {
+        drawThumbnail(painter, thumbRect, index.data(ThumbnailPathRole).toString());
+    }
     
     // === Star indicator (top-right of thumbnail) ===
     bool isStarred = index.data(IsStarredRole).toBool();

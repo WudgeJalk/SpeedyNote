@@ -67,6 +67,12 @@ public:
     QColor gridColor = QColor(200, 200, 200); ///< Grid/line color
     int gridSpacing = 32;               ///< Grid spacing in pixels
     int lineSpacing = 32;               ///< Line spacing for ruled paper
+    /// A paper drawn by code (core/Paper.h). Optional "paper" key; backgroundType
+    /// keeps its fallback, so an older version shows ruled or plain paper.
+    QString paperId;
+    /// A paper of your own (BackgroundType::Custom): a file in assets/images.
+    /// Optional "customImage" key; loaded into customBackground.
+    QString customImage;
     
     // ===== Bookmarks (Task 1.2.6) =====
     bool isBookmarked = false;          ///< True if this page has a bookmark
@@ -375,8 +381,14 @@ public:
         const QColor& gridColor,
         qreal gridSpacing,
         qreal lineSpacing,
-        qreal penWidth = 1.0
+        qreal penWidth = 1.0,
+        const QString& paperId = QString(),   ///< a known paper replaces the pattern
+        bool endless = false                  ///< rect is a tile of an endless canvas
     );
+
+    /// Loads customBackground from <basePath>/assets/images/<customImage> (one
+    /// pixmap shared by every page with the same file). No-op when loaded.
+    void loadCustomBackground(const QString& basePath);
     
     /**
      * @brief Render just the inserted objects (Task 1.3.7).
@@ -446,9 +458,11 @@ public:
     
     /**
      * @brief Serialize page to JSON.
+     * @param withStrokes false leaves out each layer's "strokes" (a save fills
+     *        them in on its writer thread, from VectorLayer::strokes() copies).
      * @return JSON object containing all page data.
      */
-    QJsonObject toJson() const;
+    QJsonObject toJson(bool withStrokes = true) const;
     
     /**
      * @brief Deserialize page from JSON.

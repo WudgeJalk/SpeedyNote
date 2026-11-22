@@ -6,6 +6,7 @@
 #include <QStringList>
 #include <QList>
 #include <QDateTime>
+#include <QJsonObject>
 #include <QPixmap>
 #include <QTimer>
 
@@ -29,7 +30,8 @@ struct NotebookInfo {
     bool isPdfBased = false;  ///< True if this is a PDF annotation notebook
     bool isEdgeless = false;  ///< True if this is an edgeless (infinite canvas) notebook
     QString pdfFileName;      ///< Original PDF filename (for search), if PDF-based
-    
+    QJsonObject cover;        ///< The note's cover (Step N3, from document.json); empty = none
+
     /**
      * @brief Check if this notebook info is valid.
      * @return True if bundlePath is non-empty.
@@ -252,6 +254,10 @@ public:
     
     // === Thumbnails ===
     
+    // The thumbnail functions also work for a note that is not on the start
+    // screen (a note of the Library never opened): its id is read from its
+    // document.json. The cache file is <id>.png either way.
+
     /**
      * @brief Get the path to the cached thumbnail for a notebook.
      * @param bundlePath Full path to the .snb bundle.
@@ -308,6 +314,8 @@ private:
      */
     NotebookInfo* findNotebook(const QString& bundlePath);
     const NotebookInfo* findNotebook(const QString& bundlePath) const;
+    /// The id the thumbnail is filed under (see Thumbnails), or empty.
+    QString thumbnailIdFor(const QString& bundlePath) const;
     
     /**
      * @brief Schedule a debounced save operation.

@@ -16,9 +16,12 @@
 
 #include "MainWindow.h"
 #include "ui/launcher/Launcher.h"
+#include "ui/dialogs/NewNoteDialog.h"
 #include "platform/SystemNotification.h"
 #include "core/DocumentViewport.h"
+#include "core/DocumentManager.h"
 #include "core/DrawingSettings.h"
+#include <QPushButton>
 // CLI support (Desktop only). Excluded on HarmonyOS as well: Qt builds the app
 // as a shared module loaded by an ArkTS host there, so there is no argv-taking
 // executable for a command line to attach to.
@@ -574,6 +577,12 @@ static void applyAndroidFonts(QApplication& app)
 #include "core/SandboxPdfOwnershipTests.h"
 #include "core/DocumentViewportTests.h"
 #include "core/PenBindingsTests.h"
+#include "core/SaveCrashTests.h"
+#include "core/AutoSaverTests.h"
+#include "core/NoteVersionsTests.h"
+#include "core/PaperTests.h"
+#include "ui/dialogs/NewNoteTests.h"
+#include "ui/launcher/CoverTests.h"
 #include "strokes/ShapeCleanerTests.h"
 #include "ui/ToolbarButtonTests.h"
 #include "objects/LinkObjectTests.h"
@@ -818,22 +827,18 @@ static void connectLauncherSignals(Launcher* launcher)
         launcher->hideWithAnimation();
     });
 
-    QObject::connect(launcher, &Launcher::createNewEdgeless, [=]() {
+    // Step N1: the New note window opens over the launcher; Cancel stays here.
+    auto newNote = [=](bool edgeless, const QString& folder) {
+        NewNoteSpec spec;
+        if (!NewNoteDialog::ask(launcher, edgeless, folder, &spec)) return;
         auto [w, _] = getMainWindow(launcher);
-        w->addNewEdgelessTab();
+        w->createNote(spec);
         launcher->hideWithAnimation();
-    });
-
-    QObject::connect(launcher, &Launcher::createNewPaged, [=]() {
-        auto [w, _] = getMainWindow(launcher);
-        w->addNewTab();
-        launcher->hideWithAnimation();
-    });
-
-    QObject::connect(launcher, &Launcher::createNewNoteAt, [=](const QString& bundlePath, bool edgeless) {
-        auto [w, _] = getMainWindow(launcher);
-        w->addNewTabAt(bundlePath, edgeless);
-        launcher->hideWithAnimation();
+    };
+    QObject::connect(launcher, &Launcher::createNewEdgeless, [=]() { newNote(true, QString()); });
+    QObject::connect(launcher, &Launcher::createNewPaged, [=]() { newNote(false, QString()); });
+    QObject::connect(launcher, &Launcher::createNewNoteIn, [=](const QString& folder, bool edgeless) {
+        newNote(edgeless, folder);
     });
 
     QObject::connect(launcher, &Launcher::openPdfRequested, [=]() {
@@ -935,6 +940,34 @@ static void showMainWindowAtColdStart(MainWindow* w, Launcher* launcher)
 #endif
 }
 
+// Step R3: notes without a place that a crash left behind. Returns the ones
+// the user wants open now; the others are offered again at the next start.
+static QStringList askToRecoverUnsavedNotes(QWidget* parent, bool crashed)
+{
+    const QVector<DocumentManager::LeftoverNote> notes = DocumentManager::leftoverTempBundles();
+    if (notes.isEmpty()) {
+        return {};
+    }
+    QStringList lines;
+    QStringList paths;
+    for (int i = 0; i < notes.size() && i < 5; ++i) {
+        const QString name = notes[i].name.isEmpty() ? QObject::tr("Untitled") : notes[i].name;
+        lines << QString::fromUtf8("\xE2\x80\xA2 %1, %2")
+                     .arg(name, QLocale().toString(notes[i].lastChange, QLocale::ShortFormat));
+        paths << notes[i].path;
+    }
+    const QString text = (crashed ? QObject::tr("SpeedyNote did not close properly. ") : QString())
+        + QObject::tr("These notes were never saved to a place and were kept:")
+        + QStringLiteral("\n\n") + lines.join(QLatin1Char('\n'));
+    QMessageBox box(QMessageBox::Question, QObject::tr("Notes kept for you"), text,
+                    QMessageBox::NoButton, parent);
+    QPushButton* open = box.addButton(QObject::tr("Open them"), QMessageBox::AcceptRole);
+    box.addButton(QObject::tr("Later"), QMessageBox::RejectRole);
+    box.setDefaultButton(open);
+    box.exec();
+    return box.clickedButton() == open ? paths : QStringList();
+}
+
 // Make Launcher visible at cold start for branches that want to land on
 // the Launcher. On macOS and HarmonyOS the Launcher is already visible from
 // createLauncherForColdStart(), so this is a no-op there.
@@ -972,6 +1005,18 @@ static int runTests(const QString& testType)
         success = DocumentViewportTests::runUnitTests();
     } else if (testType == "penbindings") {
         success = PenBindingsTests::runAllTests();
+    } else if (testType == "savecrash") {
+        success = SaveCrashTests::runAllTests();
+    } else if (testType == "autosave") {
+        success = AutoSaverTests::runAllTests();
+    } else if (testType == "versions") {
+        success = NoteVersionsTests::runAllTests();
+    } else if (testType == "paper") {
+        success = PaperTests::runAllTests();
+    } else if (testType == "newnote") {
+        success = NewNoteTests::runAllTests();
+    } else if (testType == "covers") {
+        success = CoverTests::runAllTests();
     } else if (testType == "shapes") {
         success = ShapeCleanerTests::runAllTests();
     } else if (testType == "linkobject") {
@@ -1324,6 +1369,8 @@ int main(int argc, char* argv[])
     QString testToRun;
     bool runButtonVisualTest = false;
     bool runViewportTests = false;
+    bool runSaveCrashChild = false;  // hidden: a child of --test-savecrash
+    bool runAutosaveChild = false;   // hidden: a child of --test-autosave
 #endif
 
     for (int i = 1; i < argc; ++i) {
@@ -1354,6 +1401,24 @@ int main(int argc, char* argv[])
             runButtonVisualTest = true;
         } else if (arg == "--test-penbindings") {
             testToRun = "penbindings";
+        } else if (arg == "--test-savecrash") {
+            testToRun = "savecrash";
+        } else if (arg == "--save-crash-child") {
+            runSaveCrashChild = true;
+            i += 3;  // <bundle> <seed> <firstGen>, read again Unicode-safe by the child
+        } else if (arg == "--test-autosave") {
+            testToRun = "autosave";
+        } else if (arg == "--test-versions") {
+            testToRun = "versions";
+        } else if (arg == "--test-paper") {
+            testToRun = "paper";
+        } else if (arg == "--test-newnote") {
+            testToRun = "newnote";
+        } else if (arg == "--test-covers") {
+            testToRun = "covers";
+        } else if (arg == "--autosave-crash-child") {
+            runAutosaveChild = true;
+            i += 1;  // <unsaved folder>, read again Unicode-safe by the child
         } else if (arg == "--test-shapes") {
             testToRun = "shapes";
         } else if (arg == "--test-linkobject") {
@@ -1381,6 +1446,12 @@ int main(int argc, char* argv[])
 
 #if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS) && defined(SPEEDYNOTE_DEBUG)
     // Handle test commands
+    if (runSaveCrashChild) {
+        return SaveCrashTests::runChildFromArguments();
+    }
+    if (runAutosaveChild) {
+        return AutoSaverTests::runChildFromArguments();
+    }
     if (!testToRun.isEmpty()) {
         return runTests(testToRun);
     }
@@ -1431,6 +1502,12 @@ int main(int argc, char* argv[])
 
     // ========== Session Restore ==========
     QSettings sessionSettings("SpeedyNote", "App");
+
+    // Step R3: cleanExit stays false while the app runs (set true after
+    // app.exec() returns). Still false here = a crash, a freeze or a kill.
+    const bool crashed = !sessionSettings.value("session/cleanExit", true).toBool();
+    sessionSettings.setValue("session/cleanExit", false);
+
     QStringList sessionTabs = sessionSettings.value("session/lastOpenTabs").toStringList();
     int sessionActiveIndex = sessionSettings.value("session/activeTabIndex", 0).toInt();
 
@@ -1506,6 +1583,11 @@ int main(int argc, char* argv[])
     QWidget* sessionPromptParent = nullptr;
 #endif
 
+    // Step R3: after a crash, say that autosave kept the notes that have a place.
+    const QString autosavedLine = (crashed && sessionSettings.value("autosave/enabled", true).toBool())
+        ? QStringLiteral("\n\n") + QObject::tr("Your notes were saved automatically up to the last few seconds.")
+        : QString();
+
     if (!inputFile.isEmpty()) {
         // File argument provided - open in MainWindow.
         auto* w = new MainWindow();
@@ -1513,11 +1595,14 @@ int main(int argc, char* argv[])
         showMainWindowAtColdStart(w, launcher);
         w->openFileInNewTab(inputFile);
 
+        for (const QString& path : askToRecoverUnsavedNotes(w, crashed))
+            w->openRecoveredNote(path);
+
         if (!sessionTabs.isEmpty()) {
             auto reply = QMessageBox::question(w,
                 QObject::tr("Restore Previous Session"),
                 QObject::tr("You had %1 other tab(s) open last time. Restore them?")
-                    .arg(sessionTabs.size()),
+                    .arg(sessionTabs.size()) + autosavedLine,
                 QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
             if (reply == QMessageBox::Yes) {
                 for (const QString& path : sessionTabs)
@@ -1530,22 +1615,28 @@ int main(int argc, char* argv[])
         }
 
         registerMainWindowWithPlatform(w);
-    } else if (!sessionTabs.isEmpty()) {
+    } else if (const QStringList recovered = askToRecoverUnsavedNotes(sessionPromptParent, crashed);
+               !sessionTabs.isEmpty() || !recovered.isEmpty()) {
         // No file, but previous session exists - ask to restore.
-        auto reply = QMessageBox::question(sessionPromptParent,
-            QObject::tr("Restore Previous Session"),
-            QObject::tr("You had %1 tab(s) open last time. Restore them?")
-                .arg(sessionTabs.size()),
-            QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+        const bool restore = !sessionTabs.isEmpty()
+            && QMessageBox::question(sessionPromptParent,
+                   QObject::tr("Restore Previous Session"),
+                   QObject::tr("You had %1 tab(s) open last time. Restore them?")
+                       .arg(sessionTabs.size()) + autosavedLine,
+                   QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes) == QMessageBox::Yes;
 
-        if (reply == QMessageBox::Yes) {
+        if (restore || !recovered.isEmpty()) {
             auto* w = new MainWindow();
             w->setAttribute(Qt::WA_DeleteOnClose);
             showMainWindowAtColdStart(w, launcher);
-            for (const QString& path : sessionTabs)
-                w->openFileInNewTab(path);
-            if (sessionActiveIndex >= 0 && sessionActiveIndex < w->tabCount())
-                w->switchToTabIndex(sessionActiveIndex);
+            if (restore) {
+                for (const QString& path : sessionTabs)
+                    w->openFileInNewTab(path);
+                if (sessionActiveIndex >= 0 && sessionActiveIndex < w->tabCount())
+                    w->switchToTabIndex(sessionActiveIndex);
+            }
+            for (const QString& path : recovered)
+                w->openRecoveredNote(path);
 
             registerMainWindowWithPlatform(w);
         } else {
@@ -1560,6 +1651,9 @@ int main(int argc, char* argv[])
     }
 
     int exitCode = app.exec();
+
+    // Step R3: reaching this line is a clean exit (see "crashed" above).
+    QSettings("SpeedyNote", "App").setValue("session/cleanExit", true);
 
     return exitCode;
 }

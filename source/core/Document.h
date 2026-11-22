@@ -16,6 +16,7 @@
 // ============================================================================
 
 #include "Page.h"
+#include "NoteVersions.h"
 #include "../pdf/PdfProvider.h"
 #include "../ui/sidebars/LinkOutlineEntry.h"
 
@@ -42,6 +43,7 @@
 #include <map>
 #include <set>
 #include <memory>
+#include <atomic>
 
 class ImageObject;
 
@@ -237,8 +239,14 @@ public:
     QColor defaultGridColor = QColor(200, 200, 200);
     int defaultGridSpacing = 32;
     int defaultLineSpacing = 32;
+    QString defaultPaperId;       ///< Paper drawn by code (optional "paper" key)
+    QString defaultCustomImage;   ///< A paper of your own in assets/images (optional "custom_image")
     QSizeF defaultPageSize = QSizeF(816, 1056);  ///< Default page size (US Letter at 96 DPI)
-    
+
+    /// The note's cover (Step N3, see CoverPainter): optional "cover" key,
+    /// written only when set. Its picture is a file in assets/images.
+    QJsonObject cover;
+
     // ===== OCR Settings =====
     QString ocrLanguage;                ///< Per-document OCR recognizer name (empty = global fallback)
     bool ocrSnapToBackground = false;   ///< Snap OCR grouping to grid/line spacing
@@ -306,7 +314,11 @@ public:
     /**
      * @brief Mark the document as modified.
      */
-    void markModified() { modified = true; lastModified = QDateTime::currentDateTime(); }
+    void markModified() { modified = true; lastModified = QDateTime::currentDateTime(); ++m_editSerial; }
+
+    /// Grows on every markModified(). A save that started at serial N clears
+    /// the modified flag only if nothing changed while it was written.
+    quint64 editSerial() const { return m_editSerial; }
     
     /**
      * @brief Clear the modified flag.
@@ -786,9 +798,75 @@ public:
      *        bundled mini-PDFs (Plan B2) before writing the manifest, so the bundle
      *        becomes self-contained. Only used on document close and .snbx export;
      *        ordinary saves/autosaves pass false to avoid grafting churn.
-     * @return True if saved successfully.
+     * @param error When not null, receives a plain reason on failure.
+     * @return True if saved successfully. On failure the files on disk are the
+     *         last saved version (each page old or new, never half written)
+     *         and the document keeps its unsaved changes.
      */
-    bool saveBundle(const QString& path, bool finalize = false);
+    bool saveBundle(const QString& path, bool finalize = false, QString* error = nullptr);
+
+    // ===== Safe save (Step R2) =====
+    // A save is split so that the writing can run off the GUI thread:
+    //   prepareSave()  GUI thread: serializes the dirty pages/tiles and the manifest.
+    //   writeSaveJob() any thread: writes files, then document.json LAST, then removals.
+    //   finishSave()   GUI thread: on failure puts the dirty state back.
+    // The job holds value copies only; writeSaveJob never touches a Document.
+
+    struct SaveJob {
+        QString bundlePath;
+        QString oldBundlePath;                         ///< Restored when a Save As fails
+        bool edgeless = false;
+        QVector<QPair<QString, QString>> copies;       ///< Absolute source -> destination, written first
+        QVector<QPair<QString, QJsonObject>> files;    ///< Path relative to the bundle -> compact JSON
+        /// Rule 1: the strokes of files[first] are left out by prepare and
+        /// serialized by the writer: entry n of its "layers" array gets
+        /// "strokes" from second[n] (copies of VectorLayer::strokes(), shared).
+        QVector<QPair<int, QVector<QVector<VectorStroke>>>> strokes;
+        QJsonObject manifest;                          ///< document.json, written after every file
+        QStringList removals;                          ///< Relative paths removed after the manifest
+        // State moved out of the Document, given back by finishSave on failure.
+        std::set<QString> dirtyPages, deletedPages;
+        std::set<TileCoord> dirtyTiles, deletedTiles, writtenTiles;
+        bool manifestWasDirty = false;
+        quint64 serial = 0;                            ///< editSerial() when prepared
+        NoteVersions::Policy versions;                 ///< Step R4: read from the settings by prepare
+        // Result of a background write (startBackgroundSave), read once it is finished.
+        bool ok = false;
+        QString error;
+    };
+
+    /// Same-location save (Ctrl+S, autosave). Null on failure, with *error set.
+    std::shared_ptr<SaveJob> prepareSave(QString* error = nullptr);
+    static bool writeSaveJob(const SaveJob& job, QString* error = nullptr);
+    void finishSave(const SaveJob& job, bool ok);
+
+    // ===== Background save (Step R1, autosave) =====
+    /// prepareSave() here, writeSaveJob() on @p pool. The job's ok/error are set
+    /// when pendingSaveFuture() is finished. Null when prepare failed (*error set).
+    std::shared_ptr<SaveJob> startBackgroundSave(QThreadPool* pool, QString* error = nullptr);
+    /// Finished when the background write is done (an empty future when none).
+    QFuture<void> pendingSaveFuture() const { return m_pendingSaveFuture; }
+    /// Waits for a background save and applies its finishSave() once. Every
+    /// writer, evicter and the destructor call it first: while a job runs, the
+    /// unsaved state belongs to the job.
+    void waitForPendingSave();
+
+    /**
+     * @brief Write one file of a bundle atomically: temporary file, flushed to
+     *        disk, renamed over the old one. The only writer of bundle files.
+     * @param error When not null, receives a plain reason on failure.
+     */
+    static bool commitFile(const QString& path, const QByteArray& data, QString* error = nullptr);
+
+#ifdef SPEEDYNOTE_DEBUG
+    /// Test fault hook: when >= 0, the commit that many commits from now fails.
+    static std::atomic<int> s_failCommitAt;
+#endif
+
+    /// Set by the AutoSaver while autosave is on: evictPage()/evictTile() keep
+    /// a dirty page loaded for the worker to write, instead of writing it on
+    /// the GUI thread (rule 1). GUI thread only.
+    static bool s_keepDirtyLoaded;
     
     /**
      * @brief Load a document from a bundle (tiles lazy-loaded).
@@ -1315,8 +1393,10 @@ public:
      * is dropped, the legacy top-level pdf_path/pdf_hash/pdf_size mirror clears
      * automatically on the next toJson() (it mirrors the surviving primary, or
      * writes an empty path when no source remains). Called during saveBundle().
+     * With `bundledFilesToRemove`, the bundled mini-PDFs are not deleted but
+     * listed (relative to the bundle), for the save to remove after its manifest.
      */
-    int pruneUnreferencedSources();
+    int pruneUnreferencedSources(QStringList* bundledFilesToRemove = nullptr);
 
     /**
      * @brief Translate a page's ORIGINAL PDF page number to the index its provider
@@ -1928,6 +2008,14 @@ private:
     void confirmPersistedImageAssets();
     ImageObject* findLoadedImageObject(const QString& objectId) const;
 
+    /// prepareSave() for any target; a different path is a Save As (all pages).
+    std::shared_ptr<SaveJob> prepareSaveTo(const QString& path, bool finalize, QString* error);
+    /// The JSON of one edgeless tile file (compact format) or one paged tile.
+    /// With @p deferredStrokes, the layers have no "strokes": their copies are
+    /// appended there, in the order of the "layers" array (see SaveJob::strokes).
+    QJsonObject tileJson(TileCoord coord, const Page* tile,
+                         QVector<QVector<VectorStroke>>* deferredStrokes = nullptr) const;
+
     // ===== PDF Sources (multi-source model) =====
     /// Ordered list of PDF sources. Index 0 is the "primary" (born-from single PDF),
     /// mirrored to the legacy top-level pdf_path/pdf_hash/pdf_size keys on save.
@@ -2072,8 +2160,23 @@ private:
     QString m_bundlePath;                           ///< Path to .snb bundle directory
     mutable std::set<TileCoord> m_tileIndex;        ///< All tile coords that exist on disk (mutable for lazy-load failure cleanup)
     mutable std::set<TileCoord> m_dirtyTiles;       ///< Tiles modified since last save
+    mutable std::set<TileCoord> m_unreadableTiles;  ///< In the index, but the file failed to load: getTile() skips it
     std::set<TileCoord> m_deletedTiles;             ///< Tiles to delete from disk on next save
     bool m_lazyLoadEnabled = false;                 ///< True after loading from bundle
+    quint64 m_editSerial = 0;                       ///< See editSerial()
+    std::shared_ptr<SaveJob> m_pendingSave;         ///< Background save not yet finished
+    QFuture<void> m_pendingSaveFuture;
+    /// The running background save writes or removes this page's / tile's
+    /// files, or holds its unsaved state.
+    bool pendingSaveHolds(const QString& pageUuid) const {
+        return m_pendingSave && (m_pendingSave->dirtyPages.count(pageUuid) > 0
+                                 || m_pendingSave->deletedPages.count(pageUuid) > 0);
+    }
+    bool pendingSaveHolds(TileCoord coord) const {
+        return m_pendingSave && (m_pendingSave->dirtyTiles.count(coord) > 0
+                                 || m_pendingSave->writtenTiles.count(coord) > 0
+                                 || m_pendingSave->deletedTiles.count(coord) > 0);
+    }
     std::unique_ptr<QThreadPool> m_imageWritePool;  ///< Bounded pool isolated from PDF/render jobs
     QVector<PendingImageWrite> m_pendingImageWrites;
 
@@ -2143,6 +2246,9 @@ private:
      * @return Unique pointer to the new page.
      */
     std::unique_ptr<Page> createDefaultPage();
+
+    /// The document's default paper onto a new page or tile (tiles: no own picture).
+    void applyDefaultBackground(Page& page, bool tile) const;
 
     // ========================================================================
     // Link Outline Cache — internal state & peek helpers (Phase M.9)

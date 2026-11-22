@@ -1,10 +1,11 @@
 #include "ActionBar.h"
+#include "CornerRadiusSlider.h"
 #include "../widgets/ActionBarButton.h"
 
-#include <QAction>
-#include <QActionGroup>
 #include <QFrame>
 #include <QMenu>
+#include <QSlider>
+#include <QWidgetAction>
 #include <QPalette>
 #include <QApplication>
 #include <QGraphicsDropShadowEffect>
@@ -50,36 +51,37 @@ void ActionBar::addShapeEditButtons()
 
     m_cornersButton = new ActionBarButton(this);
     m_cornersButton->setIconName(QStringLiteral("corners"));
-    m_cornersButton->setToolTip(tr("Corners: sharp or rounded"));
+    m_cornersButton->setToolTip(tr("Corners: from sharp to round"));
     m_cornersButton->hide();
     addButton(m_cornersButton);
     connect(m_cornersButton, &ActionBarButton::clicked, this, [this]() {
         // A popup, not exec(): no event loop inside the click.
         auto* menu = new QMenu(this);
         menu->setAttribute(Qt::WA_DeleteOnClose);
-        auto* group = new QActionGroup(menu);
-        const QString names[] = {tr("Sharp corners"), tr("Rounded: small"), tr("Rounded: medium"),
-                                 tr("Rounded: large")};
-        for (int step = 0; step < 4; ++step) {
-            QAction* action = menu->addAction(names[step]);
-            action->setCheckable(true);
-            action->setChecked(step == m_cornerStep);
-            group->addAction(action);
-            connect(action, &QAction::triggered, this, [this, step]() { emit cornerStepChosen(step); });
-        }
+        auto* slider = new CornerRadiusSlider(menu);
+        slider->setFraction(m_cornerFraction);
+        auto* action = new QWidgetAction(menu);
+        action->setDefaultWidget(slider);
+        menu->addAction(action);
+        connect(slider, &CornerRadiusSlider::begin, this, &ActionBar::cornerRadiusBegin);
+        connect(slider, &CornerRadiusSlider::preview, this, &ActionBar::cornerRadiusPreview);
+        connect(slider, &CornerRadiusSlider::commit, this, &ActionBar::cornerRadiusCommit);
+        // A key change still waiting for its pause is kept when the menu closes.
+        connect(menu, &QMenu::aboutToHide, slider, &CornerRadiusSlider::finish);
         menu->popup(m_cornersButton->mapToGlobal(QPoint(0, m_cornersButton->height())));
+        slider->slider()->setFocus();   // Arrow keys move it at once
     });
 }
 
-void ActionBar::setShapeEdit(bool canEditPoints, bool editPointsOn, int step)
+void ActionBar::setShapeEdit(bool canEditPoints, bool editPointsOn, qreal fraction)
 {
     if (!m_editPointsButton) {
         return;
     }
-    m_cornerStep = step;
+    m_cornerFraction = fraction;
     m_editPointsButton->setVisible(canEditPoints);
     m_editPointsButton->setChecked(canEditPoints && editPointsOn);
-    m_cornersButton->setVisible(canEditPoints && step >= 0);
+    m_cornersButton->setVisible(canEditPoints && fraction >= 0.0);
     adjustSize();
 }
 

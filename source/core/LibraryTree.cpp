@@ -1,4 +1,5 @@
 #include "LibraryTree.h"
+#include "CoverPainter.h"
 #include "../sharing/NotebookExporter.h"
 #include "../sharing/NotebookImporter.h"
 
@@ -132,6 +133,32 @@ bool LibraryTree::markNotebook(const QString& dir)
     if (meta.value("notebook").toBool()) return true;
     meta["notebook"] = true;
     return writeMeta(dir, meta);
+}
+
+QJsonObject LibraryTree::cover(const QString& dir)
+{
+    return readMeta(dir).value("cover").toObject();
+}
+
+bool LibraryTree::setCover(const QString& dir, QJsonObject cover, QString* error)
+{
+    static const QString base = QStringLiteral(".speedynote-cover");
+    QString picture = cover.value("image").toString();
+    if (!picture.isEmpty() && QFileInfo(picture).isAbsolute()) {
+        picture = CoverPainter::adoptPicture(picture, dir, base, error);
+        if (picture.isEmpty()) return false;
+        cover["image"] = picture;
+    }
+    QJsonObject meta = readMeta(dir);
+    const bool unchanged = cover.isEmpty() && !meta.contains("cover");   // never create the file for nothing
+    if (cover.isEmpty()) meta.remove("cover");
+    else meta["cover"] = cover;
+    if (!unchanged && !writeMeta(dir, meta))
+        return fail(error, QObject::tr("Could not save the cover in:\n%1").arg(QDir::toNativeSeparators(dir))), false;
+    // A picture no longer used (another type, or no picture now) goes.
+    for (const QString& file : QDir(dir).entryList({base + ".*"}, QDir::Files | QDir::Hidden))
+        if (file != picture) QFile::remove(dir + "/" + file);
+    return true;
 }
 
 bool LibraryTree::placeBefore(const QString& dir, const QString& name, const QString& beforeName)
@@ -293,19 +320,24 @@ QString LibraryTree::move(const QString& path, const QString& newParent,
     return target;
 }
 
-QString LibraryTree::copyNoteInto(const QString& notePath, const QString& dir, QString* error)
+QString LibraryTree::copyNoteAs(const QString& notePath, const QString& target, QString* error)
 {
     const QString src = QDir::cleanPath(notePath);
     if (!QFile::exists(src + "/document.json"))
         return fail(error, QObject::tr("This folder is not a SpeedyNote note (no document.json):\n%1").arg(src));
-    const QString name = uniqueName(dir, displayName(src), ".snb");
-    const QString target = QDir::cleanPath(dir) + "/" + name;
     if (!copyFolder(src, target))
         return fail(error, QObject::tr("Could not copy \"%1\".").arg(displayName(src)));
     // A new id: two notes with one id would open as the same tab.
     editManifest(target, {{"notebook_id", QUuid::createUuid().toString(QUuid::WithoutBraces)},
                           {"name", displayName(target)}});
-    placeBefore(dir, name);
+    return target;
+}
+
+QString LibraryTree::copyNoteInto(const QString& notePath, const QString& dir, QString* error)
+{
+    const QString name = uniqueName(dir, displayName(QDir::cleanPath(notePath)), ".snb");
+    const QString target = copyNoteAs(notePath, QDir::cleanPath(dir) + "/" + name, error);
+    if (!target.isEmpty()) placeBefore(dir, name);
     return target;
 }
 
@@ -341,6 +373,7 @@ bool LibraryTree::pack(const QString& notebookDir, const QString& packFile, QStr
                     QDirIterator::Subdirectories);
     while (it.hasNext()) {
         const QString file = it.next();
+        if (file.contains(".snb/versions/")) continue;  // not packed (Step R4)
         QFile f(file);
         QJsonParseError parse;
         parse.error = QJsonParseError::GarbageAtEnd;
