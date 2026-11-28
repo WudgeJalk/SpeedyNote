@@ -7730,6 +7730,71 @@ public:
      * @brief The ruler: its angle, what a press touches, a line that follows
      *        its edge, moving and turning it, and hiding it.
      */
+    /// Add or remove space: the lines under the press follow the pen up or down.
+    static bool testSpaceTool()
+    {
+        printf("  testSpaceTool... ");
+        auto fail = [](const char* message) {
+            printf("FAILED: %s\n", message);
+            return false;
+        };
+        struct Restore {
+            DrawingSettings& s = const_cast<DrawingSettings&>(DrawingSettings::get());
+            const DrawingSettings saved = s;
+            ~Restore() { s = saved; }
+        } restore;
+        restore.s.stabilisation = 0;
+        restore.s.drawAndHold = false;
+        restore.s.handArrows = false;
+
+        auto doc = Document::createNew("Space");
+        DocumentViewport vp;
+        eraserTestSetupPaged(vp, doc.get(), 1000, 800, 1.0);
+        vp.setCurrentTool(ToolType::Pen);
+        const QPointF o = vp.pagePosition(0);
+        const auto drag = [&](const QPointF& from, const QPointF& to) {
+            vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Press, o + from));
+            for (int i = 1; i <= 10; ++i)
+                vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Move, o + from + (to - from) * (i / 10.0)));
+            vp.handlePointerEvent(eraserEventAt(vp, PointerEvent::Release, o + to));
+        };
+        drag(QPointF(100, 100), QPointF(300, 100));
+        drag(QPointF(100, 300), QPointF(300, 300));
+        const VectorLayer* layer = doc->page(0)->activeLayer();
+        if (layer->strokeCount() != 2) return fail("two lines must be drawn");
+        // The centres of the two lines, top one first.
+        const auto centres = [&]() {
+            QVector<QPointF> c;
+            for (const VectorStroke& stroke : layer->strokes()) c << stroke.boundingBox.center();
+            std::sort(c.begin(), c.end(), [](const QPointF& a, const QPointF& b) { return a.y() < b.y(); });
+            return c;
+        };
+        const QVector<QPointF> before = centres();
+
+        vp.armSpaceTool();
+        drag(QPointF(200, 200), QPointF(260, 250));   // down, and a little sideways
+        QVector<QPointF> now = centres();
+        if (now.size() != 2 || qAbs(now[0].y() - before[0].y()) > 0.01 || qAbs(now[1].y() - before[1].y() - 50) > 0.01) {
+            printf("(%g, %g) ", now.value(0).y(), now.value(1).y());
+            return fail("the line under the press must go down 50, the one above must stay");
+        }
+        if (qAbs(now[1].x() - before[1].x()) > 0.01) return fail("the lines must not move sideways");
+
+        vp.armSpaceTool();
+        drag(QPointF(200, 200), QPointF(200, 170));   // up: space is taken away
+        now = centres();
+        if (now.size() != 2 || qAbs(now[1].y() - before[1].y() - 20) > 0.01) return fail("a drag up must bring the line up");
+
+        vp.undo();
+        now = centres();
+        if (now.size() != 2 || qAbs(now[1].y() - before[1].y() - 50) > 0.01) return fail("one undo must take back one move");
+
+        drag(QPointF(100, 500), QPointF(300, 500));   // the pen is back
+        if (layer->strokeCount() != 3) return fail("after the move the pen must write again");
+        printf("PASSED\n");
+        return true;
+    }
+
     static bool testRuler()
     {
         printf("  testRuler... ");
@@ -8373,6 +8438,7 @@ public:
         runTest(testFingerTapSelects, "testFingerTapSelects");
         runTest(testLaserPointer, "testLaserPointer");
         runTest(testRuler, "testRuler");
+        runTest(testSpaceTool, "testSpaceTool");
         runTest(testCleanedStrokesAndHandArrow, "testCleanedStrokesAndHandArrow");
         runTest(testEraserGestureRobustness, "testEraserGestureRobustness");
 

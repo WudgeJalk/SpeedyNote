@@ -543,16 +543,9 @@ MainWindow::MainWindow(QWidget *parent)
     // Auto-hide the tab bar container when only one notebook is open.
     // The filename click in NavigationBar still toggles visibility as a
     // manual override (last interaction wins until the next count transition).
-    if (QWidget* tbc = m_splitViewManager->tabBarContainer()) {
-        tbc->setVisible(false);
-    }
-    connect(m_splitViewManager, &SplitViewManager::totalTabCountChanged, this, [this](int total) {
-        if (QWidget* tbc = m_splitViewManager ? m_splitViewManager->tabBarContainer() : nullptr) {
-            // Full screen shows no tab bar: the rule applies when it ends.
-            if (m_fullscreenChromeOn) m_tabsShownBeforeFullscreen = total >= 2;
-            else tbc->setVisible(total >= 2);
-        }
-    });
+    applyTabBarSetting();
+    connect(m_splitViewManager, &SplitViewManager::totalTabCountChanged, this,
+            [this](int) { applyTabBarSetting(); });
 
     // ML-1 FIX: Connect tabCloseRequested to clean up Document when tab closes
     // SplitViewManager forwards this from both panes with the unique tab ID
@@ -1291,6 +1284,7 @@ void MainWindow::setupUi() {
 #ifdef SPEEDYNOTE_DEBUG
         qDebug() << "NavigationBar: Filename clicked - toggle tabs";
 #endif
+        if (QSettings("SpeedyNote", "App").value("tabs/alwaysShown", false).toBool()) return;
         if (m_splitViewManager && m_splitViewManager->tabBarContainer()) {
             QWidget* tbc = m_splitViewManager->tabBarContainer();
             tbc->setVisible(!tbc->isVisible());
@@ -1367,6 +1361,9 @@ void MainWindow::setupUi() {
             vp->setStraightLineMode(enabled);
         }
         // qDebug() << "Toolbar: Straight line mode" << (enabled ? "enabled" : "disabled");
+    });
+    connect(m_toolbar, &Toolbar::spaceClicked, this, [this]() {
+        if (DocumentViewport* vp = currentViewport()) vp->armSpaceTool();
     });
     connect(m_toolbar, &Toolbar::rulerToggled, this, [this](bool visible) {
         if (DocumentViewport* vp = currentViewport()) vp->setRulerVisible(visible);
@@ -1966,6 +1963,9 @@ void MainWindow::wireQActionDispatchers()
             || qobject_cast<QPlainTextEdit*>(f)) return;
         w->showQuickBar();
     });
+    wire("edit.space",         [](MainWindow* w){
+        if (DocumentViewport* vp = w->currentViewport()) vp->armSpaceTool();
+    });
     wire("view.ruler",         [](MainWindow* w){
         // "R" is a letter: it must still type an R in a text box.
         QWidget* f = QApplication::focusWidget();
@@ -2341,6 +2341,7 @@ void MainWindow::setupManagedShortcuts()
     bindAction("view.debug_overlay");
     bindAction("view.perf_hud");
     bindAction("view.ruler");
+    bindAction("edit.space");
     bindAction("view.quick_bar");
     // MAC.6: ocr.* + tab navigation bindings
     bindAction("ocr.scan_page");
@@ -10488,4 +10489,17 @@ void MainWindow::renameCurrentNote()
     const QString renamed = LibraryView::renameWithPrompt(this, path);
     // Cancelled: still open, this only shows it. A rename that failed closed it: it opens again.
     openFileInNewTab(renamed.isEmpty() ? path : renamed);
+}
+
+void MainWindow::applyTabBarSetting()
+{
+    QWidget *tabs = m_splitViewManager ? m_splitViewManager->tabBarContainer() : nullptr;
+    if (!tabs) return;
+    // "tabs/alwaysShown": the tabs stay. Off: they show with two notes or
+    // more, and a click on the note's name shows or hides them.
+    const bool show = QSettings("SpeedyNote", "App").value("tabs/alwaysShown", false).toBool()
+                      || m_splitViewManager->totalTabCount() >= 2;
+    // Full screen shows no tab bar: the rule applies when it ends.
+    if (m_fullscreenChromeOn) m_tabsShownBeforeFullscreen = show;
+    else tabs->setVisible(show);
 }

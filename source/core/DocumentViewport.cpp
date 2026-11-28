@@ -6326,6 +6326,7 @@ void DocumentViewport::handlePointerPress(const PointerEvent& pe)
     // Initialize from the press event's eraser state
     m_hardwareEraserActive = pe.isEraser;
     if (rulerPress(pe)) return;   // The ruler lies on top of the page, for every tool
+    if (spacePress(pe)) return;
     // A finger tap picked a line or shape: the pen writes again as soon as it
     // presses somewhere else.
     if (m_fingerTapSwitched && pe.source != PointerEvent::Touch && !pressOnSelection(pe.viewportPos)) {
@@ -6456,6 +6457,7 @@ void DocumentViewport::handlePointerMove(const PointerEvent& pe)
     // Update last pointer position for cursor tracking
     m_lastPointerPos = pe.viewportPos;
     if (rulerMove(pe)) return;
+    if (spaceMove(pe)) return;
 
     // Off-page pan runs ahead of every tool branch, the eraser included: a
     // hardware eraser press sets m_hardwareEraserActive before dispatch, so
@@ -6627,6 +6629,7 @@ void DocumentViewport::handlePointerRelease(const PointerEvent& pe)
     // itself never erases, so this is the end of the pass.
     commitEraserGesture();
     if (rulerRelease(pe)) return;
+    if (spaceRelease(pe)) return;
 
     // Off-page pan: either finish the pan, or treat a press that never moved as
     // the tap that used to clear the selection.
@@ -13586,7 +13589,7 @@ void DocumentViewport::renderLassoSelection(QPainter& painter)
 
 void DocumentViewport::drawSelectionBoundingBox(QPainter& painter)
 {
-    if (!m_lassoSelection.isValid() || lassoLineEnds(nullptr, nullptr) || !lassoCornersInViewport().isEmpty()) {
+    if (m_spaceDrag || !m_lassoSelection.isValid() || lassoLineEnds(nullptr, nullptr) || !lassoCornersInViewport().isEmpty()) {
         return;   // A straight line shows its two end handles instead, a shape in Edit points its corners
     }
     
@@ -13662,7 +13665,7 @@ QVector<QPointF> DocumentViewport::getHandlePositions() const
 
 void DocumentViewport::drawSelectionHandles(QPainter& painter)
 {
-    if (!m_lassoSelection.isValid()) {
+    if (m_spaceDrag || !m_lassoSelection.isValid()) {
         return;
     }
     QPointF lineA, lineB;

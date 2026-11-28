@@ -77,6 +77,7 @@ private:
     void showMenu(const QPoint& pos);
 
     LibraryPanelTree* m_tree = nullptr;
+    QWidget* m_footer = nullptr;
     ActionBarButton* m_newNoteButton = nullptr;
     ActionBarButton* m_newSectionButton = nullptr;
     ActionBarButton* m_renameButton = nullptr;

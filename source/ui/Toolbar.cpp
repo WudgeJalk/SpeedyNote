@@ -169,6 +169,13 @@ void Toolbar::setupUi()
     m_rulerButton->setToolTip(tr("Ruler (R)"));
     mainLayout->addWidget(m_rulerButton);
 
+    // --- Add or remove space (one gesture, then the tool in use is back) ---
+    m_spaceButton = new ActionButton(this);
+    m_spaceButton->setThemedIcon("space");
+    m_spaceButton->setToolTip(tr("Add or remove space: press on the page, then drag down or up"));
+    mainLayout->addWidget(m_spaceButton);
+    connect(m_spaceButton, &QPushButton::clicked, this, &Toolbar::spaceClicked);
+
     // --- Lasso (no subtoolbar) ---
     m_lassoButton = new ToolButton(this);
     m_lassoButton->setThemedIcon("rope");
@@ -209,7 +216,7 @@ void Toolbar::setupUi()
     m_page1Widgets = {
         m_penButton, m_penTypeButtons[0], m_penTypeButtons[1], m_penTypeButtons[2],
         m_markerButton, m_eraserButton,
-        m_straightLineButton, m_shapeButton, m_laserButton, m_rulerButton, m_lassoButton, m_objectImageButton,
+        m_straightLineButton, m_shapeButton, m_laserButton, m_rulerButton, m_spaceButton, m_lassoButton, m_objectImageButton,
         m_objectLinkButton, m_objectTextButton, m_highlighterButton
     };
 
@@ -328,6 +335,7 @@ QVector<QPair<QString, QWidget*>> Toolbar::customizableButtons() const
         { QStringLiteral("shapes"),        m_shapeButton },
         { QStringLiteral("laser"),         m_laserButton },
         { QStringLiteral("ruler"),         m_rulerButton },
+        { QStringLiteral("space"),         m_spaceButton },
         { QStringLiteral("lasso"),         m_lassoButton },
         { QStringLiteral("image"),         m_objectImageButton },
         { QStringLiteral("link"),          m_objectLinkButton },
@@ -1002,6 +1010,7 @@ void Toolbar::updateTheme(bool darkMode)
     m_shapeButton->setDarkMode(darkMode);
     m_laserButton->setDarkMode(darkMode);
     m_rulerButton->setDarkMode(darkMode);
+    m_spaceButton->setDarkMode(darkMode);
     m_objectImageButton->setDarkMode(darkMode);
     m_objectLinkButton->setDarkMode(darkMode);
     m_objectTextButton->setDarkMode(darkMode);

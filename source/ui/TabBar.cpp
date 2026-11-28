@@ -36,6 +36,7 @@ TabBar::TabBar(QWidget *parent)
 
     // Configure tab bar behavior
     setExpanding(false);           // Tabs fit content, don't expand to fill
+    setDrawBase(false);            // No line across the bar under the title row
     setMovable(false);             // Disabled: reordering tabs doesn't reorder viewports/documents
     setTabsClosable(true);         // Show close button on each tab (right side, default)
     setUsesScrollButtons(true);    // Show arrows when tabs overflow

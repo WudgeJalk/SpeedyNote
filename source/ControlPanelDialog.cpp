@@ -334,6 +334,11 @@ void ControlPanelDialog::addSection(Category category, QWidget *content, const Q
     QVBoxLayout *layout = static_cast<QVBoxLayout *>(m_pages[category]->widget()->layout());
     QGroupBox *group = qobject_cast<QGroupBox *>(content);
     const QString name = !title.isEmpty() ? title : group ? group->title() : QString();
+    if (!group) {   // The same frame for every section (the user, 2026-11-28)
+        QGroupBox *frame = new QGroupBox;
+        (new QVBoxLayout(frame))->addWidget(content);
+        content = frame;
+    }
     if (!name.isEmpty()) {
         // A closed sub-section costs no layout and no paint: the page stays short.
         if (group) group->setTitle(QString());   // The header says it
@@ -1786,6 +1791,27 @@ void ControlPanelDialog::createToolsTab()
         buttonsHint->setStyleSheet("color: gray; font-size: 11px;");
         buttonsLayout->addWidget(buttonsHint);
         addSection(Interface, buttonsGroup);
+    }
+
+    // --- Tabs: always there, or shown by a click on the note's name. Applies at once. ---
+    {
+        QGroupBox *tabsGroup = new QGroupBox(tr("Tabs"), this);
+        QVBoxLayout *tabsLayout = new QVBoxLayout(tabsGroup);
+        QCheckBox *tabsFixed = new QCheckBox(tr("Always show the tabs"), tabsGroup);
+        tabsFixed->setChecked(settings.value("tabs/alwaysShown", false).toBool());
+        tabsLayout->addWidget(tabsFixed);
+        QLabel *tabsHint = new QLabel(
+            tr("Off: the tabs show when two notes or more are open, and a click on the note's name "
+               "at the top shows or hides them. On: the tabs stay, and that click does nothing."),
+            tabsGroup);
+        tabsHint->setWordWrap(true);
+        tabsHint->setStyleSheet("color: gray; font-size: 11px;");
+        tabsLayout->addWidget(tabsHint);
+        addSection(Interface, tabsGroup);
+        connect(tabsFixed, &QCheckBox::toggled, this, [this](bool on) {
+            QSettings("SpeedyNote", "App").setValue("tabs/alwaysShown", on);
+            if (mainWindowRef) mainWindowRef->applyTabBarSetting();
+        });
     }
 
     // --- Selection menu (copy, delete, order...): next to the selection or at the side ---

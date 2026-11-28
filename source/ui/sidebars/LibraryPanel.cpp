@@ -1,3 +1,4 @@
+#include "PanelFooter.h"
 #include "LibraryPanel.h"
 
 #include "../ThemeColors.h"
@@ -101,9 +102,10 @@ LibraryPanel::LibraryPanel(QWidget* parent)
     layout->addWidget(m_tree, 1);
 
     // The panel's options, at its end (as in the Layers and Pages panels).
-    auto* buttons = new QHBoxLayout();
-    buttons->setContentsMargins(8, 8, 8, 8);
-    buttons->setSpacing(4);
+    m_footer = new QWidget(this);
+    auto* buttons = new QHBoxLayout(m_footer);
+    buttons->setContentsMargins(PanelFooter::Margin, PanelFooter::Margin, PanelFooter::Margin, PanelFooter::Margin);
+    buttons->setSpacing(PanelFooter::Spacing);
     auto addButton = [&](const char* icon, const QString& tip, auto&& slot) {
         auto* button = new ActionBarButton(this);
         button->setIconName(QLatin1String(icon));
@@ -119,7 +121,7 @@ LibraryPanel::LibraryPanel(QWidget* parent)
     m_renameButton = addButton("edit", tr("Rename"), [this]() { renameCurrent(); });
     m_deleteButton = addButton("trash", tr("Delete (to the recycle bin)"), [this]() { deleteCurrent(); });
     buttons->addStretch();
-    layout->addLayout(buttons);
+    layout->addWidget(m_footer);
     setDarkMode(QApplication::palette().color(QPalette::Window).lightness() < 128);
 
     connect(m_tree, &QTreeWidget::itemClicked, this, [this](QTreeWidgetItem* item) {
@@ -154,6 +156,7 @@ LibraryPanel::LibraryPanel(QWidget* parent)
 
 void LibraryPanel::setDarkMode(bool dark)
 {
+    PanelFooter::apply(m_footer, dark);
     for (ActionBarButton* button : {m_newNoteButton, m_newSectionButton, m_renameButton, m_deleteButton}) {
         button->setDarkMode(dark);
     }

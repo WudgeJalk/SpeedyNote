@@ -1,3 +1,4 @@
+#include "../sidebars/PanelFooter.h"
 #include "PagePanelActionBar.h"
 #include "../widgets/ActionBarButton.h"
 #include "../widgets/PageWheelPicker.h"
@@ -212,9 +213,11 @@ void PagePanelActionBar::setInPanel()
     for (QFrame* line : findChildren<QFrame*>(QString(), Qt::FindDirectChildrenOnly)) {
         if (line->frameShape() == QFrame::HLine || line->frameShape() == QFrame::VLine) line->hide();
     }
+    m_layout->setContentsMargins(PanelFooter::Margin, PanelFooter::Margin, PanelFooter::Margin, PanelFooter::Margin);
+    m_layout->setSpacing(PanelFooter::Spacing);
     auto addRow = [this](std::initializer_list<QWidget*> widgets) {
         auto* row = new QHBoxLayout();
-        row->setSpacing(4);
+        row->setSpacing(PanelFooter::Spacing);
         for (QWidget* widget : widgets) row->addWidget(widget, 0, Qt::AlignVCenter);
         row->addStretch();
         m_layout->addLayout(row);
@@ -233,7 +236,7 @@ void PagePanelActionBar::setupStyle()
         return;
     }
     setGraphicsEffect(nullptr);
-    setStyleSheet(QStringLiteral("PagePanelActionBar { background: transparent; border: none; }"));
+    PanelFooter::apply(this, isDarkMode());
 }
 
 bool PagePanelActionBar::isLocked() const

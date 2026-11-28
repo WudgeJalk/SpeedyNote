@@ -252,3 +252,78 @@ void DocumentViewport::trackSelectionMenuAnchor()
         emit selectionMenuAnchorChanged();
     }
 }
+
+// ---------------------------------------------------------------------------
+// Add or remove space. The lines under the press become a lasso selection,
+// so the drag is as smooth as a lasso move (one cached picture), and the
+// lift is the lasso's own commit and undo step.
+// ---------------------------------------------------------------------------
+
+void DocumentViewport::armSpaceTool()
+{
+    m_spaceArmed = true;
+    setCursor(Qt::SizeVerCursor);
+}
+
+bool DocumentViewport::spacePress(const PointerEvent& pe)
+{
+    if (!m_spaceArmed) return false;
+    m_spaceArmed = false;
+    if (m_lassoSelection.isValid()) {   // let go of what was selected
+        if (m_lassoSelection.hasTransform()) applySelectionTransform();
+        else clearLassoSelection();
+    }
+    QRectF below;
+    if (m_document->isEdgeless()) {
+        // shortcut: only the columns in view move, down to the last tile that
+        // exists; take every column if users ask.
+        const QPointF at = viewportToDocument(pe.viewportPos);
+        const QPointF left = viewportToDocument(QPointF(0, 0));
+        const QPointF right = viewportToDocument(QPointF(width(), height()));
+        qreal bottom = right.y();
+        for (const Document::TileCoord& coord : m_document->allTileCoords()) {
+            bottom = qMax(bottom, (coord.second + 1) * qreal(Document::EDGELESS_TILE_SIZE));
+        }
+        below = QRectF(left.x(), at.y(), right.x() - left.x(), bottom - at.y());
+    } else if (pe.pageHit.valid() && m_document->page(pe.pageHit.pageIndex)) {
+        const QSizeF size = m_document->page(pe.pageHit.pageIndex)->size;
+        m_lassoSelection.sourcePageIndex = pe.pageHit.pageIndex;
+        // Wider and taller than the page: lines that hang over its edge count too.
+        below = QRectF(-size.width(), pe.pageHit.pagePoint.y(), 3 * size.width(), 2 * size.height());
+    }
+    if (below.isValid()) {
+        m_lassoPath = QPolygonF(below);
+        const QSignalBlocker quiet(this);   // no selection menu for this selection
+        finalizeLassoSelection();
+    }
+    if (m_lassoSelection.isValid()) {
+        m_spaceDrag = true;
+        startSelectionTransform(HandleHit::Inside, pe.viewportPos);
+    } else {
+        updateHighlighterCursor();   // nothing under the press: the tool's cursor is back
+    }
+    return true;
+}
+
+bool DocumentViewport::spaceMove(const PointerEvent& pe)
+{
+    if (!m_spaceDrag) return false;
+    updateSelectionTransform(QPointF(m_transformStartPos.x(), pe.viewportPos.y()));   // up and down only
+    return true;
+}
+
+bool DocumentViewport::spaceRelease(const PointerEvent& pe)
+{
+    Q_UNUSED(pe);
+    if (!m_spaceDrag) return false;
+    finalizeSelectionTransform();
+    m_spaceDrag = false;
+    if (m_lassoSelection.hasTransform()) applySelectionTransform();   // commits and lets go
+    else clearLassoSelection();
+    m_pointerActive = false;
+    m_activeSource = PointerEvent::Unknown;
+    m_activeDrawingPage = -1;
+    updateHighlighterCursor();
+    update();
+    return true;
+}

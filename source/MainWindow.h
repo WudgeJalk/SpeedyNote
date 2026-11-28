@@ -240,6 +240,8 @@ public:
     
     // Theme/palette management
     static void updateApplicationPalette(); // Update Qt application palette based on dark mode
+    /// Show or hide the tab bar by the "tabs/alwaysShown" setting and the number of open notes.
+    void applyTabBarSetting();
     void openFileInNewTab(const QString &filePath); // Open file (PDF, .snb) in new tab via single-instance
     
     /**

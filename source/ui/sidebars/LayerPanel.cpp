@@ -4,6 +4,7 @@
 // Part of the SpeedyNote document architecture (Phase 3.0.3, 5.6.7, L.2)
 // ============================================================================
 
+#include "PanelFooter.h"
 #include "LayerPanel.h"
 #include "../widgets/LayerItemWidget.h"
 #include "../widgets/ActionBarButton.h"
@@ -46,12 +47,12 @@ void LayerPanel::setupUI()
 {
     // Main layout
     QVBoxLayout* mainLayout = new QVBoxLayout(this);
-    mainLayout->setContentsMargins(4, 4, 4, 4);
-    mainLayout->setSpacing(4);
+    mainLayout->setContentsMargins(0, 0, 0, 0);   // The footer goes edge to edge, as in the other panels
+    mainLayout->setSpacing(0);
 
     // Title
     m_titleLabel = new QLabel(tr("Layers"), this);
-    m_titleLabel->setStyleSheet("font-weight: bold;");
+    m_titleLabel->setStyleSheet("font-weight: bold; padding: 8px;");
     mainLayout->addWidget(m_titleLabel);
 
     // Phase L.2: Layer scroll area with custom widgets
@@ -124,6 +125,7 @@ void LayerPanel::setupUI()
 
     // Responsive button container (layout built by relayoutButtons)
     m_buttonContainer = new QWidget(this);
+    PanelFooter::apply(m_buttonContainer, m_darkMode);
     mainLayout->addWidget(m_buttonContainer);
     relayoutButtons();
 }
@@ -143,8 +145,8 @@ void LayerPanel::relayoutButtons()
     delete m_buttonContainer->layout();
 
     QVBoxLayout* vbox = new QVBoxLayout(m_buttonContainer);
-    vbox->setContentsMargins(0, 0, 0, 0);
-    vbox->setSpacing(4);
+    vbox->setContentsMargins(PanelFooter::Margin, PanelFooter::Margin, PanelFooter::Margin, PanelFooter::Margin);
+    vbox->setSpacing(PanelFooter::Spacing);
 
     if (compact) {
         QHBoxLayout* row1 = new QHBoxLayout();
@@ -1022,6 +1024,7 @@ void LayerPanel::setDarkMode(bool dark)
     // Update scroll area styling
     updateScrollAreaStyle();
     
+    PanelFooter::apply(m_buttonContainer, dark);
     // Update pill buttons
     m_selectAllButton->setDarkMode(dark);
     m_mergeButton->setDarkMode(dark);

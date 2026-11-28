@@ -4978,6 +4978,10 @@ private:
      * everywhere else.
      */
     void updateHighlighterCursor();
+public:
+    /// The next press and drag on the page moves everything under the press up or down.
+    void armSpaceTool();
+private:
     /// The open hand over the empty space around the pages (mouse or pen hover);
     /// the tool's cursor back over a page. True when @p viewportPos is off the pages.
     bool updateOffPageHoverCursor(const QPointF& viewportPos);
@@ -5321,6 +5325,13 @@ private:
     // ===== Ruler (DocumentViewportTools.cpp) =====
     /// A press on the ruler moves it, turns it (centre handle) or opens its
     /// menu (angle label). @return True when the ruler took the press.
+    // Add or remove space: the next press takes every line under it (active
+    // layer) as one lasso selection that follows the pen up or down. One undo step.
+    bool m_spaceArmed = false;
+    bool m_spaceDrag = false;
+    bool spacePress(const PointerEvent& pe);
+    bool spaceMove(const PointerEvent& pe);
+    bool spaceRelease(const PointerEvent& pe);
     bool rulerPress(const PointerEvent& pe);
     bool rulerMove(const PointerEvent& pe);
     bool rulerRelease(const PointerEvent& pe);

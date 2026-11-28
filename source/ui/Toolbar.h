@@ -151,6 +151,7 @@ signals:
     void objectInsertModeSelected(DocumentViewport::ObjectInsertMode mode);
     void straightLineToggled(bool enabled);
     void rulerToggled(bool visible);
+    void spaceClicked();   ///< Add or remove space
     void undoClicked();
     void redoClicked();
     void touchGestureModeChanged(int mode);
@@ -244,6 +245,7 @@ private:
     // Non-exclusive toggles
     ToggleButton *m_straightLineButton;
     ToggleButton *m_rulerButton;
+    ActionButton *m_spaceButton;
 
     // Action buttons
     ActionButton *m_undoButton;

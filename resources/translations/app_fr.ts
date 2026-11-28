@@ -1049,6 +1049,18 @@ NOTE : Sur Android, les carnets importés sont automatiquement ajoutés à la bi
 <context>
     <name>ControlPanelDialog</name>
     <message>
+        <source>Tabs</source>
+        <translation>Onglets</translation>
+    </message>
+    <message>
+        <source>Always show the tabs</source>
+        <translation>Toujours afficher les onglets</translation>
+    </message>
+    <message>
+        <source>Off: the tabs show when two notes or more are open, and a click on the note&apos;s name at the top shows or hides them. On: the tabs stay, and that click does nothing.</source>
+        <translation>Désactivé : les onglets s&apos;affichent dès que deux notes sont ouvertes, et un clic sur le nom de la note en haut les affiche ou les masque. Activé : les onglets restent, et ce clic ne fait rien.</translation>
+    </message>
+    <message>
         <source>Dashed lines, dotted lines and arrow heads</source>
         <translation>Traits, pointillés et pointes de flèche</translation>
     </message>
@@ -5345,6 +5357,10 @@ Essayez un autre terme de recherche.</translation>
 <context>
     <name>ShortcutManager</name>
     <message>
+        <source>Add or Remove Space</source>
+        <translation>Ajouter ou enlever de l&apos;espace</translation>
+    </message>
+    <message>
         <location filename="../../source/core/ShortcutManager.cpp" line="112"/>
         <source>Save Document</source>
         <translation>Enregistrer le document</translation>
@@ -6209,6 +6225,10 @@ et sélectionnez « Ajouter aux favoris » pour l&apos;ajouter ici.</translation
 </context>
 <context>
     <name>Toolbar</name>
+    <message>
+        <source>Add or remove space: press on the page, then drag down or up</source>
+        <translation>Ajouter ou enlever de l&apos;espace : appuyez sur la page, puis glissez vers le bas ou le haut</translation>
+    </message>
     <message>
         <location filename="../../source/ui/Toolbar.cpp" line="105"/>
         <source>Link Object Tool (Ctrl+.)</source>

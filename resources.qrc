@@ -131,6 +131,8 @@
     <file>resources/icons/undo_reversed.png</file>
     <file>resources/icons/multipen.png</file>
     <file>resources/icons/multipen_reversed.png</file>
+    <file>resources/icons/space.png</file>
+    <file>resources/icons/space_reversed.png</file>
     <file>resources/icons/redo.png</file>
     <file>resources/icons/redo_reversed.png</file>
     <file>resources/icons/shape.png</file>
