@@ -94,6 +94,7 @@ signals:
     
     // Center
     void filenameClicked();  // Toggle tab container visibility
+    void filenameDoubleClicked();  // Rename the note
     void saveStateClicked(); // The autosave sign
     
     // Right side
@@ -101,6 +102,9 @@ signals:
     void shareClicked();  // Opens the combined PDF/package export dialog
     void rightSidebarToggled(bool checked);  // Markdown notes
     void menuRequested();
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
     void setupUi();

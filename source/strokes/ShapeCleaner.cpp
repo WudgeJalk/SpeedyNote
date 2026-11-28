@@ -1117,9 +1117,9 @@ ArrowMatch splitOneStrokeArrow(const QVector<QPointF>& raw, qreal width, qreal p
         if (first >= 0 && i > first + wide) {
             break;
         }
-        if (turnDeg(p[i] - p[i - k], p[i + k] - p[i]) < 110.0
-            && (i < wide || i + wide >= p.size()
-                || turnDeg(p[i] - p[i - wide], p[i + wide] - p[i]) < 110.0)) {
+        const bool sharp = turnDeg(p[i] - p[i - k], p[i + k] - p[i]) >= 110.0;
+        if (!sharp && (i < wide || i + wide >= p.size()
+                       || turnDeg(p[i] - p[i - wide], p[i + wide] - p[i]) < 110.0)) {
             continue;
         }
         if (first < 0) {
@@ -1137,6 +1137,21 @@ ArrowMatch splitOneStrokeArrow(const QVector<QPointF>& raw, qreal width, qreal p
         // Measured before the turn: with a round turn, i can be past the tip.
         const int before = qMax(k, first - wide);
         const QPointF forward = unit(p[before] - p[before - k]);
+        if (!sharp) {
+            // A round turn is a head only when the barb runs back close along the
+            // line. A wide hook is a cane, a "J" or a "?".
+            // Measured from the line before the turn: i can be past the tip.
+            qreal sideways = 0.0, farthest = 0.0, back = 0.0;
+            for (int j = before; j < p.size(); ++j) {
+                const qreal along = QPointF::dotProduct(forward, p[j] - p[before]);
+                sideways = qMax(sideways, qAbs(cross(forward, p[j] - p[before])));
+                farthest = qMax(farthest, along);
+                back = qMax(back, farthest - along);
+            }
+            if (sideways > 0.4 * back) {
+                continue;
+            }
+        }
         qreal walked = 0.0;
         int best = -1;
         for (int j = 0; j < raw.size(); ++j) {

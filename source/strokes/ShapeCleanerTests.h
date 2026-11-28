@@ -888,6 +888,15 @@ private:
         if (split(p, &arrow) != 2 || arrow != StrokeStyle::Filled) {
             return fail("a line ending in a closed triangle must make a filled arrow");
         }
+        // A cane: a wide round hook and a short tail is no head.
+        p = {{0, 300}, {0, 150}, {0, 0}};
+        for (int a = 180; a <= 360; a += 20) {
+            p << QPointF(8, 0) + 8.0 * QPointF(std::cos(qDegreesToRadians(qreal(a))), std::sin(qDegreesToRadians(qreal(a))));
+        }
+        p << QPointF(16, 20);
+        if (split(p) >= 0) {
+            return fail("a cane is no arrow");
+        }
         // Not arrows: a closed triangle, letters that turn back (N, W, h, n).
         if (split({{0, 100}, {50, 0}, {100, 100}, {2, 99}}) >= 0) {
             return fail("a closed triangle is no arrow");

@@ -3492,6 +3492,18 @@ Cette action est irréversible.</translation>
 <context>
     <name>MainWindow</name>
     <message>
+        <source>Rename This Note...</source>
+        <translation>Renommer cette note...</translation>
+    </message>
+    <message>
+        <source>Two Notes Side by Side</source>
+        <translation>Deux notes côte à côte</translation>
+    </message>
+    <message>
+        <source>Open a second note first. Then choose this again: the note in front goes to the right side.</source>
+        <translation>Ouvrez d&apos;abord une deuxième note. Puis choisissez ceci à nouveau : la note affichée passe à droite.</translation>
+    </message>
+    <message>
         <location filename="../../source/MainWindow.cpp" line="3427"/>
         <location filename="../../source/MainWindow.cpp" line="3436"/>
         <location filename="../../source/MainWindow.cpp" line="3545"/>
@@ -4375,6 +4387,10 @@ Veuillez supprimer le mot de passe et réessayer.</translation>
 </context>
 <context>
     <name>NavigationBar</name>
+    <message>
+        <source>Click: show or hide the tabs. Double click: rename.</source>
+        <translation>Clic : afficher ou masquer les onglets. Double clic : renommer.</translation>
+    </message>
     <message>
         <location filename="../../source/ui/NavigationBar.cpp" line="28"/>
         <source>Back to Launcher</source>

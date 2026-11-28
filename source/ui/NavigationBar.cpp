@@ -7,6 +7,7 @@
 #include <QPainter>
 #include <QPixmap>
 #include <QDebug>
+#include <QEvent>
 
 NavigationBar::NavigationBar(QWidget *parent)
     : QWidget(parent)
@@ -66,7 +67,7 @@ void NavigationBar::setupUi()
     m_filenameButton->setText(tr("Untitled"));
     m_filenameButton->setFlat(true);
     m_filenameButton->setCursor(Qt::PointingHandCursor);
-    m_filenameButton->setToolTip(tr("Click to toggle tab bar"));
+    m_filenameButton->setToolTip(tr("Click: show or hide the tabs. Double click: rename."));
     // Style will be set in updateTheme()
     mainLayout->addWidget(m_filenameButton);
 
@@ -180,6 +181,7 @@ void NavigationBar::connectSignals()
     // Center
     connect(m_filenameButton, &QPushButton::clicked,
             this, &NavigationBar::filenameClicked);
+    m_filenameButton->installEventFilter(this);   // a double click renames
     connect(m_saveStateButton, &QPushButton::clicked,
             this, &NavigationBar::saveStateClicked);
 
@@ -194,6 +196,14 @@ void NavigationBar::connectSignals()
             this, &NavigationBar::menuRequested);
 }
 
+bool NavigationBar::eventFilter(QObject *watched, QEvent *event)
+{
+    if (watched == m_filenameButton && event->type() == QEvent::MouseButtonDblClick) {
+        emit filenameDoubleClicked();
+    }
+    return QWidget::eventFilter(watched, event);
+}
+
 void NavigationBar::setFilename(const QString &filename)
 {
     m_fullFilename = filename;
@@ -206,9 +216,9 @@ void NavigationBar::setFilename(const QString &filename)
     
     // Show full name in tooltip if elided
     if (displayName != filename) {
-        m_filenameButton->setToolTip(filename + "\n" + tr("Click to toggle tab bar"));
+        m_filenameButton->setToolTip(filename + "\n" + tr("Click: show or hide the tabs. Double click: rename."));
     } else {
-        m_filenameButton->setToolTip(tr("Click to toggle tab bar"));
+        m_filenameButton->setToolTip(tr("Click: show or hide the tabs. Double click: rename."));
     }
 }
 

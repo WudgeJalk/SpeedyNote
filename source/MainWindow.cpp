@@ -68,6 +68,8 @@
 #include <QPointer>
 #include "core/ToolType.h" // Include the header file where ToolType is defined
 #include "ui/SplitViewManager.h"
+#include "ui/launcher/LibraryView.h"
+#include "core/LibraryTree.h"
 #include "ui/TabManager.h"
 #include "ui/MenuPopup.h"
 #include "ui/TabBar.h"
@@ -1091,6 +1093,29 @@ void MainWindow::setupUi() {
     
     overflowMenu->addSeparator();
 
+    QAction *renameAction = overflowMenu->addAction(tr("Rename This Note..."));
+    connect(renameAction, &QAction::triggered, this, &MainWindow::renameCurrentNote);
+
+    // Split view was only in a tab's right-click menu and on Ctrl+\.
+    QAction *sideBySideAction = overflowMenu->addAction(tr("Two Notes Side by Side"));
+    sideBySideAction->setCheckable(true);
+    connect(overflowMenu, &QMenu::aboutToShow, sideBySideAction, [this, sideBySideAction]() {
+        sideBySideAction->setChecked(m_splitViewManager && m_splitViewManager->isSplit());
+    });
+    connect(sideBySideAction, &QAction::triggered, this, [this]() {
+        if (m_splitViewManager->isSplit()) {
+            m_splitViewManager->mergePanes();
+            return;
+        }
+        TabManager *tm = tabManager();
+        if (!tm || tm->tabCount() < 2) {
+            QMessageBox::information(this, tr("Two Notes Side by Side"),
+                tr("Open a second note first. Then choose this again: the note in front goes to the right side."));
+            return;
+        }
+        m_splitViewManager->splitTab(tm->currentIndex(), m_splitViewManager->activePane());
+    });
+
     // Per-document override panel. Replaces the standalone "OCR Language..."
     // item; the OCR language override now lives in its Language tab. The macOS
     // menu still opens showOcrLanguageDialog() directly (see MacMenuBar).
@@ -1260,6 +1285,7 @@ void MainWindow::setupUi() {
     connect(m_navigationBar, &NavigationBar::searchClicked, this, []() {
         if (QAction *find = ShortcutManager::instance()->action(QStringLiteral("app.find"))) find->trigger();
     });
+    connect(m_navigationBar, &NavigationBar::filenameDoubleClicked, this, &MainWindow::renameCurrentNote);
     connect(m_navigationBar, &NavigationBar::filenameClicked, this, [this]() {
         // Toggle tab bar visibility
 #ifdef SPEEDYNOTE_DEBUG
@@ -10443,4 +10469,23 @@ void MainWindow::mouseReleaseEvent(QMouseEvent *event) {
     }
     
     QMainWindow::mouseReleaseEvent(event);
+}
+
+void MainWindow::renameCurrentNote()
+{
+    DocumentViewport *vp = currentViewport();
+    Document *doc = vp ? vp->document() : nullptr;
+    if (!doc) return;
+    const QString path = m_documentManager->documentPath(doc);
+    // A note without a place gets its name with its place; a PDF opened directly has no note folder.
+    if (path.isEmpty() || m_documentManager->isUsingTempBundle(doc)
+        || !path.endsWith(QStringLiteral(".snb"), Qt::CaseInsensitive)) {
+        saveDocument();
+        return;
+    }
+    if (LibraryTree::displayName(path).isEmpty()) return;
+    // Saves and closes the note, renames its folder, and the library follows.
+    const QString renamed = LibraryView::renameWithPrompt(this, path);
+    // Cancelled: still open, this only shows it. A rename that failed closed it: it opens again.
+    openFileInNewTab(renamed.isEmpty() ? path : renamed);
 }
