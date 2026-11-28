@@ -7770,9 +7770,27 @@ public:
             return c;
         };
         const QVector<QPointF> before = centres();
+        // A picture under the press, a fixed one, and one above the press.
+        InsertedObject* pictures[3];
+        const qreal pictureY[3] = {320, 340, 50};
+        for (int i = 0; i < 3; ++i) {
+            auto image = std::make_unique<ImageObject>();
+            image->position = QPointF(400, pictureY[i]);
+            image->size = QSizeF(40, 40);
+            image->locked = i == 1;
+            pictures[i] = image.get();
+            doc->page(0)->addObject(std::move(image));
+        }
 
         vp.armSpaceTool();
         drag(QPointF(200, 200), QPointF(260, 250));   // down, and a little sideways
+        if (qAbs(pictures[0]->position.y() - 370) > 0.01 || pictures[1]->position.y() != 340
+            || pictures[2]->position.y() != 50 || pictures[0]->position.x() != 400) {
+            return fail("a picture under the press must go down 50; a fixed one and one above must stay");
+        }
+        vp.undo();   // the picture is its own undo step
+        if (qAbs(pictures[0]->position.y() - 320) > 0.01) return fail("undo must bring the picture back");
+        vp.redo();
         QVector<QPointF> now = centres();
         if (now.size() != 2 || qAbs(now[0].y() - before[0].y()) > 0.01 || qAbs(now[1].y() - before[1].y() - 50) > 0.01) {
             printf("(%g, %g) ", now.value(0).y(), now.value(1).y());
@@ -7785,9 +7803,10 @@ public:
         now = centres();
         if (now.size() != 2 || qAbs(now[1].y() - before[1].y() - 20) > 0.01) return fail("a drag up must bring the line up");
 
-        vp.undo();
+        vp.undo();   // the picture
+        vp.undo();   // the lines
         now = centres();
-        if (now.size() != 2 || qAbs(now[1].y() - before[1].y() - 50) > 0.01) return fail("one undo must take back one move");
+        if (now.size() != 2 || qAbs(now[1].y() - before[1].y() - 50) > 0.01) return fail("undo must take back the last move");
 
         drag(QPointF(100, 500), QPointF(300, 500));   // the pen is back
         if (layer->strokeCount() != 3) return fail("after the move the pen must write again");

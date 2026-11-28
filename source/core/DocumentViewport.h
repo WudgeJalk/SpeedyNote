@@ -5329,6 +5329,9 @@ private:
     // layer) as one lasso selection that follows the pen up or down. One undo step.
     bool m_spaceArmed = false;
     bool m_spaceDrag = false;
+    int m_spacePage = -1;        ///< Page of the press (-1 on an endless note)
+    qreal m_spaceLineY = 0;      ///< Page y of the press: what starts under it moves
+    qreal m_spacePressY = 0;     ///< Viewport y of the press
     bool spacePress(const PointerEvent& pe);
     bool spaceMove(const PointerEvent& pe);
     bool spaceRelease(const PointerEvent& pe);

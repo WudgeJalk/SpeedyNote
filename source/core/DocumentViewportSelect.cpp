@@ -274,6 +274,8 @@ bool DocumentViewport::spacePress(const PointerEvent& pe)
         else clearLassoSelection();
     }
     QRectF below;
+    m_spacePage = -1;
+    m_spacePressY = pe.viewportPos.y();
     if (m_document->isEdgeless()) {
         // shortcut: only the columns in view move, down to the last tile that
         // exists; take every column if users ask.
@@ -288,6 +290,8 @@ bool DocumentViewport::spacePress(const PointerEvent& pe)
     } else if (pe.pageHit.valid() && m_document->page(pe.pageHit.pageIndex)) {
         const QSizeF size = m_document->page(pe.pageHit.pageIndex)->size;
         m_lassoSelection.sourcePageIndex = pe.pageHit.pageIndex;
+        m_spacePage = pe.pageHit.pageIndex;
+        m_spaceLineY = pe.pageHit.pagePoint.y();
         // Wider and taller than the page: lines that hang over its edge count too.
         below = QRectF(-size.width(), pe.pageHit.pagePoint.y(), 3 * size.width(), 2 * size.height());
     }
@@ -297,9 +301,10 @@ bool DocumentViewport::spacePress(const PointerEvent& pe)
         finalizeLassoSelection();
     }
     if (m_lassoSelection.isValid()) {
-        m_spaceDrag = true;
         startSelectionTransform(HandleHit::Inside, pe.viewportPos);
-    } else {
+    }
+    m_spaceDrag = m_lassoSelection.isValid() || m_spacePage >= 0;   // a page can hold pictures only
+    if (!m_spaceDrag) {
         updateHighlighterCursor();   // nothing under the press: the tool's cursor is back
     }
     return true;
@@ -308,18 +313,39 @@ bool DocumentViewport::spacePress(const PointerEvent& pe)
 bool DocumentViewport::spaceMove(const PointerEvent& pe)
 {
     if (!m_spaceDrag) return false;
-    updateSelectionTransform(QPointF(m_transformStartPos.x(), pe.viewportPos.y()));   // up and down only
+    if (m_isTransformingSelection) {
+        updateSelectionTransform(QPointF(m_transformStartPos.x(), pe.viewportPos.y()));   // up and down only
+    }
     return true;
 }
 
 bool DocumentViewport::spaceRelease(const PointerEvent& pe)
 {
-    Q_UNUSED(pe);
     if (!m_spaceDrag) return false;
-    finalizeSelectionTransform();
+    if (m_isTransformingSelection) finalizeSelectionTransform();
     m_spaceDrag = false;
     if (m_lassoSelection.hasTransform()) applySelectionTransform();   // commits and lets go
-    else clearLassoSelection();
+    else if (m_lassoSelection.isValid()) clearLassoSelection();
+
+    // Pictures, text boxes and shapes that start under the press move too.
+    // shortcut: they jump when the pen lifts (the lines move live), each one is
+    // its own undo step, and an endless note moves lines only; group them when users ask.
+    const qreal dy = (pe.viewportPos.y() - m_spacePressY) / m_zoomLevel;
+    Page* page = m_spacePage >= 0 ? m_document->page(m_spacePage) : nullptr;
+    bool moved = false;
+    for (int i = 0; page && !qFuzzyIsNull(dy) && i < static_cast<int>(page->objects.size()); ++i) {
+        InsertedObject* obj = page->objects[i].get();
+        if (!obj || obj->locked || obj->position.y() < m_spaceLineY) continue;
+        const QPointF old = obj->position;
+        obj->position.ry() += dy;
+        pushObjectMoveUndo(obj, old, m_spacePage);
+        moved = true;
+    }
+    if (moved) {
+        m_document->markPageDirty(m_spacePage);
+        emit pageModified(m_spacePage);
+        emit documentModified();
+    }
     m_pointerActive = false;
     m_activeSource = PointerEvent::Unknown;
     m_activeDrawingPage = -1;
