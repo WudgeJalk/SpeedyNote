@@ -68,6 +68,7 @@
 #include <QPointer>
 #include "core/ToolType.h" // Include the header file where ToolType is defined
 #include "ui/SplitViewManager.h"
+#include "ui/dialogs/AddPagesDialog.h"
 #include "ui/launcher/LibraryView.h"
 #include "core/LibraryTree.h"
 #include "ui/TabManager.h"
@@ -8427,9 +8428,8 @@ void MainWindow::setupPagePanelActionBar()
     
     // Add Page: Add a new page at the end. Deliberately does not scroll there,
     // matching Ctrl+Shift+A: the user usually still wants the page they are on.
-    connect(m_pagePanelActionBar, &PagePanelActionBar::addPageClicked, this, [this]() {
-        appendPageToViewport(currentViewport());
-    });
+    // The "+" opens the one window for pages (empty ones, or a PDF, anywhere in the note).
+    connect(m_pagePanelActionBar, &PagePanelActionBar::addPageClicked, this, &MainWindow::showAddPagesDialog);
     
     // Insert Page: Insert a new page after the current page
     connect(m_pagePanelActionBar, &PagePanelActionBar::insertPageClicked, this, [this]() {
@@ -10502,4 +10502,95 @@ void MainWindow::applyTabBarSetting()
     // Full screen shows no tab bar: the rule applies when it ends.
     if (m_fullscreenChromeOn) m_tabsShownBeforeFullscreen = show;
     else tabs->setVisible(show);
+}
+
+void MainWindow::showAddPagesDialog()
+{
+    DocumentViewport *vp = currentViewport();
+    Document *doc = vp ? vp->document() : nullptr;
+    if (!doc || doc->isEdgeless() || doc->pageCount() < 1) return;
+    AddPagesDialog dialog(doc, vp->currentPageIndex(), this);
+    if (dialog.exec() != QDialog::Accepted) return;
+    if (currentViewport() != vp || vp->document() != doc) return;
+    const AddPagesChoice c = dialog.choice();
+    const int at = qBound(0, c.anchor + (c.below ? 1 : 0), doc->pageCount());
+
+    // One new note page at `index`: size, paper, and the two small text boxes.
+    // `number` is the page number it will have once every page is in.
+    const auto addNotePage = [&](int index, int number) {
+        Page *page = doc->insertPage(index);
+        if (!page) return;
+        const Page *before = c.sizeLikeNeighbour ? doc->page(index > 0 ? index - 1 : 1) : nullptr;
+        if (before && before->size.isValid() && before->size != page->size) {
+            page->size = before->size;
+            doc->setPageSize(index, before->size);
+        }
+        if (!c.paperLikeNote) {
+            Page::BackgroundType type = Page::BackgroundType::None;
+            int spacing = 0;
+            Paper::fallbackFor(c.paperId, &type, &spacing);
+            page->paperId = c.paperId == QLatin1String("plain") ? QString() : c.paperId;
+            page->backgroundType = type;
+            if (spacing > 0) page->gridSpacing = page->lineSpacing = spacing;
+            page->customImage.clear();
+            page->customBackground = QPixmap();
+        }
+        const auto addText = [page](const QString &text, const QRectF &rect, TextAlignment alignment) {
+            auto box = std::make_unique<TextBoxObject>();
+            box->position = rect.topLeft();
+            box->size = QSizeF(rect.width(), 1.0);
+            box->text = text;
+            box->fontSize = 12.0;
+            box->textLayoutVersion = TextBoxObject::CURRENT_TEXT_LAYOUT_VERSION;
+            box->showBorder = false;
+            box->backgroundColor = Qt::transparent;
+            box->alignment = alignment;
+            box->reflowToWidth(rect.width());
+            page->addObject(std::move(box));
+        };
+        const QSizeF size = page->size;
+        if (c.title) addText(c.titleText, QRectF(24, 12, size.width() - 48, 24), TextAlignment::Left);
+        if (c.pageNumber) {
+            addText(QString::number(number), QRectF(size.width() / 2 - 40, size.height() - 40, 80, 24),
+                    TextAlignment::Center);
+        }
+        doc->markPageDirty(index);
+    };
+
+    if (m_searchEngine) {
+        m_searchEngine->cancelAndWait();
+        m_searchEngine->clearCache();
+    }
+    if (!c.fromPdf) {
+        vp->clearUndoStacksFrom(at);   // the pages after shift: their undo steps would hit the wrong page
+        for (int i = 0; i < c.count; ++i) addNotePage(at + i, at + i + 1);
+    } else {
+        std::unique_ptr<Document> source =
+            Document::createForPdf(QFileInfo(c.pdfPath).completeBaseName(), c.pdfPath);
+        QStringList uuids;
+        if (source && source->isPdfLoaded()) {
+            for (int index : PageRangeSelectDialog::parseRange(c.pdfRange, source->pageCount())) {
+                const QString uuid = source->pageUuidAt(index);
+                if (!uuid.isEmpty()) uuids.append(uuid);
+            }
+        }
+        if (uuids.isEmpty() || !vp->importPagesWithUndo(source.get(), uuids, at)) {
+            QMessageBox::warning(this, tr("PDF Import"),
+                                 tr("The selected PDF pages could not be added to this document."));
+            return;
+        }
+        if (c.notesBetween > 0) {
+            const auto places = AddPagesDialog::notePlaces(at, static_cast<int>(uuids.size()),
+                                                           c.pdfGroup, c.notesBetween);
+            for (const QPair<int, int> &place : places) addNotePage(place.first, place.second);
+            vp->clearUndoStacksFrom(at);   // the import's undo step no longer knows where its pages are
+        }
+    }
+
+    refreshDestinationAfterImport(vp, at);
+    notifyPageStructureChanged(doc, at);
+    updatePdfSourceUi(vp);
+    if (tabManager() && tabManager()->currentIndex() >= 0) {
+        tabManager()->markTabModified(tabManager()->currentIndex(), true);
+    }
 }

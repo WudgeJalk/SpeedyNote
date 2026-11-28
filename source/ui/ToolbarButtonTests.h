@@ -15,6 +15,10 @@
 #include "subtoolbars/HighlighterSubToolbar.h"
 #include "subtoolbars/MarkerSubToolbar.h"
 #include "subtoolbars/PenSubToolbar.h"
+#include "dialogs/AddPagesDialog.h"
+#include "../core/Document.h"
+#include <QDir>
+#include <QRadioButton>
 #include "widgets/ThicknessPresetButton.h"
 #include "widgets/ColorListRow.h"
 #include "NavigationBar.h"
@@ -629,6 +633,39 @@ private slots:
         settings.remove(QStringLiteral("pen"));
         for (auto it = saved.constBegin(); it != saved.constEnd(); ++it)
             settings.setValue(it.key(), it.value());
+    }
+
+    // The Add pages window: its first state, and a picture to look at.
+    void testAddPagesDialog() {
+        auto doc = Document::createNew("Pages");
+        doc->addPage();
+        doc->addPage();
+        AddPagesDialog dialog(doc.get(), 1);
+        const AddPagesChoice c = dialog.choice();
+        QCOMPARE(c.anchor, 1);
+        QVERIFY(!c.fromPdf);
+        QVERIFY(c.count >= 1);
+        QVERIFY(dialog.m_create->isEnabled());
+        dialog.m_pdf->setChecked(true);          // no PDF yet: nothing to add
+        QVERIFY(!dialog.m_create->isEnabled());
+        dialog.m_blank->setChecked(true);
+        QCoreApplication::processEvents();
+        dialog.grab().save(QDir::tempPath() + QStringLiteral("/speedynote_addpages.png"));
+
+        // 5 PDF pages put in at 2, one note page after every 2: P P n P P n P n.
+        QStringList pages = {"a", "b", "P", "P", "P", "P", "P", "c"};
+        QList<int> numbers;
+        for (const QPair<int, int>& place : AddPagesDialog::notePlaces(2, 5, 2, 1)) {
+            pages.insert(place.first, QStringLiteral("n"));
+            numbers.append(place.second);
+        }
+        QCOMPARE(pages.join(QString()), QStringLiteral("abPPnPPnPnc"));
+        for (int number : numbers) QCOMPARE(pages.at(number - 1), QStringLiteral("n"));
+        QVERIFY(AddPagesDialog::notePlaces(2, 5, 2, 0).isEmpty());
+        // Two note pages after each PDF page.
+        pages = {"P", "P"};
+        for (const QPair<int, int>& place : AddPagesDialog::notePlaces(0, 2, 1, 2)) pages.insert(place.first, QStringLiteral("n"));
+        QCOMPARE(pages.join(QString()), QStringLiteral("PnnPnn"));
     }
 
     // Multi-pen: two named pens of one pen type keep their own sizes; the loop

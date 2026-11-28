@@ -1047,6 +1047,167 @@ NOTE : Sur Android, les carnets importés sont automatiquement ajoutés à la bi
     </message>
 </context>
 <context>
+    <name>AddPagesDialog</name>
+    <message>
+        <source>Add pages</source>
+        <translation>Ajouter des pages</translation>
+    </message>
+    <message>
+        <source>Where</source>
+        <translation>Où</translation>
+    </message>
+    <message>
+        <source>Under the chosen page</source>
+        <translation>Sous la page choisie</translation>
+    </message>
+    <message>
+        <source>Above the chosen page</source>
+        <translation>Au-dessus de la page choisie</translation>
+    </message>
+    <message>
+        <source>Tap a page on the left to choose it.</source>
+        <translation>Touchez une page à gauche pour la choisir.</translation>
+    </message>
+    <message>
+        <source>What</source>
+        <translation>Quoi</translation>
+    </message>
+    <message>
+        <source>Empty pages</source>
+        <translation>Pages vides</translation>
+    </message>
+    <message>
+        <source>Pages of a PDF</source>
+        <translation>Pages d&apos;un PDF</translation>
+    </message>
+    <message>
+        <source>How many:</source>
+        <translation>Combien :</translation>
+    </message>
+    <message>
+        <source>Choose a PDF...</source>
+        <translation>Choisir un PDF...</translation>
+    </message>
+    <message>
+        <source>No PDF chosen</source>
+        <translation>Aucun PDF choisi</translation>
+    </message>
+    <message>
+        <source>Its pages:</source>
+        <translation>Ses pages :</translation>
+    </message>
+    <message>
+        <source>&quot;all&quot;, or some pages: 1-5, 8, 12-20.</source>
+        <translation>« all » pour toutes, ou certaines pages : 1-5, 8, 12-20.</translation>
+    </message>
+    <message>
+        <source>After every</source>
+        <translation>Toutes les</translation>
+    </message>
+    <message>
+        <source>PDF pages, add</source>
+        <translation>pages PDF, ajouter</translation>
+    </message>
+    <message>
+        <source>note pages</source>
+        <translation>pages de notes</translation>
+    </message>
+    <message>
+        <source>The new note pages</source>
+        <translation>Les nouvelles pages de notes</translation>
+    </message>
+    <message>
+        <source>The paper of this note</source>
+        <translation>Le papier de cette note</translation>
+    </message>
+    <message>
+        <source>Plain</source>
+        <translation>Uni</translation>
+    </message>
+    <message>
+        <source>Paper:</source>
+        <translation>Papier :</translation>
+    </message>
+    <message>
+        <source>Same size as the page before</source>
+        <translation>Même taille que la page précédente</translation>
+    </message>
+    <message>
+        <source>A note page next to a PDF page gets the size of that PDF page. Off: the page size of this note.</source>
+        <translation>Une page de notes à côté d&apos;une page PDF prend la taille de cette page PDF. Désactivé : la taille de page de cette note.</translation>
+    </message>
+    <message>
+        <source>Write the page number on each page</source>
+        <translation>Écrire le numéro de page sur chaque page</translation>
+    </message>
+    <message>
+        <source>Write a title on each page:</source>
+        <translation>Écrire un titre sur chaque page :</translation>
+    </message>
+    <message>
+        <source>The number and the title are small text boxes: you can move, change or delete them. The number does not change when you move the page later.</source>
+        <translation>Le numéro et le titre sont de petites zones de texte : vous pouvez les déplacer, les modifier ou les supprimer. Le numéro ne change pas si vous déplacez la page plus tard.</translation>
+    </message>
+    <message>
+        <source>Add</source>
+        <translation>Ajouter</translation>
+    </message>
+    <message>
+        <source>Cancel</source>
+        <translation>Annuler</translation>
+    </message>
+    <message>
+        <source>Add Pages from PDF</source>
+        <translation>Ajouter des pages depuis un PDF</translation>
+    </message>
+    <message>
+        <source>PDF Files (*.pdf);;All Files (*)</source>
+        <translation>Fichiers PDF (*.pdf);;Tous les fichiers (*)</translation>
+    </message>
+    <message>
+        <source>This PDF could not be opened.</source>
+        <translation>Ce PDF n&apos;a pas pu être ouvert.</translation>
+    </message>
+    <message>
+        <source>under page %1</source>
+        <translation>sous la page %1</translation>
+    </message>
+    <message>
+        <source>above page %1</source>
+        <translation>au-dessus de la page %1</translation>
+    </message>
+    <message>
+        <source>Choose a PDF first.</source>
+        <translation>Choisissez d&apos;abord un PDF.</translation>
+    </message>
+    <message>
+        <source>No page of the PDF is in &quot;%1&quot;.</source>
+        <translation>Aucune page du PDF dans « %1 ».</translation>
+    </message>
+    <message>
+        <source>%1 PDF pages and %2 note pages, %3.</source>
+        <translation>%1 pages PDF et %2 pages de notes, %3.</translation>
+    </message>
+    <message>
+        <source>%1 PDF pages %2.</source>
+        <translation>%1 pages PDF %2.</translation>
+    </message>
+    <message numerus="yes">
+        <source>%n empty page(s) %1.</source>
+        <translation>
+            <numerusform>%n page vide %1.</numerusform>
+            <numerusform>%n pages vides %1.</numerusform>
+        </translation>
+    </message>
+    <message numerus="yes">
+        <source>%1 (%n pages)</source>
+        <translation>
+            <numerusform>%1 (%n page)</numerusform>
+            <numerusform>%1 (%n pages)</numerusform>
+        </translation>
+    </message>
+</context>
+<context>
     <name>ControlPanelDialog</name>
     <message>
         <source>Tabs</source>
@@ -4673,6 +4834,10 @@ Veuillez supprimer le mot de passe et réessayer.</translation>
 </context>
 <context>
     <name>PagePanelActionBar</name>
+    <message>
+        <source>Add pages: empty ones or a PDF, where you want</source>
+        <translation>Ajouter des pages : vides ou d&apos;un PDF, où vous voulez</translation>
+    </message>
     <message>
         <location filename="../../source/ui/actionbars/PagePanelActionBar.cpp" line="19"/>
         <source>Lock/Unlock Page Panel Action Bar</source>

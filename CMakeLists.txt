@@ -1215,6 +1215,7 @@ set(APP_SOURCES
     source/ui/dialogs/DocumentSettingsDialog.cpp
     source/ui/dialogs/SaveErrorBox.cpp
     source/ui/dialogs/VersionsDialog.cpp
+    source/ui/dialogs/AddPagesDialog.cpp
     source/ui/dialogs/NewNoteDialog.cpp
     source/ui/widgets/LibraryPlacePicker.cpp
     source/ui/widgets/CoverPicker.cpp

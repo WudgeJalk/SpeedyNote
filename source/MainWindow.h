@@ -466,6 +466,7 @@ private slots:
     void saveDocument();          // doc-1.1: Save document to JSON file (Ctrl+S)
     void saveDocumentAs();        // MAC.3: Always prompt for new path (Ctrl+Shift+S)
     void renameCurrentNote();     // Double click on the title, or the menu
+    void showAddPagesDialog();    // The "+" of the Pages panel
     void loadDocument();          // doc-1.2: Load document from JSON file (Ctrl+O)
     void addPageToDocument();     // doc-1.0: Add page at end of document (Ctrl+Shift+A)
     /// Append a blank page to @p viewport's document and refresh everything

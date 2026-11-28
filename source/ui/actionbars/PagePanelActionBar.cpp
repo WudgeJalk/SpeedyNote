@@ -223,7 +223,11 @@ void PagePanelActionBar::setInPanel()
         m_layout->addLayout(row);
     };
     addRow({m_searchButton, m_pageUpButton, m_wheelPicker, m_pageDownButton, m_layoutToggleButton});
-    addRow({m_selectButton, m_addPageButton, m_insertPageButton, m_addPdfPagesButton, m_deleteButton});
+    // One button to add (the user, 2026-11-28): the "+" opens the Add pages window.
+    m_insertPageButton->hide();
+    m_addPdfPagesButton->hide();
+    m_addPageButton->setToolTip(tr("Add pages: empty ones or a PDF, where you want"));
+    addRow({m_selectButton, m_addPageButton, m_deleteButton});
     setMinimumSize(0, 0);
     setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
     setupStyle();
