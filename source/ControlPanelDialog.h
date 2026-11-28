@@ -16,6 +16,7 @@
 
 // Forward declarations
 class MainWindow;
+class QAbstractButton;
 class QVBoxLayout;
 class QListWidget;
 class QScrollArea;
@@ -77,8 +78,13 @@ private:
     QComboBox *m_categoryCombo = nullptr;   ///< Same choice, for a narrow window
     QList<QScrollArea *> m_pages;           ///< One per Category
     QWidgetList m_searchHits;               ///< Highlighted by the search box
-    /// Append `content` to a category's page, under `title` if it has none of its own.
+    /// Append `content` to a category's page. With a title (its own as a group
+    /// box, or `title`) it is a sub-section: a header that folds it, closed at first.
     void addSection(Category category, QWidget *content, const QString &title = QString());
+    struct Fold { QAbstractButton *header; QWidget *content; };
+    QList<Fold> m_folds;
+    /// Unfold the sub-section that holds `widget`.
+    void openFoldOf(QWidget *widget);
     /// Open the category that holds `widget` and scroll to it.
     void showSetting(QWidget *widget);
     /// Search box: keep the categories with a match, open and mark the first.

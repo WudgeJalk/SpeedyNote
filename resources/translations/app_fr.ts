@@ -1049,6 +1049,14 @@ NOTE : Sur Android, les carnets importés sont automatiquement ajoutés à la bi
 <context>
     <name>ControlPanelDialog</name>
     <message>
+        <source>Page and background</source>
+        <translation>Page et fond</translation>
+    </message>
+    <message>
+        <source>Pen buttons and palm rejection</source>
+        <translation>Boutons du stylet et rejet de la paume</translation>
+    </message>
+    <message>
         <source>Multi-pen</source>
         <translation>Multi-stylo</translation>
     </message>

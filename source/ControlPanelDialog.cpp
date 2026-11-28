@@ -37,6 +37,7 @@
 #include <QStandardPaths>
 #include <QSettings>
 #include <QTimer>
+#include <QToolButton>
 #include <QTabletEvent>
 #include <QDesktopServices>
 #include <QUrl>
@@ -309,6 +310,14 @@ ControlPanelDialog::ControlPanelDialog(MainWindow *mainWindow, QWidget *parent)
     const QList<QPushButton *> buttons = findChildren<QPushButton *>();
     for (QPushButton *button : buttons) button->setAutoDefault(false);
 
+    for (QScrollArea *page : std::as_const(m_pages)) {   // A lone sub-section has nothing to hide behind
+        QAbstractButton *only = nullptr;
+        int count = 0;
+        for (const Fold &fold : std::as_const(m_folds)) {
+            if (page->widget()->isAncestorOf(fold.header)) { only = fold.header; ++count; }
+        }
+        if (count == 1) only->setChecked(true);
+    }
     m_categoryList->setCurrentRow(0);
     // Every page scrolls, so the size is a choice, capped by the screen.
     DialogSizing::openAtSize(this, QSize(920, 700));
@@ -323,12 +332,36 @@ ControlPanelDialog::ControlPanelDialog(MainWindow *mainWindow, QWidget *parent)
 void ControlPanelDialog::addSection(Category category, QWidget *content, const QString &title)
 {
     QVBoxLayout *layout = static_cast<QVBoxLayout *>(m_pages[category]->widget()->layout());
-    if (!title.isEmpty()) {
-        QLabel *label = new QLabel(title);
-        label->setStyleSheet("font-size: 16px; font-weight: bold;");
-        layout->insertWidget(layout->count() - 1, label);
+    QGroupBox *group = qobject_cast<QGroupBox *>(content);
+    const QString name = !title.isEmpty() ? title : group ? group->title() : QString();
+    if (!name.isEmpty()) {
+        // A closed sub-section costs no layout and no paint: the page stays short.
+        if (group) group->setTitle(QString());   // The header says it
+        QToolButton *header = new QToolButton;
+        header->setText(name);
+        header->setCheckable(true);
+        header->setArrowType(Qt::RightArrow);
+        header->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+        header->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        header->setMinimumHeight(40);
+        header->setStyleSheet("QToolButton { font-size: 15px; font-weight: bold; text-align: left;"
+                              " border: none; padding-left: 4px; }");
+        connect(header, &QToolButton::toggled, content, [header, content](bool open) {
+            content->setVisible(open);
+            header->setArrowType(open ? Qt::DownArrow : Qt::RightArrow);
+        });
+        content->hide();
+        m_folds.append({header, content});
+        layout->insertWidget(layout->count() - 1, header);
     }
     layout->insertWidget(layout->count() - 1, content);   // Before the stretch
+}
+
+void ControlPanelDialog::openFoldOf(QWidget *widget)
+{
+    for (const Fold &fold : std::as_const(m_folds)) {
+        if (fold.content == widget || fold.content->isAncestorOf(widget)) fold.header->setChecked(true);
+    }
 }
 
 void ControlPanelDialog::showSetting(QWidget *widget)
@@ -337,6 +370,7 @@ void ControlPanelDialog::showSetting(QWidget *widget)
         QScrollArea *page = m_pages[i];
         if (!page->widget()->isAncestorOf(widget)) continue;
         m_categoryList->setCurrentRow(i);
+        openFoldOf(widget);
         // Queued: a page has its layout only once it is shown.
         QTimer::singleShot(0, widget, [page, widget]() {
             page->verticalScrollBar()->setValue(widget->mapTo(page->widget(), QPoint(0, 0)).y() - 8);
@@ -368,6 +402,7 @@ void ControlPanelDialog::filterSettings(const QString &text)
                 found = true;
                 m_searchHits << widget;
                 setSearchHit(widget, true);
+                openFoldOf(widget);
             }
             if (i == Shortcuts) {   // The commands are rows of a tree, not widgets
                 const QList<QTreeWidgetItem *> rows =
@@ -1519,7 +1554,7 @@ void ControlPanelDialog::createBackgroundTab() {
     // Initialize page size display
     onPageSizePresetChanged(pageSizeCombo->currentIndex());
     
-    addSection(PageCategory, backgroundTab);
+    addSection(PageCategory, backgroundTab, tr("Page and background"));
 }
 
 // ============================================================================
@@ -2658,7 +2693,7 @@ void ControlPanelDialog::createCacheTab() {
     // Add stretch to push everything to the top
     layout->addStretch();
 
-    addSection(Files, cacheTab);
+    addSection(Files, cacheTab, tr("Cache"));
 }
 
 
@@ -2794,7 +2829,7 @@ void ControlPanelDialog::createLanguageTab() {
     // Add stretch to push everything to the top
     layout->addStretch();
     
-    addSection(Interface, languageTab);
+    addSection(Interface, languageTab, tr("Language"));
 }
 
 
@@ -2920,7 +2955,7 @@ void ControlPanelDialog::createStylusTab() {
 #endif
 
     layout->addStretch();
-    addSection(PenTouch, stylusTab);
+    addSection(PenTouch, stylusTab, tr("Pen buttons and palm rejection"));
 }
 
 /*
