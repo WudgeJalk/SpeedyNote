@@ -1049,6 +1049,22 @@ NOTE : Sur Android, les carnets importés sont automatiquement ajoutés à la bi
 <context>
     <name>ControlPanelDialog</name>
     <message>
+        <source>Dashed lines, dotted lines and arrow heads</source>
+        <translation>Traits, pointillés et pointes de flèche</translation>
+    </message>
+    <message>
+        <source>Arrow head length:</source>
+        <translation>Longueur de la pointe de flèche :</translation>
+    </message>
+    <message>
+        <source>Arrow head width:</source>
+        <translation>Largeur de la pointe de flèche :</translation>
+    </message>
+    <message>
+        <source>100 % is the usual head. Changes every arrow, old ones too. If a bigger head of an old arrow looks cut, open the note again.</source>
+        <translation>100 % est la pointe habituelle. Change toutes les flèches, les anciennes aussi. Si une pointe agrandie d&apos;une ancienne flèche paraît coupée, rouvrez la note.</translation>
+    </message>
+    <message>
         <source>Page and background</source>
         <translation>Page et fond</translation>
     </message>

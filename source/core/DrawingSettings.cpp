@@ -73,11 +73,15 @@ bool DrawingSettings::reload()
     look.dashLength = ratio("drawing/dashLength", defaults.dashLength);
     look.dashGap = ratio("drawing/dashGap", defaults.dashGap);
     look.dotGap = ratio("drawing/dotGap", defaults.dotGap);
+    look.headLength = number("drawing/arrowLength", 100, 50, 200) / 100.0;
+    look.headWidth = number("drawing/arrowWidth", 100, 50, 200) / 100.0;
 
     StrokeStyle::Look& current = StrokeStyle::look();
     const bool changed = look.dashLength != current.dashLength
                          || look.dashGap != current.dashGap
-                         || look.dotGap != current.dotGap;
+                         || look.dotGap != current.dotGap
+                         || look.headLength != current.headLength
+                         || look.headWidth != current.headWidth;
     if (changed) {
         current = look;
         ++StrokeStyle::generation();

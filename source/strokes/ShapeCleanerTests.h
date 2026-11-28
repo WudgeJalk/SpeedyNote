@@ -872,6 +872,17 @@ private:
         if (split(p, &arrow) != 2 || arrow != StrokeStyle::Open) {
             return fail("a narrow back-and-forth head must make an open arrow");
         }
+        // The user's picture of 2026-11-28: the turn back is a small round U, then one barb.
+        p = line;
+        for (int a = -75; a <= 105; a += 20) {   // half a circle of radius 6, below the end
+            p << QPointF(300, 246) + 6.0 * QPointF(std::cos(qDegreesToRadians(qreal(a))), std::sin(qDegreesToRadians(qreal(a))));
+        }
+        p << QPointF(250, 259);
+        const int roundTip = split(p, &arrow);
+        if (roundTip < 4 || roundTip > 9 || arrow != StrokeStyle::Open) {
+            printf("(tip %d, arrow %d) ", roundTip, arrow);
+            return fail("a line with a rounded turn back and one barb must be an arrow");
+        }
         p = line;
         p << QPointF(280, 228) << QPointF(282, 254) << QPointF(300, 241);   // closed triangle
         if (split(p, &arrow) != 2 || arrow != StrokeStyle::Filled) {

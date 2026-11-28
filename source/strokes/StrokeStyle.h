@@ -79,16 +79,21 @@ inline qreal pressureForFactor(quint8 penType, qreal f)
     }
 }
 
-/// Length of an arrow head for a stroke of base thickness `base`.
-inline qreal arrowLength(qreal base) { return 4 * base + 6; }
-
-/// Dash and dot spacing, each a multiple of the base thickness (user settings).
+/// Dash and dot spacing, each a multiple of the base thickness, and the size
+/// of arrow heads (user settings).
 struct Look {
     qreal dashLength = 3;
     qreal dashGap = 2.5;
     qreal dotGap = 2;
+    qreal headLength = 1.0;   ///< "drawing/arrowLength" / 100: 1 = the usual head
+    qreal headWidth = 1.0;    ///< "drawing/arrowWidth" / 100: 1 = wings 30 degrees each way
 };
 inline Look& look() { static Look l; return l; }
+
+/// Length of an arrow head for a stroke of base thickness `base`.
+inline qreal arrowLength(qreal base) { return (4 * base + 6) * look().headLength; }
+/// How far a wing ends from the tip: a wide head reaches further than its length.
+inline qreal arrowReach(qreal base) { return arrowLength(base) * qMax(1.0, std::hypot(0.866, 0.5 * look().headWidth)); }
 /// Bumped when look() changes, so stroke caches rebuild.
 inline int& generation() { static int g = 0; return g; }
 

@@ -150,6 +150,8 @@ private:
     QSpinBox *levelAngleSpin = nullptr;
     QCheckBox *handArrowsCheck = nullptr;
     QCheckBox *handArrowTwoStrokesCheck = nullptr;
+    QSpinBox *arrowLengthSpin = nullptr;
+    QSpinBox *arrowWidthSpin = nullptr;
     QComboBox *handArrowHeadCombo = nullptr;
     QSpinBox *laserHoldSpin = nullptr;
     QSpinBox *laserFadeSpin = nullptr;

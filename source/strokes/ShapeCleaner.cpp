@@ -1108,12 +1108,18 @@ ArrowMatch splitOneStrokeArrow(const QVector<QPointF>& raw, qreal width, qreal p
     const qreal step = qMax(total / 120.0, 0.5 * px);
     const QVector<QPointF> p = resample(raw, step);
     constexpr int k = 2;
+    // A quick hand rounds the turn back into a small U, a few line widths
+    // round: look across twice that too (at most a tenth of the stroke), where
+    // the U is a turn again.
+    const int wide = qBound(k, static_cast<int>(std::ceil((8.0 * width + 8.0 * px) / step)), 12);
     int first = -1;   // the first sharp turn back: the tip, or the stroke is no arrow
     for (int i = k; i + k < p.size(); ++i) {
-        if (first >= 0 && i > first + k) {
+        if (first >= 0 && i > first + wide) {
             break;
         }
-        if (turnDeg(p[i] - p[i - k], p[i + k] - p[i]) < 110.0) {
+        if (turnDeg(p[i] - p[i - k], p[i + k] - p[i]) < 110.0
+            && (i < wide || i + wide >= p.size()
+                || turnDeg(p[i] - p[i - wide], p[i + wide] - p[i]) < 110.0)) {
             continue;
         }
         if (first < 0) {
@@ -1128,12 +1134,14 @@ ArrowMatch splitOneStrokeArrow(const QVector<QPointF>& raw, qreal width, qreal p
             continue;
         }
         // The raw point near there that goes farthest forward is the tip.
-        const QPointF forward = unit(p[i] - p[i - k]);
+        // Measured before the turn: with a round turn, i can be past the tip.
+        const int before = qMax(k, first - wide);
+        const QPointF forward = unit(p[before] - p[before - k]);
         qreal walked = 0.0;
         int best = -1;
         for (int j = 0; j < raw.size(); ++j) {
             walked += j > 0 ? dist(raw[j - 1], raw[j]) : 0.0;
-            if (qAbs(walked - i * step) <= 3.0 * step
+            if (qAbs(walked - i * step) <= (wide + 1.0) * step
                 && (best < 0 || QPointF::dotProduct(raw[j] - raw[best], forward) > 0.0)) {
                 best = j;
             }

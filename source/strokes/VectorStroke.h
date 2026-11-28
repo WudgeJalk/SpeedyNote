@@ -73,7 +73,7 @@ struct VectorStroke {
     /// How far an arrow head can reach from the line (0 without arrows).
     qreal arrowPad() const {
         return (arrowStart != StrokeStyle::None || arrowEnd != StrokeStyle::None)
-                   ? StrokeStyle::arrowLength(baseThickness) + baseThickness
+                   ? StrokeStyle::arrowReach(baseThickness) + baseThickness
                    : 0.0;
     }
 

@@ -178,16 +178,17 @@ void addArrow(const VectorStroke& s, bool atEnd, quint8 kind, StrokePolygonResul
     // Wings leave the tip backwards, turned 30 degrees each way.
     static const qreal kCos = std::cos(qDegreesToRadians(30.0));
     static const qreal kSin = std::sin(qDegreesToRadians(30.0));
+    // The head width setting moves the wing ends sideways; the length along the line stays.
     const QPointF b(-dir.x(), -dir.y());
-    const QPointF wings[2] = {
-        QPointF(b.x() * kCos - b.y() * kSin, b.x() * kSin + b.y() * kCos),
-        QPointF(b.x() * kCos + b.y() * kSin, -b.x() * kSin + b.y() * kCos),
-    };
+    const QPointF side = QPointF(-b.y(), b.x()) * (kSin * StrokeStyle::look().headWidth);
+    const QPointF wings[2] = {b * kCos + side, b * kCos - side};
+    const qreal wingLen = std::hypot(wings[0].x(), wings[0].y());
+    const qreal halfAngleSin = std::hypot(side.x(), side.y()) / wingLen;
 
     if (kind == StrokeStyle::Filled) {
         // The tip sits past the line end so the line's round end stays inside.
         QPolygonF tri;
-        tri << tip + dir * (hw / kSin) << tip + wings[0] * length << tip + wings[1] * length;
+        tri << tip + dir * (hw / halfAngleSin) << tip + wings[0] * length << tip + wings[1] * length;
         orientLikeRibbon(tri);
         r.pieces.append(tri);
         return;
@@ -195,7 +196,7 @@ void addArrow(const VectorStroke& s, bool atEnd, quint8 kind, StrokePolygonResul
     for (const QPointF& w : wings) {
         // A short ribbon from the tip along the wing, built like the stroke's.
         const QPointF end = tip + w * length;
-        const QPointF perp(-w.y() * hw, w.x() * hw);
+        const QPointF perp = QPointF(-w.y(), w.x()) * (hw / wingLen);
         QPolygonF quad;
         quad << tip + perp << end + perp << end - perp << tip - perp;
         r.pieces.append(quad);

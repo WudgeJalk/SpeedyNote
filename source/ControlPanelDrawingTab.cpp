@@ -43,7 +43,7 @@ void ControlPanelDialog::createDrawingTab()
     QVBoxLayout* layout = new QVBoxLayout(drawingTab);
 
     // --- Lines: dash and dot spacing ---
-    QGroupBox* linesGroup = new QGroupBox(tr("Dashed and dotted lines"), drawingTab);
+    QGroupBox* linesGroup = new QGroupBox(tr("Dashed lines, dotted lines and arrow heads"), drawingTab);
     QFormLayout* linesLayout = new QFormLayout(linesGroup);
     const StrokeStyle::Look& look = StrokeStyle::look();
     const auto ratioSpin = [linesGroup](qreal value) {
@@ -65,6 +65,20 @@ void ControlPanelDialog::createDrawingTab()
         tr("Measured in widths of the line itself, so a thicker line gets longer "
            "dashes and wider gaps. Changes every dashed and dotted line, old ones too."),
         linesGroup));
+    // Same bounds as DrawingSettings::reload()
+    for (QSpinBox** spin : {&arrowLengthSpin, &arrowWidthSpin}) {
+        *spin = new QSpinBox(linesGroup);
+        (*spin)->setRange(50, 200);
+        (*spin)->setSingleStep(10);
+        (*spin)->setSuffix(tr(" %"));
+    }
+    arrowLengthSpin->setValue(qRound(look.headLength * 100));
+    arrowWidthSpin->setValue(qRound(look.headWidth * 100));
+    linesLayout->addRow(tr("Arrow head length:"), arrowLengthSpin);
+    linesLayout->addRow(tr("Arrow head width:"), arrowWidthSpin);
+    linesLayout->addRow(hintLabel(
+        tr("100 % is the usual head. Changes every arrow, old ones too. If a bigger head of an "
+           "old arrow looks cut, open the note again."), linesGroup));
     layout->addWidget(linesGroup);
 
     // --- Eraser: filter and auto deselect (also in the eraser window) ---
@@ -434,6 +448,8 @@ void ControlPanelDialog::applyDrawingTab()
     settings.setValue("drawing/dashLength", dashLengthSpin->value());
     settings.setValue("drawing/dashGap", dashGapSpin->value());
     settings.setValue("drawing/dotGap", dotGapSpin->value());
+    settings.setValue("drawing/arrowLength", arrowLengthSpin->value());
+    settings.setValue("drawing/arrowWidth", arrowWidthSpin->value());
     settings.setValue("drawing/eraserPen", eraserPenCheck->isChecked());
     settings.setValue("drawing/eraserMarker", eraserMarkerCheck->isChecked());
     settings.setValue("drawing/eraserAutoDeselect", eraserAutoDeselectCheck->isChecked());
