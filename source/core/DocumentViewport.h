@@ -68,6 +68,8 @@ class TextBoxFormatBar;
  * so undo/redo remains lossless if its background asset write fails.
  */
 struct UndoAction {
+    /// Not 0: entries pushed together with one number are undone and redone as one step.
+    int group = 0;
     enum Type {
         // ===== Stroke types =====
         AddStroke,
@@ -946,6 +948,12 @@ public:
      * @brief Undo the last action (global stack, both paged and edgeless).
      */
     void undo();
+private:
+    void undoStep();   ///< One entry of the stack
+    void redoStep();
+    int m_undoGroup = 0;       ///< Not 0: pushUndoAction() puts new entries in this group
+    int m_lastUndoGroup = 0;
+public:
     
     /**
      * @brief Redo the last undone action (global stack, both paged and edgeless).
@@ -5330,7 +5338,7 @@ private:
     bool m_spaceArmed = false;
     bool m_spaceDrag = false;
     int m_spacePage = -1;        ///< Page of the press (-1 on an endless note)
-    qreal m_spaceLineY = 0;      ///< Page y of the press: what starts under it moves
+    QRectF m_spaceBelow;         ///< What starts in here moves (page units; document units on an endless note)
     qreal m_spacePressY = 0;     ///< Viewport y of the press
     bool spacePress(const PointerEvent& pe);
     bool spaceMove(const PointerEvent& pe);

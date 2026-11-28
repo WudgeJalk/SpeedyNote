@@ -18532,6 +18532,7 @@ void DocumentViewport::commitEraserGesture()
 void DocumentViewport::pushUndoAction(const UndoAction& action)
 {
     m_undoStack.push(action);
+    if (m_undoGroup) m_undoStack.top().group = m_undoGroup;
     trimUndoStack();
     m_redoStack.clear();
     emit undoAvailableChanged(canUndo());
@@ -18999,6 +19000,27 @@ static QSet<int> collectAffectedPages(const UndoAction& action)
 
 void DocumentViewport::undo()
 {
+    // A group (the space tool: lines and pictures) goes back as one step.
+    const int group = m_undoStack.isEmpty() ? 0 : m_undoStack.top().group;
+    for (;;) {
+        const int before = m_undoStack.size();
+        undoStep();
+        if (!group || m_undoStack.size() >= before || m_undoStack.isEmpty() || m_undoStack.top().group != group) break;
+    }
+}
+
+void DocumentViewport::redo()
+{
+    const int group = m_redoStack.isEmpty() ? 0 : m_redoStack.top().group;
+    for (;;) {
+        const int before = m_redoStack.size();
+        redoStep();
+        if (!group || m_redoStack.size() >= before || m_redoStack.isEmpty() || m_redoStack.top().group != group) break;
+    }
+}
+
+void DocumentViewport::undoStep()
+{
     closeTextBoxFormatPopups(true);
     closeLinkObjectBarPopups(true);
     finishTextBoxFormatInteraction(true);
@@ -19464,7 +19486,7 @@ void DocumentViewport::undo()
     update();
 }
 
-void DocumentViewport::redo()
+void DocumentViewport::redoStep()
 {
     closeTextBoxFormatPopups(true);
     closeLinkObjectBarPopups(true);

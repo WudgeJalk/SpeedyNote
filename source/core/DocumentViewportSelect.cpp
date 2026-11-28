@@ -291,10 +291,10 @@ bool DocumentViewport::spacePress(const PointerEvent& pe)
         const QSizeF size = m_document->page(pe.pageHit.pageIndex)->size;
         m_lassoSelection.sourcePageIndex = pe.pageHit.pageIndex;
         m_spacePage = pe.pageHit.pageIndex;
-        m_spaceLineY = pe.pageHit.pagePoint.y();
         // Wider and taller than the page: lines that hang over its edge count too.
         below = QRectF(-size.width(), pe.pageHit.pagePoint.y(), 3 * size.width(), 2 * size.height());
     }
+    m_spaceBelow = below;
     if (below.isValid()) {
         m_lassoPath = QPolygonF(below);
         const QSignalBlocker quiet(this);   // no selection menu for this selection
@@ -303,7 +303,7 @@ bool DocumentViewport::spacePress(const PointerEvent& pe)
     if (m_lassoSelection.isValid()) {
         startSelectionTransform(HandleHit::Inside, pe.viewportPos);
     }
-    m_spaceDrag = m_lassoSelection.isValid() || m_spacePage >= 0;   // a page can hold pictures only
+    m_spaceDrag = below.isValid();   // also with pictures only under the press
     if (!m_spaceDrag) {
         updateHighlighterCursor();   // nothing under the press: the tool's cursor is back
     }
@@ -324,26 +324,63 @@ bool DocumentViewport::spaceRelease(const PointerEvent& pe)
     if (!m_spaceDrag) return false;
     if (m_isTransformingSelection) finalizeSelectionTransform();
     m_spaceDrag = false;
+    m_undoGroup = ++m_lastUndoGroup;   // the lines and the pictures: one undo step
     if (m_lassoSelection.hasTransform()) applySelectionTransform();   // commits and lets go
     else if (m_lassoSelection.isValid()) clearLassoSelection();
 
     // Pictures, text boxes and shapes that start under the press move too.
-    // shortcut: they jump when the pen lifts (the lines move live), each one is
-    // its own undo step, and an endless note moves lines only; group them when users ask.
+    // shortcut: they jump when the pen lifts (the lines move live); move them
+    // in the lasso's picture if users ask.
     const qreal dy = (pe.viewportPos.y() - m_spacePressY) / m_zoomLevel;
-    Page* page = m_spacePage >= 0 ? m_document->page(m_spacePage) : nullptr;
-    bool moved = false;
-    for (int i = 0; page && !qFuzzyIsNull(dy) && i < static_cast<int>(page->objects.size()); ++i) {
-        InsertedObject* obj = page->objects[i].get();
-        if (!obj || obj->locked || obj->position.y() < m_spaceLineY) continue;
-        const QPointF old = obj->position;
-        obj->position.ry() += dy;
-        pushObjectMoveUndo(obj, old, m_spacePage);
-        moved = true;
+    const bool edgeless = m_document->isEdgeless();
+    const auto origin = [](Document::TileCoord t) {
+        return QPointF(t.first, t.second) * qreal(Document::EDGELESS_TILE_SIZE);
+    };
+    struct Under { InsertedObject* obj; Document::TileCoord tile; };
+    QVector<Under> under;
+    if (!qFuzzyIsNull(dy) && edgeless) {
+        for (const Document::TileCoord& coord : m_document->allLoadedTileCoords()) {
+            Page* tile = m_document->getTile(coord.first, coord.second);
+            for (int i = 0; tile && i < static_cast<int>(tile->objects.size()); ++i) {
+                InsertedObject* obj = tile->objects[i].get();
+                if (obj && !obj->locked && m_spaceBelow.contains(origin(coord) + obj->position)) under.append({obj, coord});
+            }
+        }
+    } else if (Page* page = !qFuzzyIsNull(dy) && m_spacePage >= 0 ? m_document->page(m_spacePage) : nullptr) {
+        for (const auto& owned : page->objects) {
+            if (owned && !owned->locked && owned->position.y() >= m_spaceBelow.top()) under.append({owned.get(), {0, 0}});
+        }
     }
-    if (moved) {
-        m_document->markPageDirty(m_spacePage);
-        emit pageModified(m_spacePage);
+    for (const Under& item : under) {
+        const QPointF old = item.obj->position;
+        Document::TileCoord to = item.tile;
+        if (edgeless) {
+            // A picture lives in the tile of its top left corner (as after a drag).
+            const QPointF doc = origin(item.tile) + old + QPointF(0, dy);
+            to = m_document->tileCoordForPoint(doc);
+            if (to != item.tile) {
+                Page* from = m_document->getTile(item.tile.first, item.tile.second);
+                Page* dest = m_document->getOrCreateTile(to.first, to.second);
+                std::unique_ptr<InsertedObject> taken = from && dest ? from->extractObject(item.obj->id) : nullptr;
+                if (!taken) continue;
+                taken->position = doc - origin(to);
+                dest->addObject(std::move(taken));
+            } else {
+                item.obj->position = doc - origin(to);
+            }
+            m_document->markTileDirty(item.tile);
+            m_document->markTileDirty(to);
+        } else {
+            item.obj->position.ry() += dy;
+        }
+        pushObjectMoveUndo(item.obj, old, m_spacePage, item.tile, to);
+    }
+    m_undoGroup = 0;
+    if (!under.isEmpty()) {
+        if (!edgeless) {
+            m_document->markPageDirty(m_spacePage);
+            emit pageModified(m_spacePage);
+        }
         emit documentModified();
     }
     m_pointerActive = false;

@@ -7788,10 +7788,17 @@ public:
             || pictures[2]->position.y() != 50 || pictures[0]->position.x() != 400) {
             return fail("a picture under the press must go down 50; a fixed one and one above must stay");
         }
-        vp.undo();   // the picture is its own undo step
-        if (qAbs(pictures[0]->position.y() - 320) > 0.01) return fail("undo must bring the picture back");
-        vp.redo();
+        vp.undo();   // the lines and the picture: one step
         QVector<QPointF> now = centres();
+        if (qAbs(pictures[0]->position.y() - 320) > 0.01 || qAbs(now[1].y() - before[1].y()) > 0.01) {
+            return fail("one undo must bring the picture and the line back");
+        }
+        vp.redo();
+        now = centres();
+        if (qAbs(pictures[0]->position.y() - 370) > 0.01 || qAbs(now[1].y() - before[1].y() - 50) > 0.01) {
+            return fail("one redo must move the picture and the line again");
+        }
+        now = centres();
         if (now.size() != 2 || qAbs(now[0].y() - before[0].y()) > 0.01 || qAbs(now[1].y() - before[1].y() - 50) > 0.01) {
             printf("(%g, %g) ", now.value(0).y(), now.value(1).y());
             return fail("the line under the press must go down 50, the one above must stay");
@@ -7803,8 +7810,7 @@ public:
         now = centres();
         if (now.size() != 2 || qAbs(now[1].y() - before[1].y() - 20) > 0.01) return fail("a drag up must bring the line up");
 
-        vp.undo();   // the picture
-        vp.undo();   // the lines
+        vp.undo();
         now = centres();
         if (now.size() != 2 || qAbs(now[1].y() - before[1].y() - 50) > 0.01) return fail("undo must take back the last move");
 
