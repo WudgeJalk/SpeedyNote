@@ -36,6 +36,7 @@ bool DrawingSettings::reload()
     s.holdStillPx = number("pen/holdStillPx", 4, 1, 40);
     s.holdMinLength = number("pen/holdMinLength", 40, 0, 400);
     s.handArrows = settings.value(QStringLiteral("pen/handArrows"), true).toBool();
+    s.handArrowTwoStrokes = settings.value(QStringLiteral("pen/handArrowTwoStrokes"), false).toBool();
     s.handArrowHead = number("pen/handArrowHead", 0, 0, 2);
     s.cornerAngle = number("shapes/cornerAngle", 35, 10, 90);
     s.closePercent = number("shapes/closePercent", 12, 0, 50);

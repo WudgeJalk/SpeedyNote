@@ -107,10 +107,9 @@ void NavigationBar::setupUi()
     mainLayout->addWidget(m_captionSpacer);
 
     // Our own minimise / maximise / close, shown in title bar mode only.
-    // Each one is 46 px wide with no gap, flush with the right edge: that is
-    // exactly where Windows/Qt keep the real button zones (1.5 x the 31 px
-    // title height). A click in the top part is handled by Windows itself;
-    // a click lower down, or a pen tap, reaches these buttons. Same result.
+    // Each one is 46 px wide with no gap, flush with the right edge. Every
+    // click or pen tap on them is ours (MainWindow answers HTCLIENT there),
+    // so the picture and the action always match.
     m_windowButtons = new QWidget(this);
     m_windowButtons->hide();
     auto *windowLayout = new QHBoxLayout(m_windowButtons);
@@ -148,7 +147,9 @@ void NavigationBar::setTitleBarMode(const QIcon &appIcon, int captionReserve)
 bool NavigationBar::hasOwnButtonAt(const QPoint &pos) const
 {
     const QWidget *child = childAt(pos);
-    return child && qobject_cast<const QAbstractButton *>(child) && !m_windowButtons->isAncestorOf(child);
+    // Minimise / maximise / close too: Qt's own zones for them are a little
+    // narrower than our buttons, so the side of maximise closed the window.
+    return child && qobject_cast<const QAbstractButton *>(child);
 }
 
 QPoint NavigationBar::menuAnchor() const

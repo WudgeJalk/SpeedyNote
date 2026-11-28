@@ -41,8 +41,8 @@ public:
     /// How a hand-drawn head is read, in one line (this window and Settings > Drawing).
     static QString handArrowHint()
     {
-        return tr("To draw an arrow by hand, draw a line, then at its end a V for an open head "
-                  "or a closed triangle for a filled head.");
+        return tr("To draw an arrow by hand, draw a line and, without lifting the pen, at its end "
+                  "a V for an open head or a closed triangle for a filled head.");
     }
 
 private:

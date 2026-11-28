@@ -3,8 +3,10 @@
 #include "../widgets/IconPresetButton.h"
 #include "../widgets/ThicknessPresetButton.h"
 
+#include <QLabel>
 #include <QPalette>
 #include <QSettings>
+#include <QTimer>
 
 namespace {
 // The first three are the old presets, so a user who changes nothing sees them.
@@ -27,6 +29,11 @@ PenSubToolbar::PenSubToolbar(QWidget* parent)
     m_windowButton->setToolTip(tr("Pen type and settings"));
     addWidget(m_windowButton);
     connect(m_windowButton, &IconPresetButton::clicked, this, &PenSubToolbar::windowRequested);
+
+    m_multiPenButton = new IconPresetButton(this);
+    m_multiPenButton->setIconName(QStringLiteral("multipen"));
+    addWidget(m_multiPenButton);
+    connect(m_multiPenButton, &IconPresetButton::clicked, this, &PenSubToolbar::cycleMultiPen);
 
     for (int i = 0; i < NUM_PRESETS; ++i) {
         m_presetButtons[i] = new ThicknessPresetButton(this);
@@ -56,6 +63,78 @@ void PenSubToolbar::setDarkMode(bool darkMode)
 {
     SubToolbar::setDarkMode(darkMode);
     m_windowButton->setDarkMode(darkMode);
+    m_multiPenButton->setDarkMode(darkMode);
+}
+
+QStringList PenSubToolbar::multiPenIds(int penType)
+{
+    QSettings settings;
+    settings.beginGroup(QStringLiteral("pen/multi%1").arg(penType));
+    QStringList ids = settings.childGroups();
+    ids.sort();   // Ids are zero-padded numbers: oldest first
+    return ids;
+}
+
+QString PenSubToolbar::multiPenKey(int penType, const QString& id)
+{
+    return QStringLiteral("pen/multi%1/%2").arg(penType).arg(id);
+}
+
+QString PenSubToolbar::addMultiPen(int penType, const QString& name)
+{
+    const QStringList ids = multiPenIds(penType);
+    const QString id = QStringLiteral("%1").arg(ids.isEmpty() ? 1 : ids.last().toInt() + 1, 4, 10, QLatin1Char('0'));
+    QSettings().setValue(multiPenKey(penType, id) + QStringLiteral("/name"), name);
+    return id;
+}
+
+QString PenSubToolbar::presetGroup() const
+{
+    return m_multiPenId.isEmpty() ? kGroup : multiPenKey(m_penType, m_multiPenId);
+}
+
+void PenSubToolbar::cycleMultiPen()
+{
+    const QStringList ids = multiPenIds(m_penType);
+    if (ids.isEmpty()) return;
+    const QString next = ids[(ids.indexOf(m_multiPenId) + 1) % ids.size()];
+    QSettings().setValue(multiPenKey(m_penType, QStringLiteral("current")), next);
+    loadPresets();
+    updatePresetButtons();
+    emitPreset();
+    showMultiPenName(QSettings().value(presetGroup() + QStringLiteral("/name")).toString());
+}
+
+void PenSubToolbar::showMultiPenName(const QString& name)
+{
+    QWidget* top = window();
+    if (!m_multiPenLabel || m_multiPenLabel->parentWidget() != top) {
+        delete m_multiPenLabel;
+        m_multiPenLabel = new QLabel(top);
+        m_multiPenLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
+        m_multiPenTimer = new QTimer(m_multiPenLabel);
+        m_multiPenTimer->setSingleShot(true);
+        connect(m_multiPenTimer, &QTimer::timeout, m_multiPenLabel, &QWidget::hide);
+    }
+    // The card of the floating bar (Toolbar's paintPill).
+    const bool dark = m_multiPenButton->isDarkMode();
+    m_multiPenLabel->setStyleSheet(QStringLiteral(
+        "background: %1; color: %2; border: 1px solid %3; border-radius: 10px; padding: 5px 10px;")
+        .arg(dark ? "#000000" : "#ffffff", dark ? "#ffffff" : "#000000",
+             dark ? "rgba(255,255,255,30)" : "rgba(0,0,0,25)"));
+    m_multiPenLabel->setText(name);
+    m_multiPenLabel->adjustSize();
+    // Left of the bar, level with the button; right of it when there is no room.
+    QWidget* bar = parentWidget() ? parentWidget() : this;
+    const QPoint barAt = bar->mapTo(top, QPoint(0, 0));
+    int x = barAt.x() - m_multiPenLabel->width() - 6;
+    if (x < 0) x = barAt.x() + bar->width() + 6;
+    const int y = m_multiPenButton->mapTo(top, QPoint(0, 0)).y()
+                  + (m_multiPenButton->height() - m_multiPenLabel->height()) / 2;
+    m_multiPenLabel->move(x, y);
+    m_multiPenLabel->show();
+    m_multiPenLabel->raise();
+    m_multiPenTimer->start(1500);
 }
 
 StrokePreset PenSubToolbar::defaultPreset(int index) const
@@ -73,22 +152,11 @@ void PenSubToolbar::loadFromSettings()
     m_legacyMinWidth = settings.value(QStringLiteral("tools/minStrokeWidth"), DEFAULT_MIN_WIDTH).toReal();
 
     settings.beginGroup(kGroup);
-    for (int i = 0; i < NUM_PRESETS; ++i) {
-        const QString n = QString::number(i + 1);
-        const StrokePreset d = defaultPreset(i);
-        StrokePreset& p = m_presets[i];
-        p.width = settings.value(QStringLiteral("thickness") + n, d.width).toReal();
-        // Clamp so a minimum can't exceed a later-reduced width.
-        p.minWidth = qBound(0.0, settings.value(QStringLiteral("minWidth") + n, d.minWidth).toReal(), p.width);
-        p.lineStyle = quint8(qBound(0, settings.value(QStringLiteral("lineStyle") + n, 0).toInt(), 2));
-        p.arrowStart = quint8(qBound(0, settings.value(QStringLiteral("arrowStart") + n, 0).toInt(), 2));
-        p.arrowEnd = quint8(qBound(0, settings.value(QStringLiteral("arrowEnd") + n, 0).toInt(), 2));
-        p.rounded = settings.value(QStringLiteral("rounded") + n, true).toBool();
-    }
     m_penType = quint8(qBound(0, settings.value(QStringLiteral("penType"), 0).toInt(), int(StrokeStyle::Brush)));
     m_savedColorIndex = settings.value(QStringLiteral("selectedColor"), 2).toInt();
     m_savedPreset = settings.value(QStringLiteral("selectedThickness"), 0).toInt();
     settings.endGroup();
+    loadPresets();
 
     m_colors->reload();
     m_colors->setSelectedIndex(m_savedColorIndex, false);
@@ -96,10 +164,40 @@ void PenSubToolbar::loadFromSettings()
     updatePresetButtons();
 }
 
+void PenSubToolbar::loadPresets()
+{
+    QSettings settings;
+    const QStringList ids = settings.value(kGroup + QStringLiteral("/multiPen"), false).toBool()
+                                ? multiPenIds(m_penType) : QStringList();
+    const QString current = settings.value(multiPenKey(m_penType, QStringLiteral("current"))).toString();
+    m_multiPenId = ids.isEmpty() ? QString() : ids.contains(current) ? current : ids.first();
+    m_multiPenButton->setVisible(!ids.isEmpty());
+    m_multiPenButton->setToolTip(tr("Next pen (now: %1)")
+        .arg(settings.value(presetGroup() + QStringLiteral("/name")).toString()));
+
+    // The usual presets first: a pen that has no sizes of its own yet starts from them.
+    for (const QString& group : {kGroup, presetGroup()}) {
+        settings.beginGroup(group);
+        for (int i = 0; i < NUM_PRESETS; ++i) {
+            const QString n = QString::number(i + 1);
+            const StrokePreset d = group == kGroup ? defaultPreset(i) : m_presets[i];
+            StrokePreset& p = m_presets[i];
+            p.width = settings.value(QStringLiteral("thickness") + n, d.width).toReal();
+            // Clamp so a minimum can't exceed a later-reduced width.
+            p.minWidth = qBound(0.0, settings.value(QStringLiteral("minWidth") + n, d.minWidth).toReal(), p.width);
+            p.lineStyle = quint8(qBound(0, settings.value(QStringLiteral("lineStyle") + n, int(d.lineStyle)).toInt(), 2));
+            p.arrowStart = quint8(qBound(0, settings.value(QStringLiteral("arrowStart") + n, int(d.arrowStart)).toInt(), 2));
+            p.arrowEnd = quint8(qBound(0, settings.value(QStringLiteral("arrowEnd") + n, int(d.arrowEnd)).toInt(), 2));
+            p.rounded = settings.value(QStringLiteral("rounded") + n, d.rounded).toBool();
+        }
+        settings.endGroup();
+    }
+}
+
 void PenSubToolbar::saveToSettings()
 {
     QSettings settings;
-    settings.beginGroup(kGroup);
+    settings.beginGroup(presetGroup());
     for (int i = 0; i < NUM_PRESETS; ++i) {
         const QString n = QString::number(i + 1);
         const StrokePreset& p = m_presets[i];
@@ -132,6 +230,7 @@ void PenSubToolbar::saveSelectionToSettings()
 void PenSubToolbar::refreshFromSettings()
 {
     loadFromSettings();
+    emitPreset();   // The pen in use can have other sizes now (multi-pen)
 }
 
 void PenSubToolbar::emitCurrentValues()
@@ -180,7 +279,9 @@ void PenSubToolbar::setPenType(quint8 penType)
     if (penType == m_penType) return;
     m_penType = penType;
     QSettings().setValue(kGroup + QStringLiteral("/penType"), int(penType));
-    emit penStyleChanged(currentStyle());
+    loadPresets();   // With multi-pen, each pen type has its own pens
+    updatePresetButtons();
+    emitPreset();
 }
 
 void PenSubToolbar::restoreTabState(int tabIndex)

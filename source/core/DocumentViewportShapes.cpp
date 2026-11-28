@@ -253,7 +253,7 @@ void DocumentViewport::rememberShaft(int pageIndex, Document::TileCoord tile, in
 
 bool DocumentViewport::makeHandArrow(bool apply)
 {
-    if (m_lastShaft.id.isEmpty() || !m_document || m_currentStroke.points.size() < 2) {
+    if (!DrawingSettings::get().handArrowTwoStrokes || m_lastShaft.id.isEmpty() || !m_document || m_currentStroke.points.size() < 2) {
         return false;
     }
     const bool edgeless = m_document->isEdgeless();
@@ -560,6 +560,11 @@ bool DocumentViewport::shapePress(const PointerEvent& pe)
     m_shapeDraft.active = true;
     m_pointerActive = true;
     return true;
+}
+
+bool DocumentViewport::shapeToolDrawsConnector() const
+{
+    return m_shapeKind > kFreeShape && m_shapeKind < kFirstFixedShape;
 }
 
 bool DocumentViewport::shapeMove(const PointerEvent& pe)

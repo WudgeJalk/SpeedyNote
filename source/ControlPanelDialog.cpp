@@ -15,6 +15,9 @@
 #include <QFormLayout>
 #include <QGridLayout>
 #include <QListWidget>
+#include <QLineEdit>
+#include <QResizeEvent>
+#include <QStackedWidget>
 #include <QGroupBox>
 #include <QLabel>
 #include <QCheckBox>
@@ -162,6 +165,21 @@ QList<LanguageEntry> discoverAvailableLanguages(const QString& savedOverrideCode
     return entries;
 }
 
+// Lower case and without accents, so "regle" finds "Règle".
+QString folded(const QString& text) {
+    QString out;
+    for (const QChar c : text.normalized(QString::NormalizationForm_D)) {
+        if (!c.isMark()) out += c.toLower();
+    }
+    return out;
+}
+
+void setSearchHit(QWidget* widget, bool on) {
+    widget->setProperty("searchHit", on);
+    widget->style()->unpolish(widget);   // the style sheet reads the property again
+    widget->style()->polish(widget);
+}
+
 } // namespace
 
 ControlPanelDialog::ControlPanelDialog(MainWindow *mainWindow, QWidget *parent)
@@ -169,20 +187,84 @@ ControlPanelDialog::ControlPanelDialog(MainWindow *mainWindow, QWidget *parent)
 
     setWindowTitle(tr("Settings"));
 
-    tabWidget = new QTabWidget(this);
+    // === Search, categories, one scrolling page per category ===
+    QLineEdit *searchEdit = new QLineEdit(this);
+    searchEdit->setPlaceholderText(tr("Search settings"));
+    searchEdit->setClearButtonEnabled(true);
+    searchEdit->setMinimumHeight(36);
+    connect(searchEdit, &QLineEdit::textChanged, this, &ControlPanelDialog::filterSettings);
 
-    // === Working Tabs ===
-    createBackgroundTab();  // Background settings (first tab for importance)
-    createToolsTab();       // Stroke tool settings
-    createDrawingTab();     // Lines and drawing thresholds
-    createShortcutsTab();   // Phase 5.1: Keyboard shortcuts tab
+    m_categoryList = new QListWidget(this);
+    m_categoryList->setFixedWidth(200);
+    m_categoryCombo = new QComboBox(this);
+    QStackedWidget *stack = new QStackedWidget(this);
+    const QStringList names = { tr("Interface"), tr("Writing experience"), tr("Pen and touch"), tr("Shapes"),
+                                tr("Page"), tr("Files"), tr("Shortcuts"), tr("About") };   // In Category order
+    for (const QString &name : names) {
+        QListWidgetItem *item = new QListWidgetItem(name, m_categoryList);
+        item->setSizeHint(QSize(0, 44));
+        m_categoryCombo->addItem(name);
 
+        QWidget *content = new QWidget(this);
+        (new QVBoxLayout(content))->addStretch(1);   // Sections go above it, see addSection()
+        // Not DialogSizing::inScrollArea(): its hint follows the content, and
+        // the dialog would open as tall as its longest page.
+        QScrollArea *page = new QScrollArea(this);
+        page->setWidget(content);
+        page->setWidgetResizable(true);
+        page->setFrameShape(QFrame::NoFrame);
+        page->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        // Drag to scroll, with a finger or the pen; no bounce (as ColorListRow).
+        QScroller::grabGesture(page->viewport(), QScroller::LeftMouseButtonGesture);
+        QScrollerProperties props = QScroller::scroller(page->viewport())->scrollerProperties();
+        props.setScrollMetric(QScrollerProperties::HorizontalOvershootPolicy,
+                              QVariant::fromValue(QScrollerProperties::OvershootAlwaysOff));
+        props.setScrollMetric(QScrollerProperties::VerticalOvershootPolicy,
+                              QVariant::fromValue(QScrollerProperties::OvershootAlwaysOff));
+        QScroller::scroller(page->viewport())->setScrollerProperties(props);
+        m_pages << page;
+        stack->addWidget(page);
+    }
+    connect(m_categoryList, &QListWidget::currentRowChanged, this, [this, stack](int row) {
+        if (row < 0) return;
+        stack->setCurrentIndex(row);
+        m_categoryCombo->setCurrentIndex(row);
+    });
+    connect(m_categoryCombo, QOverload<int>::of(&QComboBox::activated), this, [this](int row) {
+        m_categoryList->setCurrentRow(row);
+    });
+
+    // === Sections, in the order they show in their category ===
+    createBackgroundTab();  // Start screen (Interface), Page, Saving (Files)
     createThemeTab();
     createLanguageTab();
     createStylusTab();
+
+    // ControlPanelDrawingTab.cpp builds one tab; each of its groups goes to
+    // its category.
+    tabWidget = new QTabWidget(this);
+    createDrawingTab();
+    QWidget *drawingContent = stabilisationSpin->parentWidget()->parentWidget();
+    addSection(Writing, stabilisationSpin->parentWidget());
+    addSection(Writing, dashLengthSpin->parentWidget());
+    addSection(Writing, eraserPenCheck->parentWidget());
+    addSection(Writing, laserHoldSpin->parentWidget());
+    addSection(Shapes, cornerAngleSpin->parentWidget());
+    drawingTabPage = rulerSnapSpin->parentWidget();
+    addSection(Shapes, drawingTabPage);
+    addSection(PenTouch, fingerTapCheck->parentWidget());
+    // A group added to that tab later is not lost with it.
+    for (QGroupBox *rest : drawingContent->findChildren<QGroupBox *>(QString(), Qt::FindDirectChildrenOnly)) {
+        addSection(Writing, rest);
+    }
+    delete tabWidget;
+    tabWidget = nullptr;
+
+    createToolsTab();       // Toolbar, selection menu, panning, eraser undo, OCR
+    createShortcutsTab();   // Phase 5.1: Keyboard shortcuts
     createCacheTab();
     createAboutTab();
-    
+
     // === Buttons ===
     applyButton = new QPushButton(tr("Apply"));
     okButton = new QPushButton(tr("OK"));
@@ -202,46 +284,132 @@ ControlPanelDialog::ControlPanelDialog(MainWindow *mainWindow, QWidget *parent)
     buttonLayout->addWidget(okButton);
     buttonLayout->addWidget(cancelButton);
 
+    QVBoxLayout *pageColumn = new QVBoxLayout();
+    pageColumn->addWidget(m_categoryCombo);
+    pageColumn->addWidget(stack, 1);
+    QHBoxLayout *body = new QHBoxLayout();
+    body->addWidget(m_categoryList);
+    body->addLayout(pageColumn, 1);
+
     QVBoxLayout *mainLayout = new QVBoxLayout(this);
-    mainLayout->addWidget(tabWidget);
+    mainLayout->addWidget(searchEdit);
+    mainLayout->addLayout(body, 1);
     mainLayout->addLayout(buttonLayout);
 
-    // Every tab scrolls, so the dialog fits its screen and OK / Cancel stay in
-    // view. It opens as big as its tallest tab, capped by the screen; QDialog
-    // centres it on the window.
-    const QSize natural = sizeHint().expandedTo(QSize(450, 400));
-    for (int i = 0; i < tabWidget->count(); ++i) {
-        QWidget *page = tabWidget->widget(i);
-        if (qobject_cast<QScrollArea *>(page)) continue;  // Drawing scrolls already
-        const QString text = tabWidget->tabText(i);
-        tabWidget->removeTab(i);
-        QScrollArea *scroll = DialogSizing::inScrollArea(page, this);
-        tabWidget->insertTab(i, scroll, text);
-        if (page == stylusTab) stylusTab = scroll;  // switchToStylusTab() shows the tab
-    }
-    // The dialog's layout still holds the minimum the tabs had before they
-    // scrolled (sizeHint() above cached it); the first pass at show time would
-    // grow the dialog to it, past the screen.
-    tabWidget->updateGeometry();
-    tabWidget->setCurrentIndex(0);
-    DialogSizing::openAtSize(this, natural);
+    // Rows a finger can hit, and the mark of a search match: the highlight
+    // colour of the theme, thin enough that the text stays readable on it.
+    const QColor mark = palette().color(QPalette::Highlight);
+    setStyleSheet(QStringLiteral(
+        "QCheckBox, QRadioButton, QPushButton, QComboBox, QAbstractSpinBox { min-height: 36px; }"
+        "QLabel[searchHit=\"true\"], QAbstractButton[searchHit=\"true\"]"
+        " { background-color: rgba(%1, %2, %3, 90); }")
+        .arg(mark.red()).arg(mark.green()).arg(mark.blue()));
+
+    // Enter in the search box (or a number box) must not press a button.
+    const QList<QPushButton *> buttons = findChildren<QPushButton *>();
+    for (QPushButton *button : buttons) button->setAutoDefault(false);
+
+    m_categoryList->setCurrentRow(0);
+    // Every page scrolls, so the size is a choice, capped by the screen.
+    DialogSizing::openAtSize(this, QSize(920, 700));
     // F5: a scroll over a list or a number box scrolls the page; it changes
     // the box only once the box was clicked.
     DialogSizing::wheelNeedsFocus(this);
-    
+
     // Load current settings into UI
     loadSettings();
 }
 
+void ControlPanelDialog::addSection(Category category, QWidget *content, const QString &title)
+{
+    QVBoxLayout *layout = static_cast<QVBoxLayout *>(m_pages[category]->widget()->layout());
+    if (!title.isEmpty()) {
+        QLabel *label = new QLabel(title);
+        label->setStyleSheet("font-size: 16px; font-weight: bold;");
+        layout->insertWidget(layout->count() - 1, label);
+    }
+    layout->insertWidget(layout->count() - 1, content);   // Before the stretch
+}
+
+void ControlPanelDialog::showSetting(QWidget *widget)
+{
+    for (int i = 0; widget && i < m_pages.size(); ++i) {
+        QScrollArea *page = m_pages[i];
+        if (!page->widget()->isAncestorOf(widget)) continue;
+        m_categoryList->setCurrentRow(i);
+        // Queued: a page has its layout only once it is shown.
+        QTimer::singleShot(0, widget, [page, widget]() {
+            page->verticalScrollBar()->setValue(widget->mapTo(page->widget(), QPoint(0, 0)).y() - 8);
+        });
+        return;
+    }
+}
+
+void ControlPanelDialog::filterSettings(const QString &text)
+{
+    for (QWidget *hit : std::as_const(m_searchHits)) setSearchHit(hit, false);
+    m_searchHits.clear();
+
+    const QString needle = folded(text.trimmed());
+    QListView *comboView = qobject_cast<QListView *>(m_categoryCombo->view());
+    int firstCategory = -1;
+    for (int i = 0; i < m_pages.size(); ++i) {
+        bool found = needle.isEmpty();
+        if (!found) {
+            // Read on each keystroke: a few hundred widgets, and nothing to
+            // build when the dialog opens.
+            const QList<QWidget *> widgets = m_pages[i]->widget()->findChildren<QWidget *>();
+            for (QWidget *widget : widgets) {
+                QString words = widget->toolTip();
+                if (auto *label = qobject_cast<QLabel *>(widget)) words += label->text();
+                else if (auto *button = qobject_cast<QAbstractButton *>(widget)) words += button->text();
+                else if (auto *group = qobject_cast<QGroupBox *>(widget)) words += group->title();
+                if (!folded(words).contains(needle)) continue;
+                found = true;
+                m_searchHits << widget;
+                setSearchHit(widget, true);
+            }
+            if (i == Shortcuts) {   // The commands are rows of a tree, not widgets
+                const QList<QTreeWidgetItem *> rows =
+                    shortcutsTree->findItems(text.trimmed(), Qt::MatchContains | Qt::MatchRecursive);
+                if (!rows.isEmpty()) {
+                    found = true;
+                    shortcutsTree->setCurrentItem(rows.first());
+                    shortcutsTree->scrollToItem(rows.first());
+                }
+            }
+        }
+        if (found && firstCategory < 0) firstCategory = i;
+        m_categoryList->setRowHidden(i, !found);
+        if (comboView) comboView->setRowHidden(i, !found);
+    }
+    if (needle.isEmpty() || firstCategory < 0) return;
+
+    m_categoryList->setCurrentRow(firstCategory);
+    QScrollArea *page = m_pages[firstCategory];
+    // Queued: a page has its layout only once it is shown.
+    QTimer::singleShot(0, this, [this, page]() {
+        int top = -1;
+        for (QWidget *hit : std::as_const(m_searchHits)) {
+            if (!page->widget()->isAncestorOf(hit)) continue;
+            const int y = hit->mapTo(page->widget(), QPoint(0, 0)).y();
+            if (top < 0 || y < top) top = y;
+        }
+        if (top >= 0) page->verticalScrollBar()->setValue(top - 8);
+    });
+}
+
+void ControlPanelDialog::resizeEvent(QResizeEvent *event)
+{
+    QDialog::resizeEvent(event);
+    const bool narrow = width() < 700;
+    m_categoryList->setVisible(!narrow);
+    m_categoryCombo->setVisible(narrow);
+}
+
 void ControlPanelDialog::switchToKeyboardShortcutsTab()
 {
-    // Find the "Shortcuts" tab and switch to it
-    for (int i = 0; i < tabWidget->count(); ++i) {
-        if (tabWidget->tabText(i) == tr("Shortcuts")) {
-            tabWidget->setCurrentIndex(i);
-            return;
-        }
-    }
+    showSetting(shortcutsTab);
 }
 
 void ControlPanelDialog::done(int result)
@@ -1048,6 +1216,57 @@ void ControlPanelDialog::createBackgroundTab() {
     layout->addWidget(newNoteHint);
     layout->addSpacing(10);
 
+    // ========== START SCREEN (a section of Interface) ==========
+    {
+        QGroupBox *startGroup = new QGroupBox(tr("Start screen"), this);
+        QVBoxLayout *startLayout = new QVBoxLayout(startGroup);
+
+        QHBoxLayout *restoreRow = new QHBoxLayout();
+        restoreRow->addWidget(new QLabel(tr("When SpeedyNote starts, the notes open last time:"), startGroup));
+        QComboBox *restoreCombo = new QComboBox(startGroup);
+        restoreCombo->addItem(tr("Open again"), QStringLiteral("always"));
+        restoreCombo->addItem(tr("Ask me"), QStringLiteral("ask"));
+        restoreCombo->addItem(tr("Stay closed"), QStringLiteral("never"));
+        restoreCombo->setCurrentIndex(qMax(0, restoreCombo->findData(
+            QSettings("SpeedyNote", "App").value("session/restore", "always").toString())));
+        connect(restoreCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [restoreCombo](int) {
+            QSettings("SpeedyNote", "App").setValue("session/restore", restoreCombo->currentData().toString());
+        });
+        restoreRow->addWidget(restoreCombo);
+        restoreRow->addStretch();
+        startLayout->addLayout(restoreRow);
+
+        // Both are read live by the start screen, so they are written at once.
+        QCheckBox *groupCheck = new QCheckBox(tr("Chronologie shows a notebook as one card"), startGroup);
+        groupCheck->setChecked(QSettings("SpeedyNote", "App").value("timeline/groupNotebooks", true).toBool());
+        startLayout->addWidget(groupCheck);
+        QLabel *groupHint = new QLabel(tr("A note that is in a notebook of the Library shows as that notebook, "
+                                          "once. Off: every note has its own card."), startGroup);
+        groupHint->setWordWrap(true);
+        groupHint->setStyleSheet("color: gray; font-size: 11px;");
+        startLayout->addWidget(groupHint);
+
+        QHBoxLayout *tapRow = new QHBoxLayout();
+        tapRow->addWidget(new QLabel(tr("A tap on a notebook card:"), startGroup));
+        QComboBox *tapCombo = new QComboBox(startGroup);
+        tapCombo->addItem(tr("Opens the note used last"), QStringLiteral("note"));
+        tapCombo->addItem(tr("Opens the notebook in the Library"), QStringLiteral("library"));
+        tapCombo->setCurrentIndex(qMax(0, tapCombo->findData(
+            QSettings("SpeedyNote", "App").value("timeline/notebookTap", "note").toString())));
+        tapCombo->setEnabled(groupCheck->isChecked());
+        tapRow->addWidget(tapCombo);
+        tapRow->addStretch();
+        startLayout->addLayout(tapRow);
+        connect(groupCheck, &QCheckBox::toggled, this, [tapCombo](bool on) {
+            QSettings("SpeedyNote", "App").setValue("timeline/groupNotebooks", on);
+            tapCombo->setEnabled(on);
+        });
+        connect(tapCombo, QOverload<int>::of(&QComboBox::activated), this, [tapCombo](int) {
+            QSettings("SpeedyNote", "App").setValue("timeline/notebookTap", tapCombo->currentData().toString());
+        });
+        addSection(Interface, startGroup);
+    }
+
     // ========== PAGE SIZE SECTION ==========
     QLabel *pageSectionLabel = new QLabel(tr("Default Page Size"), backgroundTab);
     pageSectionLabel->setStyleSheet("font-weight: bold; margin-top: 5px;");
@@ -1085,7 +1304,7 @@ void ControlPanelDialog::createBackgroundTab() {
     pageDimLayout->addWidget(pageDimLabel);
     
     pageSizeDimLabel = new QLabel(backgroundTab);
-    pageSizeDimLabel->setStyleSheet("color: #666; font-style: italic;");
+    pageSizeDimLabel->setStyleSheet("color: gray; font-style: italic;");
     pageDimLayout->addWidget(pageSizeDimLabel);
     pageDimLayout->addStretch();
     layout->addLayout(pageDimLayout);
@@ -1101,6 +1320,11 @@ void ControlPanelDialog::createBackgroundTab() {
     unitCombo->setCurrentIndex(LengthUnit::useMm() ? 0 : 1);
     unitLayout->addWidget(unitCombo, 1);
     layout->addLayout(unitLayout);
+    QLabel *unitHint = new QLabel(tr("Used for every length the app shows: page size, spacing, pen width."),
+                                  backgroundTab);
+    unitHint->setWordWrap(true);
+    unitHint->setStyleSheet("color: gray; font-size: 11px;");
+    layout->addWidget(unitHint);
     connect(unitCombo, QOverload<int>::of(&QComboBox::activated), this, [this](int index) {
         LengthUnit::setUseMm(index == 0);
         // Show the new unit at once in this tab. The stored values do not change.
@@ -1283,7 +1507,7 @@ void ControlPanelDialog::createBackgroundTab() {
         };
         connect(backupCheck, &QCheckBox::toggled, this, syncBackup);
         syncBackup();
-        layout->addWidget(savingGroup);
+        addSection(Files, savingGroup);
     }
 
     layout->addStretch();
@@ -1295,7 +1519,7 @@ void ControlPanelDialog::createBackgroundTab() {
     // Initialize page size display
     onPageSizePresetChanged(pageSizeCombo->currentIndex());
     
-    tabWidget->addTab(backgroundTab, tr("Page"));
+    addSection(PageCategory, backgroundTab);
 }
 
 // ============================================================================
@@ -1304,9 +1528,7 @@ void ControlPanelDialog::createBackgroundTab() {
 
 void ControlPanelDialog::createToolsTab()
 {
-    toolsTab = new QWidget(this);
-    QVBoxLayout *layout = new QVBoxLayout(toolsTab);
-
+    // No page of its own: each group is a section of the category it fits.
     QSettings settings("SpeedyNote", "App");
 
     // The old global "Minimum stroke width" row has moved to the Pen
@@ -1316,8 +1538,15 @@ void ControlPanelDialog::createToolsTab()
     if (Toolbar *toolbar = mainWindowRef ? mainWindowRef->toolbar() : nullptr) {
         // The toolbar, drawn as a row of icons you can reorder and switch off.
         enum { IdRole = Qt::UserRole, HiddenRole, IconRole };
-        QGroupBox *buttonsGroup = new QGroupBox(tr("Toolbar buttons"), toolsTab);
+        QGroupBox *buttonsGroup = new QGroupBox(tr("Toolbar buttons"), this);
         QVBoxLayout *buttonsLayout = new QVBoxLayout(buttonsGroup);
+        // A finger never sees a tooltip: the same help, as a line under the setting.
+        auto addHint = [buttonsGroup, buttonsLayout](const QString &text) {
+            QLabel *hint = new QLabel(text, buttonsGroup);
+            hint->setWordWrap(true);
+            hint->setStyleSheet("color: gray; font-size: 11px;");
+            buttonsLayout->addWidget(hint);
+        };
 
         QListWidget *list = new QListWidget(buttonsGroup);
         list->setViewMode(QListView::IconMode);
@@ -1429,10 +1658,12 @@ void ControlPanelDialog::createToolsTab()
         floatingCheck->setChecked(QSettings("SpeedyNote", "App").value("toolbar/floating", true).toBool());
         floatingCheck->setToolTip(tr("Off: the toolbar is a row of the window, at the top or the bottom."));
         buttonsLayout->addWidget(floatingCheck);
+        addHint(floatingCheck->toolTip());
         QCheckBox *animationsCheck = new QCheckBox(tr("Animations"), buttonsGroup);
         animationsCheck->setChecked(QSettings("SpeedyNote", "App").value("toolbar/animations", true).toBool());
         animationsCheck->setToolTip(tr("Slide the toolbar to its edge and fade in the tool options."));
         buttonsLayout->addWidget(animationsCheck);
+        addHint(animationsCheck->toolTip());
         auto reapply = [this, positionCombo]() {
             if (mainWindowRef) mainWindowRef->setToolbarPosition(positionCombo->currentData().toString());
         };
@@ -1466,6 +1697,7 @@ void ControlPanelDialog::createToolsTab()
         tapHidesCheck->setToolTip(tr("Another tap shows them again. Hidden, they stay hidden when you "
                                      "change tools. Off: that tap opens the tool's window."));
         buttonsLayout->addWidget(tapHidesCheck);
+        addHint(tapHidesCheck->toolTip());
         connect(tapHidesCheck, &QCheckBox::toggled, this, [toolbar](bool on) {
             QSettings("SpeedyNote", "App").setValue("toolbar/tapHidesOptions", on);
             toolbar->setTapHidesOptions(on);
@@ -1485,6 +1717,7 @@ void ControlPanelDialog::createToolsTab()
         penIconsRow->addWidget(penIconsCombo);
         penIconsRow->addStretch();
         buttonsLayout->addLayout(penIconsRow);
+        addHint(penIconsCombo->toolTip());
         connect(penIconsCombo, QOverload<int>::of(&QComboBox::activated), this,
                 [toolbar, penIconsCombo, fill](int) {
             const bool three = penIconsCombo->currentData().toBool();
@@ -1517,12 +1750,12 @@ void ControlPanelDialog::createToolsTab()
         buttonsHint->setWordWrap(true);
         buttonsHint->setStyleSheet("color: gray; font-size: 11px;");
         buttonsLayout->addWidget(buttonsHint);
-        layout->addWidget(buttonsGroup);
+        addSection(Interface, buttonsGroup);
     }
 
     // --- Selection menu (copy, delete, order...): next to the selection or at the side ---
     {
-        QGroupBox *menuGroup = new QGroupBox(tr("Selection menu"), toolsTab);
+        QGroupBox *menuGroup = new QGroupBox(tr("Selection menu"), this);
         QFormLayout *menuLayout = new QFormLayout(menuGroup);
         QComboBox *placeCombo = new QComboBox(menuGroup);
         placeCombo->addItem(tr("Next to the selection"), true);
@@ -1541,7 +1774,7 @@ void ControlPanelDialog::createToolsTab()
         menuHint->setWordWrap(true);
         menuHint->setStyleSheet("color: gray; font-size: 11px;");
         menuLayout->addRow(menuHint);
-        layout->addWidget(menuGroup);
+        addSection(Interface, menuGroup);
         // Applies at once, like the toolbar settings above.
         auto applyMenu = [this, placeCombo, gapSpin]() {
             QSettings s("SpeedyNote", "App");
@@ -1559,7 +1792,7 @@ void ControlPanelDialog::createToolsTab()
     }
 
     // --- Panning settings group ---
-    QGroupBox *panGroup = new QGroupBox(tr("Panning"), toolsTab);
+    QGroupBox *panGroup = new QGroupBox(tr("Panning"), this);
     QFormLayout *panLayout = new QFormLayout(panGroup);
 
     wheelScrollSpeedSpin = new QDoubleSpinBox(panGroup);
@@ -1601,10 +1834,10 @@ void ControlPanelDialog::createToolsTab()
     offPagePanHint->setStyleSheet("color: gray; font-size: 11px;");
     panLayout->addRow(offPagePanHint);
 
-    layout->addWidget(panGroup);
+    addSection(PenTouch, panGroup);
 
     // --- Eraser settings group ---
-    QGroupBox *eraserGroup = new QGroupBox(tr("Eraser"), toolsTab);
+    QGroupBox *eraserGroup = new QGroupBox(tr("Eraser"), this);
     QFormLayout *eraserLayout = new QFormLayout(eraserGroup);
 
     eraserUndoGroupingCombo = new QComboBox(eraserGroup);
@@ -1627,10 +1860,10 @@ void ControlPanelDialog::createToolsTab()
     eraserUndoHint->setStyleSheet("color: gray; font-size: 11px;");
     eraserLayout->addRow(eraserUndoHint);
 
-    layout->addWidget(eraserGroup);
+    addSection(Writing, eraserGroup);
 
     // --- OCR settings group ---
-    QGroupBox *ocrGroup = new QGroupBox(tr("OCR (Handwriting Recognition)"), toolsTab);
+    QGroupBox *ocrGroup = new QGroupBox(tr("OCR (Handwriting Recognition)"), this);
     QVBoxLayout *ocrLayout = new QVBoxLayout(ocrGroup);
 
     ocrCjkGridModeCheck = new QCheckBox(tr("CJK grid-cell mode (box-by-box character detection)"), ocrGroup);
@@ -1648,10 +1881,7 @@ void ControlPanelDialog::createToolsTab()
     ocrHint->setStyleSheet("color: gray; font-size: 11px;");
     ocrLayout->addWidget(ocrHint);
 
-    layout->addWidget(ocrGroup);
-    layout->addStretch();
-
-    tabWidget->addTab(toolsTab, tr("Tools"));
+    addSection(Writing, ocrGroup);
 }
 
 // ============================================================================
@@ -1689,6 +1919,7 @@ void ControlPanelDialog::createShortcutsTab()
     shortcutsTree->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     shortcutsTree->header()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     shortcutsTree->setMinimumWidth(350);
+    shortcutsTree->setMinimumHeight(360);   // Its page scrolls, so it has no height to fill
     
     // Connect double-click to edit
     connect(shortcutsTree, &QTreeWidget::itemDoubleClicked,
@@ -1734,7 +1965,7 @@ void ControlPanelDialog::createShortcutsTab()
     // Populate the tree with shortcuts
     populateShortcutsTree();
     
-    tabWidget->addTab(shortcutsTab, tr("Shortcuts"));
+    addSection(Shortcuts, shortcutsTab);
 }
 
 void ControlPanelDialog::populateShortcutsTree()
@@ -2104,9 +2335,21 @@ void ControlPanelDialog::createThemeTab() {
         if (mainWindowRef) mainWindowRef->setScrollBarsPinned(checked);
     });
 
+    // Roadmap D3: the app font. Read once at start (Main.cpp).
+    QCheckBox *appFontCheckbox = new QCheckBox(tr("Use the SpeedyNote font (Rubik)"), themeTab);
+    appFontCheckbox->setToolTip(tr("Off: the font of your system. The change shows at the next start of SpeedyNote."));
+    appFontCheckbox->setChecked(QSettings("SpeedyNote", "App").value("ui/appFont", true).toBool());
+    connect(appFontCheckbox, &QCheckBox::toggled, this, [](bool checked) {
+        QSettings("SpeedyNote", "App").setValue("ui/appFont", checked);
+    });
+    layout->addWidget(appFontCheckbox);
+    QLabel *appFontHelp = new QLabel(tr("The change shows at the next start of SpeedyNote."), themeTab);
+    appFontHelp->setEnabled(false);
+    layout->addWidget(appFontHelp);
+
     layout->addStretch();
-    
-    tabWidget->addTab(themeTab, tr("Theme"));
+
+    addSection(Interface, themeTab, tr("Theme"));
 }
 
 void ControlPanelDialog::chooseAccentColor() {
@@ -2310,7 +2553,7 @@ void ControlPanelDialog::createAboutTab() {
     
     layout->addSpacing(10);
     
-    tabWidget->addTab(aboutTab, tr("About"));
+    addSection(About, aboutTab);
 }
 
 void ControlPanelDialog::createCacheTab() {
@@ -2415,7 +2658,7 @@ void ControlPanelDialog::createCacheTab() {
     // Add stretch to push everything to the top
     layout->addStretch();
 
-    tabWidget->addTab(cacheTab, tr("Cache"));
+    addSection(Files, cacheTab);
 }
 
 
@@ -2551,7 +2794,7 @@ void ControlPanelDialog::createLanguageTab() {
     // Add stretch to push everything to the top
     layout->addStretch();
     
-    tabWidget->addTab(languageTab, tr("Language"));
+    addSection(Interface, languageTab);
 }
 
 
@@ -2677,7 +2920,7 @@ void ControlPanelDialog::createStylusTab() {
 #endif
 
     layout->addStretch();
-    tabWidget->addTab(stylusTab, tr("Stylus"));
+    addSection(PenTouch, stylusTab);
 }
 
 /*

@@ -1726,6 +1726,9 @@ public:
      * Only operates on single-selected ImageObjects.
      */
     void toggleImageAspectRatioLock();
+    /// Fixes the one selected object to the page, or frees it: a fixed object
+    /// can be selected, but not moved or resized. Saved with the object ("locked").
+    void toggleObjectLocked();
     
     /**
      * @brief Send selected objects to background (affinity = -1).
@@ -3200,6 +3203,10 @@ private:
     bool m_touchSequenceOnChild = false;
     /// The touch sequence in flight began on a selection handle: it works the tool (fingerOnHandle).
     bool m_fingerOnHandle = false;
+    QElapsedTimer m_lastMousePointer;   ///< time of the last real mouse press or move on the page
+    bool shapeToolDrawsConnector() const;   ///< the shape tool's kind is a line or an arrow
+    /// Ends a mouse or finger gesture whose release never came, so the pen can write.
+    void endStalePointerGesture();
     
     // =========================================================================
     // CUSTOMIZABLE VALUES

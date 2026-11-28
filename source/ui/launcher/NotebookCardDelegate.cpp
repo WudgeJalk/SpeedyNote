@@ -113,7 +113,8 @@ void NotebookCardDelegate::paintNotebookCard(QPainter* painter, const QRect& rec
         painter->fillPath(thumbPath, ThemeColors::thumbnailBg(m_darkMode));
         const qreal h = thumbRect.height() - 8;
         const QRectF book(thumbRect.center().x() - h * 0.375, thumbRect.top() + 4, h * 0.75, h);
-        CoverPainter::paint(*painter, book, info.cover, info.displayName(), info.bundlePath + "/assets/images");
+        CoverPainter::paint(*painter, book, info.cover, info.displayName(),
+                            info.notebookRoot.isEmpty() ? info.bundlePath + "/assets/images" : info.notebookRoot);
     } else {
         drawThumbnail(painter, thumbRect, index.data(ThumbnailPathRole).toString());
     }

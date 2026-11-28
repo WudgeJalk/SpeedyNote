@@ -3,6 +3,9 @@
 #include "../widgets/PageWheelPicker.h"
 #include "../widgets/UndoDeleteButton.h"
 
+#include <QFrame>
+#include <QHBoxLayout>
+
 PagePanelActionBar::PagePanelActionBar(QWidget* parent)
     : ActionBar(parent)
 {
@@ -199,6 +202,38 @@ void PagePanelActionBar::updateButtonStates()
     m_deleteButton->setEnabled(m_pageCount > 1);
     
     // Note: Add/Insert and Layout toggle are always enabled, no state updates needed
+}
+
+void PagePanelActionBar::setInPanel()
+{
+    m_inPanel = true;
+    m_lockButton->hide();  // it kept the floating bar on screen; here the bar is part of the panel
+    while (QLayoutItem* item = m_layout->takeAt(0)) delete item;  // the widgets stay our children
+    for (QFrame* line : findChildren<QFrame*>(QString(), Qt::FindDirectChildrenOnly)) {
+        if (line->frameShape() == QFrame::HLine || line->frameShape() == QFrame::VLine) line->hide();
+    }
+    auto addRow = [this](std::initializer_list<QWidget*> widgets) {
+        auto* row = new QHBoxLayout();
+        row->setSpacing(4);
+        for (QWidget* widget : widgets) row->addWidget(widget, 0, Qt::AlignVCenter);
+        row->addStretch();
+        m_layout->addLayout(row);
+    };
+    addRow({m_searchButton, m_pageUpButton, m_wheelPicker, m_pageDownButton, m_layoutToggleButton});
+    addRow({m_selectButton, m_addPageButton, m_insertPageButton, m_addPdfPagesButton, m_deleteButton});
+    setMinimumSize(0, 0);
+    setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+    setupStyle();
+}
+
+void PagePanelActionBar::setupStyle()
+{
+    if (!m_inPanel) {
+        ActionBar::setupStyle();
+        return;
+    }
+    setGraphicsEffect(nullptr);
+    setStyleSheet(QStringLiteral("PagePanelActionBar { background: transparent; border: none; }"));
 }
 
 bool PagePanelActionBar::isLocked() const

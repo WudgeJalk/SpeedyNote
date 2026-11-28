@@ -7,8 +7,11 @@
 #include <QColor>
 #include <QHash>
 #include <QList>
+#include <QStringList>
 
 class ColorListRow;
+class QLabel;
+class QTimer;
 class IconPresetButton;
 class ThicknessPresetButton;
 
@@ -71,6 +74,19 @@ public:
     int selectedColorPreset() const;
     void pickColorPreset(int index);
 
+    // Multi-pen: several named pens of one pen type (fountain, ball, brush),
+    // each with its own three stroke presets - one pen per paper format, for
+    // example. "pen/multiPen" turns it on. A pen is the settings group
+    // "pen/multi<type>/<id>": its "name" and the same preset keys as "pen/".
+    // A pen type without pens works as before.
+    /// The pens of @p penType, oldest first.
+    static QStringList multiPenIds(int penType);
+    static QString multiPenKey(int penType, const QString& id);
+    /// @return The id of the new pen.
+    static QString addMultiPen(int penType, const QString& name);
+    /// The next pen of the pen type in use (wraps). Shows its name for a moment.
+    void cycleMultiPen();
+
     /// The button that opens the pen window: shown with one pen icon only.
     void setWindowButtonVisible(bool visible);
     void setDarkMode(bool darkMode) override;
@@ -87,6 +103,10 @@ signals:
 
 private:
     void loadFromSettings();
+    /// The three presets of the pen in use (the multi-pen one, else the usual ones).
+    void loadPresets();
+    QString presetGroup() const;
+    void showMultiPenName(const QString& name);
     void saveToSettings();
     /// Write only the two selection indexes, and only when they changed.
     void saveSelectionToSettings();
@@ -102,6 +122,10 @@ private:
 
     // Widgets
     IconPresetButton* m_windowButton = nullptr;
+    IconPresetButton* m_multiPenButton = nullptr;
+    QLabel* m_multiPenLabel = nullptr;   // The name shown for a moment, made on first use
+    QTimer* m_multiPenTimer = nullptr;
+    QString m_multiPenId;                // Empty: the usual presets
     ThicknessPresetButton* m_presetButtons[3] = {nullptr, nullptr, nullptr};
     ColorListRow* m_colors = nullptr;
 

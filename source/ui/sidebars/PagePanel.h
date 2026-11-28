@@ -46,6 +46,9 @@ public:
     explicit PagePanel(QWidget* parent = nullptr);
     ~PagePanel() override;
 
+    /// Puts the panel's options (the page bar) at its end, under the pages.
+    void setBottomBar(QWidget* bar);
+
     // =========================================================================
     // Document Binding
     // =========================================================================

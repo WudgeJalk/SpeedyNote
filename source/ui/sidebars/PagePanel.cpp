@@ -32,6 +32,13 @@ PagePanel::PagePanel(QWidget* parent)
     setupConnections();
 }
 
+void PagePanel::setBottomBar(QWidget* bar)
+{
+    bar->setParent(this);
+    layout()->addWidget(bar);
+    bar->show();
+}
+
 PagePanel::~PagePanel()
 {
     // Children are parented, will be deleted automatically

@@ -12,6 +12,7 @@
 #include <QStandardPaths>
 #include <QLibraryInfo>
 #include <QFont>
+#include <QFontDatabase>
 #include <algorithm>
 
 #include "MainWindow.h"
@@ -940,6 +941,17 @@ static void showMainWindowAtColdStart(MainWindow* w, Launcher* launcher)
 #endif
 }
 
+// The tabs of the last session come back by themselves (the user, 2026-11-23).
+// Setting "session/restore": "always" (default), "ask" (the old box), "never".
+static bool wantsSessionRestore(QWidget* parent, const QString& question)
+{
+    const QString mode = QSettings("SpeedyNote", "App").value("session/restore", "always").toString();
+    if (mode == QLatin1String("never")) return false;
+    if (mode != QLatin1String("ask")) return true;
+    return QMessageBox::question(parent, QObject::tr("Restore Previous Session"), question,
+                                 QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes) == QMessageBox::Yes;
+}
+
 // Step R3: notes without a place that a crash left behind. Returns the ones
 // the user wants open now; the others are offered again at the next start.
 static QStringList askToRecoverUnsavedNotes(QWidget* parent, bool crashed)
@@ -1320,6 +1332,18 @@ int main(int argc, char* argv[])
     HarmonyPersistentGrant::isSupported();
 #endif
 
+    // Roadmap D3: the app's own font, Rubik (OFL, resources/fonts). First in
+    // the list, so the platform fonts above still give the signs it lacks
+    // (Chinese, Japanese, Korean). Settings > Theme turns it off.
+    if (QSettings("SpeedyNote", "App").value("ui/appFont", true).toBool()
+        && QFontDatabase::addApplicationFont(QStringLiteral(":/resources/fonts/Rubik.ttf")) >= 0) {
+        QFont font = app.font();
+        QStringList families = font.families();
+        families.prepend(QStringLiteral("Rubik"));
+        font.setFamilies(families);
+        app.setFont(font);
+    }
+
 #if defined(Q_OS_ANDROID) || defined(Q_OS_IOS)
     app.installEventFilter(new MobileDialogFilter(&app));
 #endif
@@ -1599,12 +1623,8 @@ int main(int argc, char* argv[])
             w->openRecoveredNote(path);
 
         if (!sessionTabs.isEmpty()) {
-            auto reply = QMessageBox::question(w,
-                QObject::tr("Restore Previous Session"),
-                QObject::tr("You had %1 other tab(s) open last time. Restore them?")
-                    .arg(sessionTabs.size()) + autosavedLine,
-                QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
-            if (reply == QMessageBox::Yes) {
+            if (wantsSessionRestore(w, QObject::tr("You had %1 other tab(s) open last time. Restore them?")
+                                           .arg(sessionTabs.size()) + autosavedLine)) {
                 for (const QString& path : sessionTabs)
                     w->openFileInNewTab(path);
                 int adjustedIndex = inputFileWasInSession
@@ -1619,11 +1639,9 @@ int main(int argc, char* argv[])
                !sessionTabs.isEmpty() || !recovered.isEmpty()) {
         // No file, but previous session exists - ask to restore.
         const bool restore = !sessionTabs.isEmpty()
-            && QMessageBox::question(sessionPromptParent,
-                   QObject::tr("Restore Previous Session"),
+            && wantsSessionRestore(sessionPromptParent,
                    QObject::tr("You had %1 tab(s) open last time. Restore them?")
-                       .arg(sessionTabs.size()) + autosavedLine,
-                   QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes) == QMessageBox::Yes;
+                       .arg(sessionTabs.size()) + autosavedLine);
 
         if (restore || !recovered.isEmpty()) {
             auto* w = new MainWindow();

@@ -475,6 +475,9 @@ void LibraryView::showMenu(QAbstractItemView* view, const QString& path, const Q
             add(tr("Add an existing note here..."), [this]() { addExistingNote(); }, !section.isEmpty());
         } else {
             add(tr("Open"), [this, path]() { emit noteOpenRequested(path); });
+            const bool favourite = isFavourite(path);
+            add(favourite ? tr("Remove from the favourites") : tr("Add to the favourites"),
+                [path, favourite]() { setFavourite(path, !favourite); });
             common(path);
             menu.addSeparator();
             add(tr("Delete..."), [this, path]() { deleteEntry(path); });
@@ -704,18 +707,42 @@ void LibraryView::locateNotebook(const QString& path)
     setKnownNotebooks(list);
 }
 
-void LibraryView::newSection(const QString& parentDir)
+void LibraryView::showNotebook(const QString& notebook, const QString& section)
 {
-    if (parentDir.isEmpty()) return;
-    const QString name = askName(this, tr("New section"));
-    if (name.isEmpty()) return;
+    QSettings settings("SpeedyNote", "App");
+    settings.setValue(KEY_NOTEBOOK, notebook);
+    settings.setValue(KEY_SECTION, section);
+    m_notebooks->setCurrentItem(nullptr);   // reload() keeps a notebook that is chosen
+    reload();
+}
+
+bool LibraryView::isFavourite(const QString& notePath)
+{
+    return NotebookLibrary::instance()->isStarred(notePath);
+}
+
+void LibraryView::setFavourite(const QString& notePath, bool on)
+{
+    NotebookLibrary* library = NotebookLibrary::instance();
+    if (!library->contains(notePath)) library->addToRecent(notePath);
+    library->setStarred(notePath, on);
+}
+
+QString LibraryView::newSectionWithPrompt(QWidget* parent, const QString& parentDir)
+{
+    if (parentDir.isEmpty()) return QString();
+    const QString name = askName(parent, tr("New section"));
+    if (name.isEmpty()) return QString();
     QString error;
     const QString path = LibraryTree::createSection(parentDir, name, &error);
-    if (path.isEmpty()) {
-        QMessageBox::warning(this, tr("New section"), error);
-        return;
-    }
-    fillSections(path);
+    if (path.isEmpty()) QMessageBox::warning(parent, tr("New section"), error);
+    return path;
+}
+
+void LibraryView::newSection(const QString& parentDir)
+{
+    const QString path = newSectionWithPrompt(this, parentDir);
+    if (!path.isEmpty()) fillSections(path);
 }
 
 void LibraryView::newNote(bool edgeless)
@@ -784,19 +811,25 @@ static void followNotes(const QString& oldRoot, const QString& newRoot, const QS
     settings.setValue(KEY_SECTION, rebase(settings.value(KEY_SECTION).toString(), oldRoot, newRoot));
 }
 
-void LibraryView::renameEntry(const QString& path)
+QString LibraryView::renameWithPrompt(QWidget* parent, const QString& path)
 {
-    const QString name = askName(this, tr("Rename"), LibraryTree::displayName(path));
-    if (name.isEmpty() || name == LibraryTree::displayName(path)) return;
+    const QString name = askName(parent, tr("Rename"), LibraryTree::displayName(path));
+    if (name.isEmpty() || name == LibraryTree::displayName(path)) return QString();
     QStringList notes;
-    if (!releaseNotes(path, &notes)) return;
+    if (!releaseNotes(path, &notes)) return QString();
     QString error;
     const QString renamed = LibraryTree::rename(path, name, &error);
     if (renamed.isEmpty()) {
-        QMessageBox::warning(this, tr("Rename"), error);
-        return;
+        QMessageBox::warning(parent, tr("Rename"), error);
+        return QString();
     }
-    followNotes(path, renamed, notes);
+    followNotes(path, renamed, notes);  // the list of notebooks follows too
+    return renamed;
+}
+
+void LibraryView::renameEntry(const QString& path)
+{
+    if (renameWithPrompt(this, path).isEmpty()) return;
     m_notebooks->setCurrentItem(nullptr);
     reload();
 }
@@ -816,23 +849,28 @@ void LibraryView::setEntryColor(const QString& path, bool clear)
 
 void LibraryView::deleteEntry(const QString& path)
 {
+    if (deleteWithPrompt(this, path)) reload();
+}
+
+bool LibraryView::deleteWithPrompt(QWidget* parent, const QString& path)
+{
     const QString name = LibraryTree::displayName(path);
     const QString question = LibraryTree::isNote(path)
         ? tr("Move the note \"%1\" to the recycle bin?").arg(name)
         : tr("Move \"%1\" and everything in it to the recycle bin?").arg(name);
-    if (QMessageBox::question(this, tr("Delete"), question, QMessageBox::Yes | QMessageBox::No,
+    if (QMessageBox::question(parent, tr("Delete"), question, QMessageBox::Yes | QMessageBox::No,
                               QMessageBox::No) != QMessageBox::Yes)
-        return;
+        return false;
     QStringList notes;
-    if (!releaseNotes(path, &notes)) return;
+    if (!releaseNotes(path, &notes)) return false;
     QString error;
     if (!LibraryTree::trash(path, &error)) {
-        if (QMessageBox::warning(this, tr("Delete"),
+        if (QMessageBox::warning(parent, tr("Delete"),
                 tr("%1\n\nDelete it for good instead? This cannot be undone.").arg(error),
                 QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
-            return;
+            return false;
         if (!QDir(path).removeRecursively())
-            QMessageBox::warning(this, tr("Delete"), tr("Some files could not be deleted."));
+            QMessageBox::warning(parent, tr("Delete"), tr("Some files could not be deleted."));
     }
     NotebookLibrary* library = NotebookLibrary::instance();
     for (const QString& note : notes) {
@@ -841,7 +879,8 @@ void LibraryView::deleteEntry(const QString& path)
     }
     QStringList list = QSettings("SpeedyNote", "App").value(KEY_NOTEBOOKS).toStringList();
     list.removeAll(path);
-    setKnownNotebooks(list);
+    QSettings("SpeedyNote", "App").setValue(KEY_NOTEBOOKS, list);
+    return true;
 }
 
 QString LibraryView::moveNoteInto(QWidget* parent, const QString& path, const QString& dir,

@@ -9,6 +9,7 @@
 #include "subtoolbars/OcrSubToolbar.h"
 #include "subtoolbars/ShapeSubToolbar.h"
 #include "subtoolbars/LaserSubToolbar.h"
+#include "subtoolbars/ObjectSubToolbar.h"
 #include "widgets/ColorListRow.h"
 
 #include <QBoxLayout>
@@ -155,6 +156,7 @@ void Toolbar::setupUi()
 
     // --- Laser pointer ---
     m_laserSubToolbar = new LaserSubToolbar();
+    m_objectSubToolbar = new ObjectSubToolbar();
     m_laserButton = new ToolButton(this);
     m_laserButton->setThemedIcon("laser");
     m_laserButton->setToolTip(tr("Laser Pointer (K)"));
@@ -215,7 +217,7 @@ void Toolbar::setupUi()
     // A later tool with options adds its set here and in optionsForTool().
     m_optionSets = { m_penSubToolbar, m_markerSubToolbar,
                      m_eraserSubToolbar, m_highlighterSubToolbar, m_shapeSubToolbar,
-                     m_laserSubToolbar };
+                     m_laserSubToolbar, m_objectSubToolbar };
     for (SubToolbar* sub : m_optionSets) {
         m_optionLayout->addWidget(sub);
         sub->hide();
@@ -551,6 +553,7 @@ SubToolbar* Toolbar::optionsForTool(ToolType tool) const
     case ToolType::Highlighter: return m_highlighterSubToolbar;
     case ToolType::Shape:       return m_shapeSubToolbar;
     case ToolType::Laser:       return m_laserSubToolbar;
+    case ToolType::ObjectSelect: return m_objectSubToolbar;
     default:                    return nullptr;
     }
 }
@@ -985,6 +988,7 @@ void Toolbar::updateTheme(bool darkMode)
     m_highlighterSubToolbar->setDarkMode(darkMode);
     m_shapeSubToolbar->setDarkMode(darkMode);
     m_laserSubToolbar->setDarkMode(darkMode);
+    m_objectSubToolbar->setDarkMode(darkMode);
     m_ocrSubToolbar->setDarkMode(darkMode);
 
     // Update plain buttons

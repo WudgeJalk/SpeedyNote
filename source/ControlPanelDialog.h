@@ -17,15 +17,14 @@
 // Forward declarations
 class MainWindow;
 class QVBoxLayout;
+class QListWidget;
+class QScrollArea;
 
 /**
  * @brief Control Panel dialog for application settings.
  * 
- * Phase CP.1: Cleaned up after migration. Contains only working tabs:
- * - Theme: Custom accent color settings
- * - Language: Language selection
- * - Cache: Cache management (TODO: integrate with NotebookLibrary)
- * - About: Application info
+ * Roadmap D1: categories on the left, one scrolling page per category, and
+ * a search box. Each old tab, or each group of it, is a section of a page.
  */
 class ControlPanelDialog : public QDialog {
     Q_OBJECT
@@ -44,12 +43,15 @@ public:
      */
     void switchToKeyboardShortcutsTab();
 
-    /// Switch to the Stylus tab (pen buttons). Used by the pen window.
-    void switchToStylusTab() { tabWidget->setCurrentWidget(stylusTab); }
-    /// Switch to the Drawing tab. Used by the ruler's "Options...".
-    void switchToDrawingTab() { tabWidget->setCurrentWidget(drawingTabPage); }
+    /// Open at the pen buttons. Used by the pen window.
+    void switchToStylusTab() { showSetting(stylusTab); }
+    /// Open at the ruler settings. Used by the ruler's "Options...".
+    void switchToDrawingTab() { showSetting(drawingTabPage); }
 
 protected:
+    /// Under 700 px wide, the category list becomes a list box above the page.
+    void resizeEvent(QResizeEvent *event) override;
+
     /**
      * @brief Override done() to fix Android keyboard crash (BUG-A001).
      * Hides the virtual keyboard before dialog destruction.
@@ -67,7 +69,20 @@ private:
     MainWindow *mainWindowRef;
 
     // === Dialog widgets ===
-    QTabWidget *tabWidget;
+    /// Only while the dialog is built: ControlPanelDrawingTab.cpp adds its tab
+    /// here, then its groups move to their categories and this is deleted.
+    QTabWidget *tabWidget = nullptr;
+    enum Category { Interface, Writing, PenTouch, Shapes, PageCategory, Files, Shortcuts, About, CategoryCount };
+    QListWidget *m_categoryList = nullptr;
+    QComboBox *m_categoryCombo = nullptr;   ///< Same choice, for a narrow window
+    QList<QScrollArea *> m_pages;           ///< One per Category
+    QWidgetList m_searchHits;               ///< Highlighted by the search box
+    /// Append `content` to a category's page, under `title` if it has none of its own.
+    void addSection(Category category, QWidget *content, const QString &title = QString());
+    /// Open the category that holds `widget` and scroll to it.
+    void showSetting(QWidget *widget);
+    /// Search box: keep the categories with a match, open and mark the first.
+    void filterSettings(const QString &text);
     QPushButton *applyButton;
     QPushButton *okButton;
     QPushButton *cancelButton;
@@ -90,7 +105,6 @@ private:
     void onPageSizePresetChanged(int index);
 
     // === Tools tab ===
-    QWidget *toolsTab;
     QDoubleSpinBox *wheelScrollSpeedSpin;
     QCheckBox *panOutsidePagesCheck = nullptr;
     // Page tab: show the New note window (Step N1, newNote/ask)
@@ -129,6 +143,7 @@ private:
     QSpinBox *trapezoidAngleSpin = nullptr;
     QSpinBox *levelAngleSpin = nullptr;
     QCheckBox *handArrowsCheck = nullptr;
+    QCheckBox *handArrowTwoStrokesCheck = nullptr;
     QComboBox *handArrowHeadCombo = nullptr;
     QSpinBox *laserHoldSpin = nullptr;
     QSpinBox *laserFadeSpin = nullptr;
@@ -140,7 +155,7 @@ private:
     QSpinBox *tapMsSpin = nullptr;
     QSpinBox *tapSlopSpin = nullptr;        // LengthSpinBox
     QSpinBox *tapReachSpin = nullptr;       // LengthSpinBox
-    QWidget *drawingTabPage = nullptr;
+    QWidget *drawingTabPage = nullptr;   ///< The Ruler group, where switchToDrawingTab() opens
     void createDrawingTab();
     /// Save the Drawing tab, reload DrawingSettings and repaint if needed.
     void applyDrawingTab();

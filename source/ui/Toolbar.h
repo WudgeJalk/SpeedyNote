@@ -28,6 +28,7 @@ class HighlighterSubToolbar;
 class OcrSubToolbar;
 class ShapeSubToolbar;
 class LaserSubToolbar;
+class ObjectSubToolbar;
 
 /**
  * Toolbar - the main bar (tool families) and the option bar (the options of
@@ -100,6 +101,7 @@ public:
     HighlighterSubToolbar* highlighterSubToolbar() const { return m_highlighterSubToolbar; }
     OcrSubToolbar* ocrSubToolbar() const { return m_ocrSubToolbar; }
     ShapeSubToolbar* shapeSubToolbar() const { return m_shapeSubToolbar; }
+    ObjectSubToolbar* objectSubToolbar() const { return m_objectSubToolbar; }
 
     void setOcrAvailable(bool available);
     // Separate from setOcrAvailable: cached text stays viewable without an
@@ -276,6 +278,7 @@ private:
     OcrSubToolbar *m_ocrSubToolbar;
     ShapeSubToolbar *m_shapeSubToolbar;
     LaserSubToolbar *m_laserSubToolbar;
+    ObjectSubToolbar *m_objectSubToolbar;
     QVector<SubToolbar*> m_optionSets;  ///< Every set the option bar can show
 
     // Placement

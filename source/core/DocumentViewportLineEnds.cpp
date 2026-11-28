@@ -231,7 +231,19 @@ bool DocumentViewport::fingerOnHandle(QTouchEvent* event)
                                    && (hit != HandleHit::Inside || lassoLineEnds(nullptr, nullptr));
             } else if ((m_currentTool == ToolType::ObjectSelect || m_currentTool == ToolType::Shape)
                        && m_selectedObjects.size() == 1) {
-                m_fingerOnHandle = objectHandleAtPoint(pos) != HandleHit::None;
+                // A finger on a handle resizes; on the body of the selected
+                // object it moves it (the user, 2026-11-23), unless the object
+                // is fixed to the page. Anywhere else it pans the page.
+                InsertedObject* selected = m_selectedObjects.first();
+                m_fingerOnHandle = objectHandleAtPoint(pos) != HandleHit::None
+                    || (selected && !selected->locked
+                        // Only where the tool's press moves the object: the picture tool
+                        // in Select mode; the shape tool unless it would start a connector.
+                        && (m_currentTool == ToolType::ObjectSelect
+                                ? m_objectActionMode == ObjectActionMode::Select
+                                : (selected->type() == QLatin1String("connector")
+                                   || !shapeToolDrawsConnector()))
+                        && objectAtPoint(viewportToDocument(pos)) == selected);
             }
         }
     }

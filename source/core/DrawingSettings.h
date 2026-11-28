@@ -27,6 +27,7 @@ struct DrawingSettings {
     int holdStillPx = 4;              ///< "pen/holdStillPx": the pen counts as still within this (screen px)
     int holdMinLength = 40;           ///< "pen/holdMinLength": shorter lines are left alone (screen px)
     bool handArrows = true;           ///< "pen/handArrows": a line, then a head at its end, becomes an arrow
+    bool handArrowTwoStrokes = false; ///< "pen/handArrowTwoStrokes": a head drawn after the line (a second stroke) makes an arrow too. Off: a 7 or a 4 stays ink.
     int handArrowHead = 0;            ///< "pen/handArrowHead": 0 as drawn (V open, triangle filled), 1 always open, 2 always filled
 
     // Cleaned strokes (draw and hold, free shape). Settings > Drawing > Shapes.

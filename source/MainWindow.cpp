@@ -10,6 +10,7 @@
 #include "ui/sidebars/LayerPanel.h" // Phase S1: Moved to sidebars folder
 #include "ui/sidebars/OutlinePanel.h" // Phase E.2: PDF outline panel
 #include "ui/sidebars/LeftSidebarContainer.h" // Phase S3: Left sidebar container
+#include "ui/sidebars/LibraryPanel.h"
 #include "ui/sidebars/PagePanel.h" // Page Panel: Task 5.1
 #include "ui/ThumbnailRenderer.h"   // Step N4: first-page thumbnails
 #include "ui/DebugOverlay.h"       // Debug overlay (toggle with F12)
@@ -28,6 +29,7 @@
 #include "ui/actionbars/LassoActionBar.h"
 #include "ui/actionbars/ObjectSelectActionBar.h"
 #include "ui/actionbars/PagePanelActionBar.h"
+#include "ui/subtoolbars/ObjectSubToolbar.h"
 #include "objects/LinkObject.h"  // For LinkSlot slot state access
 #include "core/MarkdownNote.h"   // Phase M.3: For loading markdown notes
 #include "core/NotebookLibrary.h" // Phase P.4.6: For saving thumbnails
@@ -320,8 +322,12 @@ MainWindow::MainWindow(QWidget *parent)
     // ✅ Get screen size & adjust window size
     QScreen *screen = QGuiApplication::primaryScreen();
     if (screen) {
-        QSize logicalSize = screen->availableGeometry().size() * 0.89;
-        resize(logicalSize);
+        // Centred in the free part of the screen. Left to Qt, the window
+        // opened at 0,0: under a bar docked at the top (PowerToys), which
+        // then covered our title row.
+        const QRect avail = screen->availableGeometry();
+        resize(avail.size() * 0.89);
+        move(avail.center() - QPoint(width() / 2, height() / 2));
     }
     // Phase SV: SplitViewManager owns tab bars, viewport stacks, and TabManagers
     m_splitViewManager = new SplitViewManager(this);
@@ -837,6 +843,12 @@ void MainWindow::setupUi() {
     m_leftSidebar->setVisible(false);   // Hidden by default, toggled via NavigationBar
     m_layerPanel = m_leftSidebar->layerPanel();  // Get reference for signal connections
     m_pagePanel = m_leftSidebar->pagePanel();    // Page Panel: Task 5.1
+    connect(m_leftSidebar->libraryPanel(), &LibraryPanel::noteActivated,
+            this, &MainWindow::openFileInNewTab);
+    connect(m_leftSidebar->libraryPanel(), &LibraryPanel::newNoteRequested, this, [this](const QString& folder) {
+        newNote(false, folder);
+        m_leftSidebar->libraryPanel()->reload();
+    });
     
     // =========================================================================
     // Phase 5.6.8: Simplified LayerPanel Signal Handlers
@@ -2857,6 +2869,11 @@ void MainWindow::connectViewportScrollSignals(DocumentViewport* viewport) {
             } else {
                 m_objectSelectActionBar->updateImageSelection(false, false);
             }
+            {
+                InsertedObject* one = sel.size() == 1 ? sel.first() : nullptr;
+                m_objectSelectActionBar->updatePageLock(one && one->type() != QLatin1String("link"),
+                                                        one && one->locked);
+            }
             if (!sel.isEmpty() && sel.size() == 1 && sel.first()->type() == QStringLiteral("ocr_text")) {
                 auto* ocr = dynamic_cast<OcrTextObject*>(sel.first());
                 m_objectSelectActionBar->updateOcrLockSelection(true, ocr ? ocr->ocrLocked : false);
@@ -2939,6 +2956,11 @@ void MainWindow::connectViewportScrollSignals(DocumentViewport* viewport) {
                 m_objectSelectActionBar->updateImageSelection(true, img ? img->maintainAspectRatio : true);
             } else {
                 m_objectSelectActionBar->updateImageSelection(false, false);
+            }
+            {
+                InsertedObject* one = sel.size() == 1 ? sel.first() : nullptr;
+                m_objectSelectActionBar->updatePageLock(one && one->type() != QLatin1String("link"),
+                                                        one && one->locked);
             }
             if (!sel.isEmpty() && sel.size() == 1 && sel.first()->type() == QStringLiteral("ocr_text")) {
                 auto* ocr = dynamic_cast<OcrTextObject*>(sel.first());
@@ -5809,6 +5831,7 @@ void MainWindow::updateTheme() {
     // Update ActionBarContainer theme
     if (m_actionBarContainer) {
         m_actionBarContainer->setDarkMode(darkMode);
+        if (m_pagePanelActionBar) m_pagePanelActionBar->setDarkMode(darkMode);  // it lives in the Pages panel
     }
 
     // Phase M.8: propagate theme into the right-hand markdown notes sidebar
@@ -6500,6 +6523,27 @@ void MainWindow::setupActionBars()
             vp->toggleImageAspectRatioLock();
         }
     });
+    connect(m_objectSelectActionBar, &ObjectSelectActionBar::pageLockToggleRequested, this, [this]() {
+        if (DocumentViewport* vp = currentViewport()) {
+            vp->toggleObjectLocked();
+        }
+    });
+    // The options of the picture tool, under the toolbar: same wires as this bar.
+    if (m_toolbar && m_toolbar->objectSubToolbar()) {
+        ObjectSubToolbar* options = m_toolbar->objectSubToolbar();
+        connect(options, &ObjectSubToolbar::createModeRequested, this, [this](bool create) {
+            if (DocumentViewport* vp = currentViewport()) {
+                vp->setObjectActionMode(create ? DocumentViewport::ObjectActionMode::Create
+                                               : DocumentViewport::ObjectActionMode::Select);
+            }
+        });
+        connect(options, &ObjectSubToolbar::pasteRequested,
+                m_objectSelectActionBar, &ObjectSelectActionBar::pasteRequested);
+        connect(m_objectSelectActionBar, &ObjectSelectActionBar::actionModeStateSet, options,
+                [options](DocumentViewport::ObjectActionMode mode) {
+            options->setCreateMode(mode == DocumentViewport::ObjectActionMode::Create);
+        });
+    }
     connect(m_objectSelectActionBar, &ObjectSelectActionBar::ocrLockToggleRequested, this, [this]() {
         DocumentViewport* vp = currentViewport();
         if (!vp) return;
@@ -8296,8 +8340,10 @@ void MainWindow::setupPagePanelActionBar()
     }
     
     // Create the PagePanelActionBar
-    m_pagePanelActionBar = new PagePanelActionBar(m_actionBarContainer);
-    m_actionBarContainer->setPagePanelActionBar(m_pagePanelActionBar);
+    // At the end of the Pages side panel, not floating over the page.
+    m_pagePanelActionBar = new PagePanelActionBar(m_pagePanel);
+    m_pagePanelActionBar->setInPanel();
+    m_pagePanel->setBottomBar(m_pagePanelActionBar);
     
     // -------------------------------------------------------------------------
     // Navigation signals
@@ -8510,7 +8556,6 @@ void MainWindow::updatePagePanelActionBarVisibility()
             documentHasPages = !doc->isEdgeless();
         }
     }
-    m_actionBarContainer->setPagePanelDocumentSupported(documentHasPages);
     
     // Check if the page panel UI is active (sidebar visible + pages tab selected)
     bool panelActive = false;
@@ -8519,7 +8564,6 @@ void MainWindow::updatePagePanelActionBarVisibility()
         int pagesTabIndex = m_leftSidebar->indexOf(m_leftSidebar->pagePanel());
         panelActive = (m_leftSidebar->currentIndex() == pagesTabIndex);
     }
-    m_actionBarContainer->setPagePanelVisible(panelActive);
     
     // Update action bar position after visibility change to ensure correct placement
     updateActionBarPosition();
@@ -9517,8 +9561,33 @@ bool MainWindow::nativeEvent(const QByteArray &eventType, void *message, long *r
                     return true;
                 }
                 break;
+            case WM_WINDOWPOSCHANGED: {
+                // With a bar docked at the top of the screen (PowerToys), Qt
+                // gives a restored window back lower by the height of that
+                // bar, each time. So we keep the place it had before it was
+                // maximised, and put it back there.
+                const bool zoomed = IsZoomed(msg->hwnd);
+                if (!IsIconic(msg->hwnd) && !isFullScreen()) {
+                    if (m_wasZoomed && !zoomed && m_normalRect.isValid()) {
+                        const HWND hwnd = msg->hwnd;
+                        const QRect r = m_normalRect;
+                        QTimer::singleShot(0, this, [hwnd, r]() {
+                            if (!IsZoomed(hwnd) && !IsIconic(hwnd)) {
+                                SetWindowPos(hwnd, nullptr, r.x(), r.y(), r.width(), r.height(),
+                                             SWP_NOZORDER | SWP_NOACTIVATE);
+                            }
+                        });
+                    } else if (!zoomed) {
+                        RECT rc;
+                        GetWindowRect(msg->hwnd, &rc);
+                        m_normalRect = QRect(rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top);
+                    }
+                }
+                m_wasZoomed = zoomed;
+                hideQtTitleBarDrawing();
+                break;
+            }
             case WM_SHOWWINDOW:
-            case WM_WINDOWPOSCHANGED:
             case WM_ACTIVATE:
                 hideQtTitleBarDrawing();  // Qt shows it again in some cases
                 break;

@@ -8,6 +8,7 @@
 #include "core/PenHaptics.h"
 #include "strokes/StrokeStyle.h"
 #include "ui/StrokePresetDialog.h"
+#include "ui/subtoolbars/PenSubToolbar.h"
 #include "ui/widgets/LengthSpinBox.h"
 
 #include <QCheckBox>
@@ -17,6 +18,7 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QListWidget>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSettings>
@@ -120,6 +122,83 @@ void ControlPanelDialog::createDrawingTab()
         w->setEnabled(drawing.drawAndHold);
         connect(drawAndHoldCheck, &QCheckBox::toggled, w, &QWidget::setEnabled);
     }
+
+    // --- Multi-pen: several named pens of one kind. Applies at once, like pen vibration. ---
+    QSettings appSettings("SpeedyNote", "App");
+    QCheckBox* multiPenCheck = new QCheckBox(tr("Multi-pen"), penGroup);
+    multiPenCheck->setChecked(appSettings.value("pen/multiPen", false).toBool());
+    penLayout->addRow(multiPenCheck);
+    QComboBox* multiPenType = new QComboBox(penGroup);
+    multiPenType->addItems({tr("Fountain pen"), tr("Ball pen"), tr("Brush pen")});
+    multiPenType->setCurrentIndex(qBound(0, appSettings.value("pen/penType", 0).toInt(), 2));
+    penLayout->addRow(tr("Pens of the:"), multiPenType);
+    QListWidget* multiPenList = new QListWidget(penGroup);
+    multiPenList->setMaximumHeight(120);
+    penLayout->addRow(multiPenList);
+    QPushButton* multiPenAdd = new QPushButton(tr("Add a pen"), penGroup);
+    QPushButton* multiPenRemove = new QPushButton(tr("Remove the pen"), penGroup);
+    QHBoxLayout* multiPenButtons = new QHBoxLayout();
+    multiPenButtons->addWidget(multiPenAdd);
+    multiPenButtons->addWidget(multiPenRemove);
+    multiPenButtons->addStretch();
+    penLayout->addRow(multiPenButtons);
+    penLayout->addRow(hintLabel(
+        tr("Several pens of the same kind, each with its own three sizes: one for A4 paper and one "
+           "for A5, for example. The loop button at the start of the pen bar goes to the next pen "
+           "and shows its name for a moment. Set the sizes of a pen in the pen bar, as usual. "
+           "Double tap a name to change it. A kind of pen without pens here works as before."),
+        penGroup));
+    const auto refreshPenBar = [this]() {
+        PenSubToolbar* bar = mainWindowRef ? mainWindowRef->findChild<PenSubToolbar*>() : nullptr;
+        if (bar) bar->refreshFromSettings();
+    };
+    const auto fillMultiPens = [multiPenType, multiPenList]() {
+        const QSignalBlocker block(multiPenList);   // filling is not a rename
+        multiPenList->clear();
+        const int type = multiPenType->currentIndex();
+        QSettings settings("SpeedyNote", "App");
+        for (const QString& id : PenSubToolbar::multiPenIds(type)) {
+            QListWidgetItem* item = new QListWidgetItem(
+                settings.value(PenSubToolbar::multiPenKey(type, id) + "/name").toString(), multiPenList);
+            item->setData(Qt::UserRole, id);
+            item->setFlags(item->flags() | Qt::ItemIsEditable);
+        }
+    };
+    fillMultiPens();
+    connect(multiPenType, QOverload<int>::of(&QComboBox::currentIndexChanged), this, fillMultiPens);
+    connect(multiPenAdd, &QPushButton::clicked, this, [=]() {
+        PenSubToolbar::addMultiPen(multiPenType->currentIndex(), tr("Pen %1").arg(multiPenList->count() + 1));
+        fillMultiPens();
+        refreshPenBar();
+        multiPenList->setCurrentRow(multiPenList->count() - 1);
+        multiPenList->editItem(multiPenList->currentItem());   // name it at once
+    });
+    connect(multiPenRemove, &QPushButton::clicked, this, [=]() {
+        const QListWidgetItem* item = multiPenList->currentItem();
+        if (!item) return;
+        QSettings("SpeedyNote", "App").remove(
+            PenSubToolbar::multiPenKey(multiPenType->currentIndex(), item->data(Qt::UserRole).toString()));
+        fillMultiPens();
+        refreshPenBar();
+    });
+    connect(multiPenList, &QListWidget::itemChanged, this, [=](QListWidgetItem* item) {
+        const QString name = item->text().trimmed();
+        if (name.isEmpty()) {
+            fillMultiPens();   // an empty name: the old one comes back
+            return;
+        }
+        QSettings("SpeedyNote", "App").setValue(
+            PenSubToolbar::multiPenKey(multiPenType->currentIndex(), item->data(Qt::UserRole).toString())
+                + "/name", name);
+        refreshPenBar();
+    });
+    const QList<QWidget*> multiPenWidgets = {multiPenType, multiPenList, multiPenAdd, multiPenRemove};
+    for (QWidget* w : multiPenWidgets) w->setEnabled(multiPenCheck->isChecked());
+    connect(multiPenCheck, &QCheckBox::toggled, this, [=](bool on) {
+        for (QWidget* w : multiPenWidgets) w->setEnabled(on);
+        QSettings("SpeedyNote", "App").setValue("pen/multiPen", on);
+        refreshPenBar();
+    });
     layout->addWidget(penGroup);
 
     // --- Shapes: how a held or free-shape line is cleaned ---
@@ -164,6 +243,14 @@ void ControlPanelDialog::createDrawingTab()
     handArrowsCheck = new QCheckBox(tr("Hand-drawn arrows"), shapesGroup);
     handArrowsCheck->setChecked(drawing.handArrows);
     shapesLayout->addRow(handArrowsCheck);
+    handArrowTwoStrokesCheck = new QCheckBox(tr("A head drawn after the line makes an arrow too"), shapesGroup);
+    handArrowTwoStrokesCheck->setChecked(drawing.handArrowTwoStrokes);
+    handArrowTwoStrokesCheck->setEnabled(drawing.handArrows);
+    connect(handArrowsCheck, &QCheckBox::toggled, handArrowTwoStrokesCheck, &QWidget::setEnabled);
+    shapesLayout->addRow(handArrowTwoStrokesCheck);
+    shapesLayout->addRow(hintLabel(
+        tr("Off: only a line and its head drawn in one movement become an arrow, so a 7 or a 4 "
+           "written in two movements stays as written."), shapesGroup));
     handArrowHeadCombo = new QComboBox(shapesGroup);
     handArrowHeadCombo->addItem(tr("Follow my scribble (V = open, closed triangle = filled)"));
     handArrowHeadCombo->addItem(tr("Always open"));
@@ -176,8 +263,8 @@ void ControlPanelDialog::createDrawingTab()
     shapesLayout->addRow(hintLabel(
         tr("A closed line becomes an exact circle, ellipse, square, rectangle, rhombus, "
            "parallelogram, trapezoid or polygon; 0 % keeps the drawn shape, only smoothed. "
-           "Draw a line and a quick V, hook or small triangle at its end, in the same stroke "
-           "or right after: the line becomes an arrow and keeps its curve. The snap distance "
+           "Draw a line and a quick V, hook or small triangle at its end, in the same stroke: "
+           "the line becomes an arrow and keeps its curve. The snap distance "
            "is measured on the screen; 0 turns snapping off."), shapesGroup));
     layout->addWidget(shapesGroup);
 
@@ -356,6 +443,7 @@ void ControlPanelDialog::applyDrawingTab()
     settings.setValue("pen/holdStillPx", holdStillSpin->value());
     settings.setValue("pen/holdMinLength", holdMinLengthSpin->value());
     settings.setValue("pen/handArrows", handArrowsCheck->isChecked());
+    settings.setValue("pen/handArrowTwoStrokes", handArrowTwoStrokesCheck->isChecked());
     settings.setValue("pen/handArrowHead", handArrowHeadCombo->currentIndex());
     settings.setValue("shapes/cornerAngle", cornerAngleSpin->value());
     settings.setValue("shapes/closePercent", closePercentSpin->value());

@@ -1,6 +1,7 @@
 <!DOCTYPE RCC>
 <RCC version="1.0">
 <qresource prefix="/">
+    <file>resources/fonts/Rubik.ttf</file>
 
     <file>resources/icons/pen.png</file>
     <file>resources/icons/pen_reversed.png</file>
@@ -128,6 +129,8 @@
     <file>resources/icons/rightsidebar_reversed.png</file>
     <file>resources/icons/undo.png</file>
     <file>resources/icons/undo_reversed.png</file>
+    <file>resources/icons/multipen.png</file>
+    <file>resources/icons/multipen_reversed.png</file>
     <file>resources/icons/redo.png</file>
     <file>resources/icons/redo_reversed.png</file>
     <file>resources/icons/shape.png</file>
@@ -155,6 +158,10 @@
     <file>resources/icons/layer_uparrow_reversed.png</file>
     <file>resources/icons/layer_downarrow.png</file>
     <file>resources/icons/layer_downarrow_reversed.png</file>
+    <file>resources/icons/image_plus.png</file>
+    <file>resources/icons/image_plus_reversed.png</file>
+    <file>resources/icons/proportions.png</file>
+    <file>resources/icons/proportions_reversed.png</file>
     <file>resources/icons/lock.png</file>
     <file>resources/icons/lock_reversed.png</file>
     <file>resources/icons/edit.png</file>

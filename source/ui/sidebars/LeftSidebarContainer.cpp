@@ -1,5 +1,6 @@
 #include "LeftSidebarContainer.h"
 #include "LayerPanel.h"
+#include "LibraryPanel.h"
 #include "OutlinePanel.h"
 #include "PagePanel.h"
 
@@ -27,6 +28,10 @@ void LeftSidebarContainer::setupUi()
     // Only add Layers tab initially
     // Outline and Pages tabs are added dynamically based on document type
     m_layersTabIndex = addTab(m_layerPanel, tr("Layers"));
+
+    // After Layers, so the index sums of the tabs above stay as they are.
+    m_libraryPanel = new LibraryPanel(this);
+    addTab(m_libraryPanel, tr("Library"));
 }
 
 void LeftSidebarContainer::showOutlineTab(bool show)
@@ -95,6 +100,10 @@ void LeftSidebarContainer::updateTheme(bool darkMode)
         m_pagePanel->setDarkMode(darkMode);
     }
     
+    if (m_libraryPanel) {
+        m_libraryPanel->setDarkMode(darkMode);
+    }
+
     // LayerPanel handles its own theming
 }
 

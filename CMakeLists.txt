@@ -991,6 +991,7 @@ set(UI_SOURCES
     # Sidebars
     source/ui/sidebars/LayerPanel.cpp
     source/ui/sidebars/LeftSidebarContainer.cpp
+    source/ui/sidebars/LibraryPanel.cpp
     source/ui/sidebars/OutlinePanel.cpp
     source/ui/sidebars/OutlinePanelTreeWidget.cpp
     source/ui/sidebars/OutlineItemDelegate.cpp
@@ -1026,6 +1027,7 @@ set(UI_SOURCES
     source/ui/subtoolbars/OcrSubToolbar.cpp
     source/ui/subtoolbars/ShapeSubToolbar.cpp
     source/ui/subtoolbars/LaserSubToolbar.cpp
+    source/ui/subtoolbars/ObjectSubToolbar.cpp
     # Panels
     source/ui/panels/InlineTextBoxEditor.cpp
     source/ui/panels/TextBoxFormatBar.cpp

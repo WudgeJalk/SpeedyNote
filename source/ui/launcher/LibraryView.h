@@ -40,6 +40,21 @@ public:
     /// Reads the known notebooks and the chosen one again (folder names only).
     void reload();
 
+    /// Chooses this notebook and this section (for a notebook card of Chronologie).
+    void showNotebook(const QString& notebook, const QString& section);
+
+    /// A note of a notebook in the favourites (the Favoris page shows it). A note
+    /// that was never opened enters the start screen's list first.
+    static bool isFavourite(const QString& notePath);
+    static void setFavourite(const QString& notePath, bool on);
+
+    /// The actions of this page's menus, for the Library side panel too. Each
+    /// asks, closes a note that is open first, and says what failed. They
+    /// return the new path (true for delete), or empty (false): nothing done.
+    static QString newSectionWithPrompt(QWidget* parent, const QString& parentDir);
+    static QString renameWithPrompt(QWidget* parent, const QString& path);
+    static bool deleteWithPrompt(QWidget* parent, const QString& path);
+
     /// Moves a note or a section into dir, just before beforeName (also used by
     /// "Move to a Notebook..." of the start screen, Step N2). Notes in it that
     /// are open close first (the editor asks to save); the start screen, the

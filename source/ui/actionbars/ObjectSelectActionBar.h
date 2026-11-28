@@ -116,8 +116,15 @@ public:
      */
     void updateLinkSelection(bool isLink);
 
+    /// The "fixed to the page" button: shown for one selected object that is
+    /// not an annotation; checked when it is fixed.
+    void updatePageLock(bool canLock, bool locked);
+
 signals:
     void actionModeChanged(DocumentViewport::ObjectActionMode mode);
+    /// The mode this bar was told about (for the options under the toolbar).
+    void actionModeStateSet(DocumentViewport::ObjectActionMode mode);
+    void pageLockToggleRequested();
 
     /**
      * @brief Emitted when the aspect ratio lock button is clicked.
@@ -202,6 +209,8 @@ private:
     
     // Aspect ratio lock (image-only)
     ActionBarButton* m_aspectLockButton = nullptr;
+    ActionBarButton* m_pageLockButton = nullptr;
+    bool m_canPageLock = false;
     
     // OCR lock (ocr-text-only)
     ActionBarButton* m_ocrLockButton = nullptr;

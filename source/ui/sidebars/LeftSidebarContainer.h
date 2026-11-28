@@ -4,6 +4,7 @@
 #include <QTabWidget>
 
 class LayerPanel;
+class LibraryPanel;
 class OutlinePanel;
 class PagePanel;
 
@@ -42,6 +43,9 @@ public:
      * @return Pointer to PagePanel (owned by this container).
      */
     PagePanel* pagePanel() const { return m_pagePanel; }
+
+    /// The library tree (notebooks, sections, notes). Always the last tab.
+    LibraryPanel* libraryPanel() const { return m_libraryPanel; }
     
     // =========================================================================
     // Dynamic Tab Management
@@ -90,6 +94,7 @@ private:
     LayerPanel *m_layerPanel = nullptr;
     OutlinePanel *m_outlinePanel = nullptr;
     PagePanel *m_pagePanel = nullptr;
+    LibraryPanel *m_libraryPanel = nullptr;
     
     int m_outlineTabIndex = -1;  // -1 = tab not added
     int m_pagesTabIndex = -1;    // -1 = tab not added

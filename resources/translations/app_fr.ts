@@ -1049,6 +1049,130 @@ NOTE : Sur Android, les carnets importés sont automatiquement ajoutés à la bi
 <context>
     <name>ControlPanelDialog</name>
     <message>
+        <source>Multi-pen</source>
+        <translation>Multi-stylo</translation>
+    </message>
+    <message>
+        <source>Fountain pen</source>
+        <translation>Stylo plume</translation>
+    </message>
+    <message>
+        <source>Ball pen</source>
+        <translation>Stylo bille</translation>
+    </message>
+    <message>
+        <source>Brush pen</source>
+        <translation>Stylo pinceau</translation>
+    </message>
+    <message>
+        <source>Pens of the:</source>
+        <translation>Stylos du type :</translation>
+    </message>
+    <message>
+        <source>Add a pen</source>
+        <translation>Ajouter un stylo</translation>
+    </message>
+    <message>
+        <source>Remove the pen</source>
+        <translation>Supprimer le stylo</translation>
+    </message>
+    <message>
+        <source>Pen %1</source>
+        <translation>Stylo %1</translation>
+    </message>
+    <message>
+        <source>Several pens of the same kind, each with its own three sizes: one for A4 paper and one for A5, for example. The loop button at the start of the pen bar goes to the next pen and shows its name for a moment. Set the sizes of a pen in the pen bar, as usual. Double tap a name to change it. A kind of pen without pens here works as before.</source>
+        <translation>Plusieurs stylos du même type, chacun avec ses trois tailles : un pour le papier A4 et un pour le A5, par exemple. Le bouton boucle au début de la barre du stylo passe au stylo suivant et affiche son nom un instant. Réglez les tailles d&apos;un stylo dans la barre du stylo, comme d&apos;habitude. Touchez deux fois un nom pour le changer. Un type de stylo sans stylo ici fonctionne comme avant.</translation>
+    </message>
+    <message>
+        <source>A head drawn after the line makes an arrow too</source>
+        <translation>Une pointe tracée après le trait fait aussi une flèche</translation>
+    </message>
+    <message>
+        <source>Off: only a line and its head drawn in one movement become an arrow, so a 7 or a 4 written in two movements stays as written.</source>
+        <translation>Désactivé : seuls un trait et sa pointe tracés en un seul mouvement deviennent une flèche. Un 7 ou un 4 écrit en deux mouvements reste tel quel.</translation>
+    </message>
+    <message>
+        <source>Search settings</source>
+        <translation>Chercher un réglage</translation>
+    </message>
+    <message>
+        <source>Interface</source>
+        <translation>Interface</translation>
+    </message>
+    <message>
+        <source>Writing experience</source>
+        <translation>Écriture</translation>
+    </message>
+    <message>
+        <source>Pen and touch</source>
+        <translation>Stylet et toucher</translation>
+    </message>
+    <message>
+        <source>Shapes</source>
+        <translation>Formes</translation>
+    </message>
+    <message>
+        <source>Files</source>
+        <translation>Fichiers</translation>
+    </message>
+    <message>
+        <source>Start screen</source>
+        <translation>Écran de démarrage</translation>
+    </message>
+    <message>
+        <source>Chronologie shows a notebook as one card</source>
+        <translation>La Chronologie montre un carnet comme une seule carte</translation>
+    </message>
+    <message>
+        <source>A note that is in a notebook of the Library shows as that notebook, once. Off: every note has its own card.</source>
+        <translation>Une note rangée dans un carnet de la Bibliothèque apparaît sous ce carnet, une seule fois. Désactivé : chaque note a sa propre carte.</translation>
+    </message>
+    <message>
+        <source>A tap on a notebook card:</source>
+        <translation>Un appui sur la carte d'un carnet :</translation>
+    </message>
+    <message>
+        <source>Opens the note used last</source>
+        <translation>Ouvre la dernière note utilisée</translation>
+    </message>
+    <message>
+        <source>Opens the notebook in the Library</source>
+        <translation>Ouvre le carnet dans la Bibliothèque</translation>
+    </message>
+    <message>
+        <source>Used for every length the app shows: page size, spacing, pen width.</source>
+        <translation>Sert pour toutes les longueurs affichées : taille de page, espacement, épaisseur du stylo.</translation>
+    </message>
+    <message>
+        <source>When SpeedyNote starts, the notes open last time:</source>
+        <translation>Au démarrage de SpeedyNote, les notes ouvertes la dernière fois :</translation>
+    </message>
+    <message>
+        <source>Open again</source>
+        <translation>Les rouvrir</translation>
+    </message>
+    <message>
+        <source>Ask me</source>
+        <translation>Me demander</translation>
+    </message>
+    <message>
+        <source>Stay closed</source>
+        <translation>Les laisser fermées</translation>
+    </message>
+    <message>
+        <source>Use the SpeedyNote font (Rubik)</source>
+        <translation>Utiliser la police SpeedyNote (Rubik)</translation>
+    </message>
+    <message>
+        <source>Off: the font of your system. The change shows at the next start of SpeedyNote.</source>
+        <translation>Désactivé : la police de votre système. Le changement apparaît au prochain démarrage de SpeedyNote.</translation>
+    </message>
+    <message>
+        <source>The change shows at the next start of SpeedyNote.</source>
+        <translation>Le changement apparaît au prochain démarrage de SpeedyNote.</translation>
+    </message>
+    <message>
         <location filename="../../source/ControlPanelDialog.cpp" line="182"/>
         <source>Apply</source>
         <translation type="unfinished">Postuler</translation>
@@ -3022,6 +3146,88 @@ Cette action est irréversible.</translation>
         <source>Pages</source>
         <translation>Pages</translation>
     </message>
+    <message>
+        <source>Library</source>
+        <translation>Bibliothèque</translation>
+    </message>
+</context>
+<context>
+    <name>ObjectSubToolbar</name>
+    <message>
+        <source>Select: tap a picture to choose it, then drag it (Ctrl+7)</source>
+        <translation>Sélection : touchez une image pour la choisir, puis faites-la glisser (Ctrl+7)</translation>
+    </message>
+    <message>
+        <source>Add: tap the page to put a picture there (Ctrl+6)</source>
+        <translation>Ajout : touchez la page pour y placer une image (Ctrl+6)</translation>
+    </message>
+    <message>
+        <source>Paste a picture or an object (Ctrl+V)</source>
+        <translation>Coller une image ou un objet (Ctrl+V)</translation>
+    </message>
+</context>
+<context>
+    <name>LibraryPanel</name>
+    <message>
+        <source>Remove from the favourites</source>
+        <translation>Retirer des favoris</translation>
+    </message>
+    <message>
+        <source>Add to the favourites</source>
+        <translation>Ajouter aux favoris</translation>
+    </message>
+    <message>
+        <source>Move to...</source>
+        <translation>Déplacer vers...</translation>
+    </message>
+    <message>
+        <source>New note in the chosen section</source>
+        <translation>Nouvelle note dans la section choisie</translation>
+    </message>
+    <message>
+        <source>New section in the chosen notebook or section</source>
+        <translation>Nouvelle section dans le carnet ou la section choisie</translation>
+    </message>
+    <message>
+        <source>Rename</source>
+        <translation>Renommer</translation>
+    </message>
+    <message>
+        <source>Delete (to the recycle bin)</source>
+        <translation>Supprimer (vers la corbeille)</translation>
+    </message>
+    <message>
+        <source>New note</source>
+        <translation>Nouvelle note</translation>
+    </message>
+    <message>
+        <source>New section</source>
+        <translation>Nouvelle section</translation>
+    </message>
+    <message>
+        <source>Rename...</source>
+        <translation>Renommer...</translation>
+    </message>
+    <message>
+        <source>Set colour...</source>
+        <translation>Choisir la couleur...</translation>
+    </message>
+    <message>
+        <source>Delete...</source>
+        <translation>Supprimer...</translation>
+    </message>
+    <message>
+        <source>Colour of &quot;%1&quot;</source>
+        <translation>Couleur de « %1 »</translation>
+    </message>
+    <message>
+        <source>No notebook yet.</source>
+        <translation>Aucun carnet pour le moment.</translation>
+    </message>
+    <message>
+        <source>Make one: Home &gt; Library.</source>
+        <translation>Créez-en un : Accueil &gt; Bibliothèque.</translation>
+    </message>
 </context>
 <context>
     <name>LinkObjectBar</name>
@@ -4263,6 +4469,14 @@ Veuillez supprimer le mot de passe et réessayer.</translation>
 <context>
     <name>ObjectSelectActionBar</name>
     <message>
+        <source>Keep the proportions of the picture when you resize it</source>
+        <translation>Garder les proportions de l'image quand vous la redimensionnez</translation>
+    </message>
+    <message>
+        <source>Fix to the page: it cannot be moved or resized</source>
+        <translation>Fixer à la page : impossible de la déplacer ou de la redimensionner</translation>
+    </message>
+    <message>
         <location filename="../../source/ui/actionbars/ObjectSelectActionBar.cpp" line="241"/>
         <source>Add mode (click to switch to Select) (Ctrl+6)</source>
         <translation>Mode Ajout (cliquer pour passer à Sélection) (Ctrl+6)</translation>
@@ -4758,6 +4972,10 @@ Double-cliquer ou double-taper pour accéder à une page</translation>
 </context>
 <context>
     <name>PenSubToolbar</name>
+    <message>
+        <source>Next pen (now: %1)</source>
+        <translation>Stylo suivant (actuel : %1)</translation>
+    </message>
     <message>
         <location filename="../../source/ui/subtoolbars/PenSubToolbar.cpp" line="44"/>
         <source>Color preset %1 (click to select, click again to edit)</source>
@@ -6067,6 +6285,17 @@ et sélectionnez « Ajouter aux favoris » pour l&apos;ajouter ici.</translation
             <numerusform>%n correspondance</numerusform>
             <numerusform>%n correspondances</numerusform>
         </translation>
+    </message>
+</context>
+<context>
+    <name>LibraryView</name>
+    <message>
+        <source>Remove from the favourites</source>
+        <translation>Retirer des favoris</translation>
+    </message>
+    <message>
+        <source>Add to the favourites</source>
+        <translation>Ajouter aux favoris</translation>
     </message>
 </context>
 </TS>

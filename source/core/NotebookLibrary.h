@@ -31,6 +31,10 @@ struct NotebookInfo {
     bool isEdgeless = false;  ///< True if this is an edgeless (infinite canvas) notebook
     QString pdfFileName;      ///< Original PDF filename (for search), if PDF-based
     QJsonObject cover;        ///< The note's cover (Step N3, from document.json); empty = none
+    /// Chronologie only, never saved: the card stands for the whole notebook of
+    /// the Library that holds this note (its folder); name and cover are the
+    /// notebook's, bundlePath stays the note used last.
+    QString notebookRoot;
 
     /**
      * @brief Check if this notebook info is valid.
@@ -139,6 +143,12 @@ public:
      * @param starred True to star, false to unstar.
      */
     void setStarred(const QString& bundlePath, bool starred);
+    /// Whether the list knows this note, and whether it is starred.
+    bool contains(const QString& bundlePath) const { return findNotebook(bundlePath) != nullptr; }
+    bool isStarred(const QString& bundlePath) const {
+        const NotebookInfo* info = findNotebook(bundlePath);
+        return info && info->isStarred;
+    }
     
     /**
      * @brief Assign a notebook to a starred folder.

@@ -2580,7 +2580,7 @@ DocumentViewport::HandleHit DocumentViewport::objectHandleAtPoint(const QPointF&
     // Annotations expose no handles. updateObjectResize() has always rejected
     // them, and a highlight's bounds are its text rects: resizing or rotating
     // them would detach the mark from the text it annotates.
-    if (obj->type() == QLatin1String("link")) {
+    if (obj->type() == QLatin1String("link") || obj->locked) {   // fixed to the page: no handles
         return HandleHit::None;
     }
     // A connector has a handle on each end and no box.
@@ -4627,6 +4627,20 @@ void DocumentViewport::tabletEvent(QTabletEvent* event)
             return;
     }
 
+    // The pen must always write (the user, 2026-11-23: after a start in tablet
+    // mode an arrow stayed frozen on the page and the pen drew nothing more).
+    // A mouse or finger gesture whose release never came (the release arrived
+    // as a pen event, or a window took it) used to swallow every pen event for
+    // the rest of the session. A pen press ends such a gesture first. A mouse
+    // gesture counts as stale once the mouse was silent for 0.3 s: a pen that
+    // also sends mouse events sends them right before this press.
+    if (peType == PointerEvent::Press && m_pointerActive
+        && (m_activeSource == PointerEvent::Touch
+            || (m_activeSource == PointerEvent::Mouse
+                && (!m_lastMousePointer.isValid() || m_lastMousePointer.elapsed() > 300)))) {
+        endStalePointerGesture();
+    }
+
     // Do not let a stylus press preempt a mouse ObjectSelect gesture and erase
     // its initiating-button/effective-mode state.
     if (m_pointerActive && m_activeSource == PointerEvent::Mouse) {
@@ -6254,6 +6268,9 @@ PointerEvent DocumentViewport::tabletToPointerEvent(QTabletEvent* event, Pointer
 
 void DocumentViewport::handlePointerEvent(const PointerEvent& pe)
 {
+    if (pe.source == PointerEvent::Mouse && pe.type != PointerEvent::Release) {
+        m_lastMousePointer.restart();   // see endStalePointerGesture()
+    }
     switch (pe.type) {
         case PointerEvent::Press:
             handlePointerPress(pe);
@@ -6265,6 +6282,30 @@ void DocumentViewport::handlePointerEvent(const PointerEvent& pe)
             handlePointerRelease(pe);
             break;
     }
+}
+
+void DocumentViewport::endStalePointerGesture()
+{
+    // A shape that was only a preview is dropped, not put on the page.
+    if (m_shapeDraft.active) {
+        m_shapeDraft.active = false;
+        m_shapeDraft.preview = VectorStroke();
+    }
+    PointerEvent pe;
+    pe.type = PointerEvent::Release;
+    pe.source = m_activeSource;
+    pe.viewportPos = m_lastPointerPos;
+    pe.pageHit = viewportToPage(pe.viewportPos);
+    pe.button = Qt::LeftButton;
+    pe.buttons = Qt::NoButton;
+    pe.timestamp = QDateTime::currentMSecsSinceEpoch();
+    handlePointerEvent(pe);
+    // Whatever the tool's release did, nothing is held any more.
+    m_pointerActive = false;
+    m_activeSource = PointerEvent::Unknown;
+    m_fingerOnHandle = false;
+    m_offPagePanArmed = false;
+    update();
 }
 
 void DocumentViewport::handlePointerPress(const PointerEvent& pe)
@@ -7849,7 +7890,7 @@ void DocumentViewport::handlePointerPress_ObjectSelect(const PointerEvent& pe)
             // one here is what refuses it.
             m_objectOriginalPositions.clear();
             for (InsertedObject* obj : m_selectedObjects) {
-                if (obj && !isAnnotation(obj)) {
+                if (obj && !isAnnotation(obj) && !obj->locked) {   // fixed to the page: it stays
                     m_objectOriginalPositions[obj->id] = obj->position;
                 }
             }
@@ -12506,6 +12547,26 @@ void DocumentViewport::toggleImageAspectRatioLock()
     update();
 }
 
+void DocumentViewport::toggleObjectLocked()
+{
+    if (!m_document || m_selectedObjects.size() != 1) return;
+    InsertedObject* obj = m_selectedObjects.first();
+    if (!obj || obj->type() == QLatin1String("link")) return;
+    // shortcut: no undo step for this switch; add one if users ask.
+    obj->locked = !obj->locked;
+    if (m_document->isEdgeless()) {
+        Document::TileCoord tileCoord = {0, 0};
+        findPageContainingObject(obj, &tileCoord);
+        m_document->markTileDirty(tileCoord);
+    } else {
+        const int pageIndex = pageIndexForObject(obj);
+        m_document->markPageDirty(pageIndex >= 0 ? pageIndex : m_currentPageIndex);
+    }
+    emit objectSelectionChanged();
+    emit documentModified();
+    update();
+}
+
 void DocumentViewport::sendSelectedToBackground()
 {
     if (!m_document || m_selectedObjects.isEmpty()) return;
@@ -12717,7 +12778,7 @@ void DocumentViewport::renderObjectSelection(QPainter& painter)
         // objectHandleAtPoint), so drawing handles would only advertise
         // gestures that do nothing. The dashed outline still marks the
         // selection.
-        if (obj && obj->type() == QLatin1String("link")) {
+        if (obj && (obj->type() == QLatin1String("link") || obj->locked)) {
             painter.restore();
             return;
         }

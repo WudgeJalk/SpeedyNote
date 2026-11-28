@@ -401,6 +401,8 @@ protected:
     void closeEvent(QCloseEvent *event) override;
     bool m_closeFromEventLoop = false;  ///< closeEvent: answer this close now (closeWithAnswer)
     bool m_closeQueued = false;         ///< Windows: a refused close waits for the event loop
+    bool m_wasZoomed = false;           ///< Windows: the window was maximised at the last position change
+    QRect m_normalRect;                 ///< Windows: where the window was before it was maximised (screen pixels)
     bool m_closeRunning = false;        ///< closeEvent is asking about unsaved notes
 
 #if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)

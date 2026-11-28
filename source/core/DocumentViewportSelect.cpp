@@ -88,6 +88,15 @@ void DocumentViewport::selectByFingerTap(const QPointF& viewportPos)
         update();
         return;
     }
+    // A finger tap on a picture selects it, in any tool; then a finger moves it.
+    // Not a picture fixed to the page: it is background, the picture tool frees it.
+    if (hit && hit->type() == QLatin1String("image") && !hit->locked) {
+        switchForFingerTap(ToolType::ObjectSelect, back);
+        setObjectActionMode(ObjectActionMode::Select);
+        selectObject(hit, false);
+        update();
+        return;
+    }
     if (selectStrokeByTap(viewportPos, back)) {
         return;
     }

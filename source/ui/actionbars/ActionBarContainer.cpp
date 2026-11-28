@@ -493,9 +493,11 @@ void ActionBarContainer::updateVisibility()
             break;
             
         case ToolType::ObjectSelect:
-            // The Add/Select toggle is always available. Contextual object and
-            // clipboard actions are hidden by ObjectSelectActionBar itself.
-            typeToShow = "objectSelect";
+            // Select / Add / Paste are under the toolbar now (ObjectSubToolbar):
+            // this bar is only for what is selected.
+            if (m_hasObjectSelection) {
+                typeToShow = "objectSelect";
+            }
             break;
             
         case ToolType::Highlighter:

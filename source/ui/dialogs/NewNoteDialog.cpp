@@ -506,6 +506,36 @@ bool apply(Document* doc, const NewNoteSpec& spec, QString* error)
     }
     doc->cover = cover;
 
+    // The cover is a real page (the user, 2026-11-23): page 1 shows it, you
+    // write on it and it prints. The writing paper starts on page 2.
+    // shortcut: drawn once into a picture, so a later rename or a new cover does
+    // not change this page; redraw it there if users ask.
+    if (!edgeless && !cover.isEmpty() && doc->pageCount() == 1 && !doc->bundlePath().isEmpty()) {
+        const QSizeF size = spec.pageSize();
+        const qreal scale = 1600.0 / qMax(size.width(), size.height());
+        QImage picture((size * scale).toSize(), QImage::Format_RGB32);
+        picture.fill(CoverPainter::color(cover));  // under the round corners of the book shape
+        {
+            QPainter p(&picture);
+            p.setRenderHint(QPainter::Antialiasing);
+            CoverPainter::paint(p, QRectF(picture.rect()), cover, spec.name.trimmed(),
+                                doc->bundlePath() + QStringLiteral("/assets/images"));
+        }
+        const QString file = QDir::temp().filePath(QStringLiteral("cover-page.png"));
+        const QString name = picture.save(file) ? Paper::adoptUserPaper(file, doc->bundlePath(), nullptr)
+                                                : QString();
+        QFile::remove(file);
+        Page* first = doc->page(0);
+        if (!name.isEmpty() && first && doc->addPage()) {
+            first->backgroundType = Page::BackgroundType::Custom;
+            first->paperId.clear();
+            first->customImage = name;
+            first->customBackground = QPixmap();
+            first->loadCustomBackground(doc->bundlePath());
+            doc->markPageDirty(0);
+        }
+    }
+
     // The defaults are not an edit: an untouched new note closes without a
     // question and is not offered back after a crash (tempNoteHasWork).
     doc->clearModified();

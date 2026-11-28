@@ -512,8 +512,9 @@ private slots:
         bar.layout()->activate();
         const QPoint menu = bar.mapFromGlobal(bar.menuAnchor()) - QPoint(6, 6);
         QVERIFY(bar.hasOwnButtonAt(menu));
-        QVERIFY(!bar.hasOwnButtonAt(QPoint(bar.width() - 46 * 3 + 10, 22)));  // Minimise
-        QVERIFY(!bar.hasOwnButtonAt(QPoint(bar.width() - 10, 22)));           // Close
+        QVERIFY(bar.hasOwnButtonAt(QPoint(bar.width() - 46 * 3 + 10, 22)));   // Minimise
+        QVERIFY(bar.hasOwnButtonAt(QPoint(bar.width() - 46 - 1, 22)));        // Side of maximise
+        QVERIFY(bar.hasOwnButtonAt(QPoint(bar.width() - 10, 22)));            // Close
         QVERIFY(!bar.hasOwnButtonAt(QPoint(bar.width() / 4, 22)));            // Between buttons
         QVERIFY(!bar.hasOwnButtonAt(QPoint(5, 60)));                          // Below the bar
     }
@@ -625,6 +626,59 @@ private slots:
         }
 
         QSettings settings;
+        settings.remove(QStringLiteral("pen"));
+        for (auto it = saved.constBegin(); it != saved.constEnd(); ++it)
+            settings.setValue(it.key(), it.value());
+    }
+
+    // Multi-pen: two named pens of one pen type keep their own sizes; the loop
+    // button goes round them; another pen type keeps the usual sizes.
+    void testMultiPen() {
+        QMap<QString, QVariant> saved;  // The bar writes the real settings: put them back
+        QSettings settings;
+        for (const QString& key : settings.allKeys())
+            if (key.startsWith(QStringLiteral("pen/"))) saved.insert(key, settings.value(key));
+        settings.remove(QStringLiteral("pen"));
+        {
+            settings.setValue(QStringLiteral("pen/penType"), int(StrokeStyle::Ball));
+            PenSubToolbar bar;
+            QVERIFY(bar.m_multiPenButton->isHidden());   // off: as before
+            const qreal usual = bar.currentThickness();
+
+            settings.setValue(QStringLiteral("pen/multiPen"), true);
+            const QString a4 = PenSubToolbar::addMultiPen(StrokeStyle::Ball, QStringLiteral("A4"));
+            const QString a5 = PenSubToolbar::addMultiPen(StrokeStyle::Ball, QStringLiteral("A5"));
+            QCOMPARE(PenSubToolbar::multiPenIds(StrokeStyle::Ball), QStringList({a4, a5}));
+            bar.refreshFromSettings();
+            QVERIFY(!bar.m_multiPenButton->isHidden());
+            QCOMPARE(bar.m_multiPenId, a4);
+            QCOMPARE(bar.currentThickness(), usual);     // a new pen starts from the usual sizes
+
+            StrokePreset wide = bar.m_presets[bar.m_selectedPreset];
+            wide.width = usual + 3.0;
+            bar.applyPreset(bar.m_selectedPreset, wide);  // the size of A4 only
+            qreal emitted = 0;
+            connect(&bar, &PenSubToolbar::penThicknessChanged, [&](qreal w) { emitted = w; });
+            bar.cycleMultiPen();
+            QCOMPARE(bar.m_multiPenId, a5);
+            QCOMPARE(emitted, usual);
+            QVERIFY(bar.m_multiPenLabel && !bar.m_multiPenLabel->isHidden());
+            QCOMPARE(bar.m_multiPenLabel->text(), QStringLiteral("A5"));
+            bar.cycleMultiPen();                          // wraps
+            QCOMPARE(bar.m_multiPenId, a4);
+            QCOMPARE(emitted, usual + 3.0);
+
+            bar.setPenType(StrokeStyle::Fountain);        // no pens of this type
+            QVERIFY(bar.m_multiPenButton->isHidden());
+            QCOMPARE(bar.currentThickness(), usual);
+            bar.setPenType(StrokeStyle::Ball);
+            QCOMPARE(bar.currentThickness(), usual + 3.0);
+
+            settings.remove(PenSubToolbar::multiPenKey(StrokeStyle::Ball, a4));   // deleted while in use
+            bar.refreshFromSettings();
+            QCOMPARE(bar.m_multiPenId, a5);
+            QCOMPARE(bar.currentThickness(), usual);
+        }
         settings.remove(QStringLiteral("pen"));
         for (auto it = saved.constBegin(); it != saved.constEnd(); ++it)
             settings.setValue(it.key(), it.value());

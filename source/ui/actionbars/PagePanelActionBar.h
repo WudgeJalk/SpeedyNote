@@ -77,6 +77,10 @@ public:
      * @brief Check if the lock is active.
      */
     bool isLocked() const;
+
+    /// For the end of the Pages side panel (the user, 2026-11-23: every option
+    /// of a side panel sits at its end): two rows, no frame, no lock button.
+    void setInPanel();
     
     /**
      * @brief Reset the delete button to normal state.
@@ -185,6 +189,9 @@ signals:
      */
     void lockChanged(bool locked);
 
+protected:
+    void setupStyle() override;
+
 private slots:
     void onWheelPageChanged(int page);
 
@@ -215,6 +222,7 @@ private:
     int m_pageCount = 1;
     bool m_autoLayoutEnabled = false;
     bool m_selectMode = false;
+    bool m_inPanel = false;
 };
 
 #endif // PAGEPANELACTIONBAR_H

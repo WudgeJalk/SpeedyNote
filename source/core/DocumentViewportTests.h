@@ -6507,6 +6507,7 @@ public:
             ~Restore() { s = saved; }
         } restore;
         restore.s.handArrows = true;
+        restore.s.handArrowTwoStrokes = true;
         restore.s.stabilisation = 0;
         restore.s.drawAndHold = false;   // no timer: the test cleans by hand
         restore.s.cornerAngle = 35;

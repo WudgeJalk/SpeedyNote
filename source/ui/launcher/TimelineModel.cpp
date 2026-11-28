@@ -1,3 +1,6 @@
+#include "../../core/LibraryTree.h"
+#include <QJsonObject>
+#include <QSettings>
 #include "TimelineModel.h"
 #include "../../core/NotebookLibrary.h"
 
@@ -242,7 +245,34 @@ void TimelineModel::buildDisplayList()
     
     QString currentSection;
     
-    for (const NotebookInfo& notebook : notebooks) {
+    // The user, 2026-11-23: a note that is in a notebook of the Library shows
+    // as that notebook, once, at the place of its note used last. The list is
+    // newest first, so the first note met of a notebook is that note.
+    // Setting "timeline/groupNotebooks" (on).
+    QSettings settings("SpeedyNote", "App");
+    const QStringList roots = settings.value("timeline/groupNotebooks", true).toBool()
+        ? settings.value("library/notebooks").toStringList() : QStringList();
+    QSet<QString> shownRoots;
+
+    for (NotebookInfo notebook : notebooks) {
+        for (const QString& root : roots) {
+            if (!root.isEmpty() && notebook.bundlePath.startsWith(root + QLatin1Char('/'), Qt::CaseInsensitive)) {
+                notebook.notebookRoot = root;
+                break;
+            }
+        }
+        if (!notebook.notebookRoot.isEmpty()) {
+            if (shownRoots.contains(notebook.notebookRoot)) continue;
+            shownRoots.insert(notebook.notebookRoot);
+            notebook.name = LibraryTree::displayName(notebook.notebookRoot);
+            notebook.cover = LibraryTree::cover(notebook.notebookRoot);
+            if (notebook.cover.isEmpty()) {   // no cover chosen: a plain book in the notebook's colour
+                const QColor color = LibraryTree::color(notebook.notebookRoot);
+                notebook.cover = QJsonObject{{"design", "spine"}};
+                if (color.isValid()) notebook.cover["color"] = color.name();
+            }
+        }
+
         // Determine section based on lastAccessed
         QString section = sectionForDate(notebook.lastAccessed);
         

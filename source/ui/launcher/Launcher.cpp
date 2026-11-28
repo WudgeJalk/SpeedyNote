@@ -933,6 +933,16 @@ void Launcher::onTimelineItemClicked(const QModelIndex& index)
     
     // Get the bundle path
     QString bundlePath = index.data(TimelineModel::BundlePathRole).toString();
+    // A card that stands for a whole notebook: open the note used last (the
+    // default, the user's choice) or the notebook on the Library page.
+    // Setting "timeline/notebookTap": "note" or "library".
+    const NotebookInfo info = index.data(TimelineModel::NotebookInfoRole).value<NotebookInfo>();
+    if (!info.notebookRoot.isEmpty()
+        && QSettings("SpeedyNote", "App").value("timeline/notebookTap", "note").toString() == QLatin1String("library")) {
+        m_libraryView->showNotebook(info.notebookRoot, QFileInfo(bundlePath).path());
+        switchToView(View::Library);
+        return;
+    }
     if (!bundlePath.isEmpty()) {
         emit notebookSelected(bundlePath);
     }

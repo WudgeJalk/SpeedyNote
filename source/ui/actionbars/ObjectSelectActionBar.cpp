@@ -27,8 +27,8 @@ void ObjectSelectActionBar::setupButtons()
 
     // === Aspect ratio lock (image-only, placed at top) ===
     m_aspectLockButton = new ActionBarButton(this);
-    m_aspectLockButton->setIconName("lock");
-    m_aspectLockButton->setToolTip(tr("Lock/Unlock Aspect Ratio"));
+    m_aspectLockButton->setIconName("proportions");
+    m_aspectLockButton->setToolTip(tr("Keep the proportions of the picture when you resize it"));
     m_aspectLockButton->setCheckable(true);
     addButton(m_aspectLockButton);
     connect(m_aspectLockButton, &ActionBarButton::clicked, this, [this]() {
@@ -36,6 +36,17 @@ void ObjectSelectActionBar::setupButtons()
         emit aspectRatioLockRequested();
     });
     
+    // === Fixed to the page: it cannot be moved or resized until you free it ===
+    m_pageLockButton = new ActionBarButton(this);
+    m_pageLockButton->setIconName("lock");
+    m_pageLockButton->setToolTip(tr("Fix to the page: it cannot be moved or resized"));
+    m_pageLockButton->setCheckable(true);
+    addButton(m_pageLockButton);
+    connect(m_pageLockButton, &ActionBarButton::clicked, this, [this]() {
+        m_pageLockButton->setChecked(!m_pageLockButton->isChecked());
+        emit pageLockToggleRequested();
+    });
+
     // === OCR lock (ocr-text-only, placed after aspect lock) ===
     m_ocrLockButton = new ActionBarButton(this);
     m_ocrLockButton->setIconName("lock");
@@ -139,7 +150,7 @@ void ObjectSelectActionBar::updateButtonStates()
     // Add/Select is the persistent entry point for ObjectSelect, including idle
     // state, but means nothing under a tool that never reads the mode.
     if (m_actionModeButton) {
-        m_actionModeButton->setVisible(m_objectToolActive);
+        m_actionModeButton->setVisible(false);  // it lives under the toolbar now (ObjectSubToolbar)
     }
 
     // Aspect lock: visible only when a single ImageObject is selected
@@ -147,6 +158,10 @@ void ObjectSelectActionBar::updateButtonStates()
         m_aspectLockButton->setVisible(m_hasSelection && m_isImageSelected);
     }
     
+    if (m_pageLockButton) {
+        m_pageLockButton->setVisible(m_hasSelection && m_canPageLock);
+    }
+
     // OCR lock and conversion: visible only when a single OcrTextObject is selected
     if (m_ocrLockButton) {
         m_ocrLockButton->setVisible(m_hasSelection && m_isOcrTextSelected);
@@ -223,11 +238,19 @@ void ObjectSelectActionBar::setHasImageInClipboard(bool hasImage)
 
 void ObjectSelectActionBar::setActionModeState(DocumentViewport::ObjectActionMode mode)
 {
+    emit actionModeStateSet(mode);
     if (m_actionMode == mode)
         return;
 
     m_actionMode = mode;
     updateActionModeButton();
+}
+
+void ObjectSelectActionBar::updatePageLock(bool canLock, bool locked)
+{
+    m_canPageLock = canLock;
+    if (m_pageLockButton) m_pageLockButton->setChecked(locked);
+    updateButtonStates();
 }
 
 void ObjectSelectActionBar::updateActionModeButton()
